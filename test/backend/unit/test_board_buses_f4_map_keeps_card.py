@@ -255,9 +255,11 @@ class TestEachPartOfTheIdentityCounts:
 
     def test_another_controller(self, worker):
         w = worker(bus_map={'spi': [probe_entry('a', pin_cs(CHIP_A_CS), 0xA0)]})
-        republish(w, probe_entry('a', pin_cs(CHIP_A_CS), 0xA0, bus_id=2))
+        # The map names the SoC's unit (VSPI = 3); QEMU reports VSPI as its
+        # bus 1 and HSPI as its bus 0 (esp32_worker._spi_unit).
+        republish(w, probe_entry('a', pin_cs(CHIP_A_CS), 0xA0, bus_id=3))
         assert self._first(w, CHIP_A_CS, bus=0) == 0xFF
-        assert self._first(w, CHIP_A_CS, bus=2) == 0xA0
+        assert self._first(w, CHIP_A_CS, bus=1) == 0xA0
 
     def test_another_pin_map(self, worker):
         # The select leg of the model moved while the bus entry did not: the

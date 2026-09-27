@@ -26,6 +26,7 @@ import {
   loadSdBusChip,
   SdSpiCard,
   sdCardRemoteBlobWrite,
+  sdCardHasRemoteModel,
   sdCardRemoteModel,
   sdSpiFabricDevice,
 } from './sdSpiCard';
@@ -1012,6 +1013,7 @@ PartSimulationRegistry.register('microsd-card', {
         // nothing drives reads as deselected and stays quiet.
         csWhenFloating: 'deselected',
         remoteModel: () => sdCardRemoteModel(card, imageBytes),
+        hasRemoteModel: () => sdCardHasRemoteModel(card, imageBytes),
         // What the guest writes on a remote board comes back as spans: the
         // worker no longer relays the bytes of a card transaction no sink can
         // see, and this copy is what the panel lists.

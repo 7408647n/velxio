@@ -304,10 +304,13 @@ export class Esp32Bridge {
    * the tab through this and nothing else.
    */
   onSpiBatch: ((mosi: Uint8Array) => void) | null = null;
-  /** Fires on every CS line change emitted by the SoC's SPI peripheral.
-   * `csIdx` is the index of the CS pin within the SPI bus (0-3 typical),
-   * `low` is true when CS goes LOW (slave selected), false when HIGH. */
-  onSpiCsChange: ((csIdx: number, low: boolean) => void) | null = null;
+  /** Fires on every CS line change emitted by the SoC's SPI peripheral that
+   * reaches a pad (the worker keeps the others). `csIdx` is the index of the
+   * CS pin within the SPI bus (0-3 typical), `low` is true when CS goes LOW
+   * (slave selected), false when HIGH, and `unit` the controller as the SoC
+   * names it (VSPI = 3), the map's numbering; undefined from a worker that
+   * predates the translation. */
+  onSpiCsChange: ((csIdx: number, low: boolean, unit?: number) => void) | null = null;
   /**
    * A model the worker hosts wrote `data` at `offset` of its blob `name` (the
    * guest saved to the card). The worker keeps the bytes of a transaction no
@@ -664,7 +667,8 @@ export class Esp32Bridge {
             // its chip select low to select. This read `level === 1` until
             // F4, which was harmless only because nothing consumed the
             // callback; the fabric's remote port does.
-            this.onSpiCsChange?.(csIdx, level === 0);
+            const unit = typeof msg.data.bus === 'number' ? (msg.data.bus as number) : undefined;
+            this.onSpiCsChange?.(csIdx, level === 0, unit);
           }
           break;
         }

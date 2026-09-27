@@ -36,6 +36,17 @@ function drives(m: SpiMember): boolean {
   return m.desc.pins.miso === undefined ? false : m.misoPin !== undefined;
 }
 
+/**
+ * Does this device carry a portable model? Through the cheap question when the
+ * part answers it: the full `remoteModel()` of a microSD is its whole image in
+ * base64, and this is asked on every chip-select edge (2026-09-27: one dump
+ * per peripheral CS pulse stalled the tab until the backend dropped the socket).
+ */
+export function hasRemoteModel(desc: SpiDeviceDescriptor): boolean {
+  if (desc.hasRemoteModel) return desc.hasRemoteModel();
+  return desc.remoteModel?.() != null;
+}
+
 /** Bus-side view of one registered device. */
 export interface SpiMember {
   readonly owner: string;
@@ -161,7 +172,7 @@ export class SpiBus {
     if (!this.controller?.remote) return;
     for (const m of this.selectedList) {
       if (!drives(m)) continue;
-      if (m.desc.remoteModel?.() != null) continue;
+      if (hasRemoteModel(m.desc)) continue;
       this.report({
         code: 'bus-remote-responder-missing',
         bus: 'spi',
