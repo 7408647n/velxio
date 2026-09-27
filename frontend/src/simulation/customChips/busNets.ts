@@ -44,6 +44,14 @@ export interface BoardPinHost extends PinManagerLike {
   onPinChange?(pin: number, cb: (pin: number, state: boolean) => void): () => void;
   peekPad?(pin: number): { drive: 'low' | 'high' | 'z'; pull: 0 | 1 | 2 } | undefined;
   onPadChange?(pin: number, cb: () => void): () => void;
+  /**
+   * What an engine without the pad channel still reports: the direction and
+   * the internal pull the guest programmed (PinManager.setPinDirection /
+   * setPinPull, fed by every ESP32 bridge's onPinDir / onPinPull). Read only
+   * when peekPad has nothing for the pin.
+   */
+  getPinDirection?(pin: number): 0 | 1 | undefined;
+  getPinPull?(pin: number): 0 | 1 | 2;
   /** The net answers every level proposed for the pin (PinManager.claimLevel). */
   claimLevel?(
     pin: number,
@@ -120,14 +128,37 @@ const boardNets = new Map<BoardPinHost, Map<number, BoardNet>>();
 
 /** The MCU's pad as a driver of its own pin: strong while it drives, a pull
  *  while released with one, nothing while released and floating. A pad the
- *  engine never reported on has not been touched by the guest: floating. */
+ *  engine never reported on has not been touched by the guest: floating,
+ *  unless the engine reports pulls on their own channel (reportedPull). */
 function padDrive(host: BoardPinHost, pin: number): Drive {
   const pad = host.peekPad?.(pin);
-  if (!pad) return HIGHZ_DRIVE;
+  if (!pad) return reportedPull(host, pin);
   if (pad.drive === 'low') return { value: 0, strength: Strength.STRONG };
   if (pad.drive === 'high') return { value: 1, strength: Strength.STRONG };
   if (pad.pull === 1) return { value: 1, strength: Strength.PULL };
   if (pad.pull === 2) return { value: 0, strength: Strength.PULL };
+  return HIGHZ_DRIVE;
+}
+
+/**
+ * The pad of an engine that has no pad channel (the in-browser ESP32 engines
+ * and the QEMU bridge): the pull the guest enabled on an input, from the
+ * direction and pull channels those engines do report. An output stays
+ * Hi-Z here, as before: those engines put their driven level on the level
+ * channel, and proposeBoardPin passes it as the wire's.
+ *
+ * Without this the pull of INPUT_PULLUP was invisible to the net, so a chip
+ * that released an open-collector line (vx_pin_set_mode(VX_INPUT), the A3144
+ * and every IRQ idiom) resolved it to Z, and a Z leaves the wire where the
+ * chip's last pull put it: the ESP32 read LOW for the rest of the run and
+ * never saw a second falling edge (finding
+ * esp32-open-collector-release-reads-low).
+ */
+function reportedPull(host: BoardPinHost, pin: number): Drive {
+  if (host.getPinDirection?.(pin) === 1) return HIGHZ_DRIVE;
+  const pull = host.getPinPull?.(pin) ?? 0;
+  if (pull === 1) return { value: 1, strength: Strength.PULL };
+  if (pull === 2) return { value: 0, strength: Strength.PULL };
   return HIGHZ_DRIVE;
 }
 

@@ -940,7 +940,22 @@ class WasmChipRuntime:
         def fd_read(*_args):
             return 28
 
-        def fd_fdstat_get(*_args):
+        def fd_fdstat_get(fd, stat_ptr):
+            # wasi-libc's isatty asks this, and stdout's buffering hangs on
+            # the answer: a character device without seek/tell rights is a
+            # terminal, so printf flushes at every newline; anything else
+            # switches stdout to full buffering after its first write. It
+            # used to answer success without writing the struct, so a chip's
+            # first printf line came out and the rest sat in libc's 1 KB
+            # buffer (finding chip-printf-fully-buffered). Same answer as
+            # the browser runtime's WasiShim.
+            if fd < 0 or fd > 2:
+                return 8  # EBADF
+            # __wasi_fdstat_t: u8 filetype (2 = CHARACTER_DEVICE), u16 flags,
+            # u64 rights_base (FD_READ for stdin, FD_WRITE otherwise; never
+            # FD_SEEK or FD_TELL), u64 rights_inheriting. 24 bytes.
+            rights = 1 << 1 if fd == 0 else 1 << 6
+            self._memory.write(self._store, struct.pack("<BBHIQQ", 2, 0, 0, 0, rights, 0), stat_ptr)
             return 0
 
         def fd_prestat_get(*_args):

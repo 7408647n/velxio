@@ -98,7 +98,30 @@ export class WasiShim {
   fd_close = (): number => 0;
   fd_seek = (): number => ENOSYS;
   fd_read = (): number => ENOSYS;
-  fd_fdstat_get = (): number => 0;
+  /**
+   * wasi-libc's isatty asks this, and stdout's buffering hangs on the
+   * answer: a character device without seek/tell rights is a terminal, so
+   * printf flushes at every newline; anything else switches stdout to full
+   * buffering after its first write. It used to answer success without
+   * writing the struct, so a chip's first printf line came out and the rest
+   * sat in libc's 1 KB buffer (finding chip-printf-fully-buffered). fds 0-2
+   * are the terminal; any other fd has no file behind it.
+   */
+  fd_fdstat_get = (fd: number, statPtr: number): number => {
+    if (fd < 0 || fd > 2) return 8; // EBADF
+    const dv = this._dv();
+    // __wasi_fdstat_t: u8 filetype, u16 flags @2, u64 rights_base @8,
+    // u64 rights_inheriting @16 (24 bytes).
+    dv.setUint8(statPtr, 2); // __WASI_FILETYPE_CHARACTER_DEVICE
+    dv.setUint8(statPtr + 1, 0);
+    dv.setUint16(statPtr + 2, 0, true);
+    dv.setUint32(statPtr + 4, 0, true);
+    // FD_READ (1 << 1) for stdin, FD_WRITE (1 << 6) for stdout/stderr; no
+    // FD_SEEK (1 << 2) or FD_TELL (1 << 5), which is what makes it a tty.
+    dv.setBigUint64(statPtr + 8, fd === 0 ? 2n : 64n, true);
+    dv.setBigUint64(statPtr + 16, 0n, true);
+    return 0;
+  };
   fd_prestat_get = (): number => 8;
   fd_prestat_dir_name = (): number => ENOSYS;
 
