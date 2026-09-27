@@ -63,8 +63,11 @@ export function connectMcuEdgesToService(service: CircuitSimulationService): () 
     void service.handleMcuEdge(boardId, pinName, entry.state, entry.vcc);
   }
 
-  function schedulePin(boardId: string, pinName: string, state: boolean, vcc: number): void {
-    const key = pinKey(boardId, pinName);
+  /** `key` is pinKey(boardId, pinName), built once per listener: this runs on
+   *  every MCU edge, and a bit-banged bus makes millions of them (building
+   *  the string per edge, and hashing the new string for the lookup, was the
+   *  costliest listener on the pin). */
+  function schedulePin(key: string, boardId: string, pinName: string, state: boolean, vcc: number): void {
     const existing = pending.get(key);
     if (existing) {
       existing.state = state; // last-state-wins
@@ -180,6 +183,7 @@ export function connectMcuEdgesToService(service: CircuitSimulationService): () 
     }
 
     for (const { pin, pinName } of listenPins) {
+      const key = pinKey(boardId, pinName);
       const unsub = pm.onPinChange(pin, (_p, state) => {
         // Suppress digital edges when the pin has active PWM. The OCR-based
         // PWM duty is converted to a DC-averaged voltage in NetlistBuilder
@@ -190,7 +194,7 @@ export function connectMcuEdgesToService(service: CircuitSimulationService): () 
         // making `analogWrite(pin, 128)` look like a binary blink instead
         // of a steady 2.5 V (Fade-LED example regression).
         if (pm.getPwmValue(pin) > 0) return;
-        schedulePin(boardId, pinName, state, vcc);
+        schedulePin(key, boardId, pinName, state, vcc);
       });
       pinSubs.set(pin, unsub);
 

@@ -991,6 +991,13 @@ export class ChipInstance {
     const p = this.pins[handle];
     if (!p || p.arduinoPin == null) return;
     let lastState = this.pinManager.getPinState(p.arduinoPin) ? 1 : 0;
+    // The callback, resolved from the function table on the first edge and
+    // kept: WebAssembly.Table.get on every edge was the dearest step of a
+    // watch that a bit-banged clock fires millions of times. The entry cannot
+    // move under a running chip (C code never rewrites the table, and a
+    // re-instantiated module drops its watches with the instance).
+    let cached: WebAssembly.Table | undefined;
+    let fn: ((ud: number, pin: number, value: number) => void) | null = null;
     const unsub = this.pinManager.onPinChange(p.arduinoPin, (_pin, state) => {
       const newState = state ? 1 : 0;
       const isRising = lastState === 0 && newState === 1;
@@ -1001,7 +1008,10 @@ export class ChipInstance {
       if ((isRising && wantRising) || (isFalling && wantFalling)) {
         const table = this.exports?.__indirect_function_table as WebAssembly.Table | undefined;
         if (!table) return;
-        const fn = table.get(cbIdx) as ((ud: number, pin: number, value: number) => void) | null;
+        if (table !== cached) {
+          cached = table;
+          fn = table.get(cbIdx) as ((ud: number, pin: number, value: number) => void) | null;
+        }
         if (fn) {
           try { fn(userData, handle, newState); } catch { /* swallow */ }
         }
