@@ -19,7 +19,7 @@
 
 import { PartSimulationRegistry } from './PartSimulationRegistry';
 import { requestLine, releaseLineGap, recordPartGap } from '../line/requestLine';
-import { setAdcVoltage, emitPropertyChange, analogRailVolts, guestMillis } from './partUtils';
+import { setAdcVoltage, emitPropertyChange, analogRailVolts, guestMillis, elementNumber } from './partUtils';
 import { registerSensorUpdate, unregisterSensorUpdate } from '../SensorUpdateRegistry';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
 
@@ -79,7 +79,11 @@ PartSimulationRegistry.register('tilt-switch', {
  * SPICE path already used the board's rail, so the two only agreed on AVR.
  */
 PartSimulationRegistry.register('ntc-temperature-sensor', {
-  attachEvents: (_element, simulator, getArduinoPinHelper, componentId) => {
+  attachEvents: (element, simulator, getArduinoPinHelper, componentId) => {
+    // The project's temperature arrives on the element (the canvas copies
+    // properties onto it); the panel keeps the element in step while running,
+    // so a re-attach (Run after a rebuild, Reset) starts from the right value.
+    const el = element as unknown as { temperature?: unknown };
     const pin = getArduinoPinHelper('OUT');
 
     const NTC_R0 = 10_000;
@@ -91,11 +95,14 @@ PartSimulationRegistry.register('ntc-temperature-sensor', {
       return Math.max(0, Math.min(vcc, vcc * (rNtc / (rNtc + R_PULL))));
     };
 
-    // Room temperature default
-    if (pin !== null) setAdcVoltage(simulator, pin, tempToVolts(25));
+    // The project's temperature, room temperature when it sets none. This
+    // used to be 25 C whatever the project said, while the SPICE path read
+    // the property: the two disagreed on any NTC set to something else.
+    if (pin !== null) setAdcVoltage(simulator, pin, tempToVolts(elementNumber(el.temperature, 25)));
 
     registerSensorUpdate(componentId, (values) => {
       if ('temperature' in values) {
+        el.temperature = values.temperature;
         if (pin !== null) {
           setAdcVoltage(simulator, pin, tempToVolts(values.temperature as number));
         }

@@ -3,7 +3,7 @@ import { PartSimulationRegistry } from './PartSimulationRegistry';
 import { attachSpiDevice } from '../buses';
 import type { AnySimulator, PartSimulationLogic } from './PartSimulationRegistry';
 import { RP2040Simulator } from '../RP2040Simulator';
-import { getADC, setAdcVoltage, emitPropertyChange } from './partUtils';
+import { getADC, setAdcVoltage, emitPropertyChange, elementNumber } from './partUtils';
 import { registerSensorUpdate, unregisterSensorUpdate } from '../SensorUpdateRegistry';
 import { LOG_SLIDER_STEPS, logSliderToValue } from '../sensorControlConfig';
 
@@ -157,9 +157,12 @@ PartSimulationRegistry.register('photoresistor-sensor', {
 
     const unsubscribers: (() => void)[] = [];
 
-    // Inject initial mid-range voltage (simulate moderate light, ~500 lux)
+    // The project's illumination (the canvas copies properties.lux onto the
+    // element; the panel keeps it in step while running), 500 lux (2.5 V)
+    // when it sets none. This used to be 2.5 V whatever the project said.
+    const el = element as unknown as { lux?: unknown };
     if (pinAO !== null) {
-      setAdcVoltage(avrSimulator, pinAO, 2.5);
+      setAdcVoltage(avrSimulator, pinAO, (elementNumber(el.lux, 500) / 1000) * 5.0);
     }
 
     // Watch element's 'input' events in case the element supports it
@@ -196,6 +199,7 @@ PartSimulationRegistry.register('photoresistor-sensor', {
     // SensorControlPanel: lux 0–1000 → volts 0–5
     registerSensorUpdate(componentId, (values) => {
       if ('lux' in values) {
+        el.lux = values.lux;
         if (pinAO !== null) {
           setAdcVoltage(avrSimulator, pinAO, ((values.lux as number) / 1000) * 5.0);
         }

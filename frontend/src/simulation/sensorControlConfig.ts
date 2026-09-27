@@ -23,6 +23,10 @@ export interface SliderControl {
    *  slider crams all the behaviour into its first few percent — the
    *  night-light example toggled at 2% of travel. Requires min >= 0. */
   scale?: 'log';
+  /** The component property that holds this control's PROJECT value, when it
+   *  is not `key` itself (the IR remote's `address` lives in `irAddress`).
+   *  Reset and the panel read the project value from it. */
+  propertyKey?: string;
 }
 
 export interface ButtonControl {
@@ -362,6 +366,7 @@ export const SENSOR_CONTROLS: Record<string, SensorControlDef> = {
       {
         type: 'slider',
         key: 'address',
+        propertyKey: 'irAddress',
         label: 'Address',
         min: 0,
         max: 255,
@@ -373,6 +378,7 @@ export const SENSOR_CONTROLS: Record<string, SensorControlDef> = {
       {
         type: 'slider',
         key: 'command',
+        propertyKey: 'irCommand',
         label: 'Command',
         min: 0,
         max: 255,
@@ -566,6 +572,47 @@ export function getSensorControlForComponent(component: {
   properties?: Record<string, unknown>;
 }): SensorControlDef | undefined {
   return getSensorControl(component.metadataId) ?? instanceResolver?.(component);
+}
+
+/** A number from a stored property value: numbers as they are, numeric
+ *  strings (the property dialog and older saves write strings, hex included:
+ *  the IR remote stores '0x45'), and nothing else. */
+function propertyNumber(raw: unknown): number | undefined {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined;
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    const n = Number(raw.trim());
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The values a sensor has in the PROJECT, in control-key space: what the user
+ * configured (the component's properties, or `properties.attrs` on a custom
+ * chip, where the chip reads them through vx_attr_read), with the panel default
+ * only for a control the project leaves unset.
+ *
+ * Reset brings a sensor back to these and the panel opens on them. A slider
+ * moved during a run is a live input and never changes them: the parts that
+ * mirror a live value into properties (for the SPICE netlist) do it through
+ * the store's applyLivePropertyChange, which Reset takes back out.
+ */
+export function projectSensorValues(
+  component: { id: string; metadataId?: string; properties?: Record<string, unknown> },
+  def: SensorControlDef,
+): Record<string, number | boolean> {
+  const props = component.properties ?? {};
+  const source =
+    component.metadataId === 'custom-chip'
+      ? ((props.attrs ?? {}) as Record<string, unknown>)
+      : props;
+  const values: Record<string, number | boolean> = { ...def.defaultValues };
+  for (const ctrl of def.controls) {
+    if (ctrl.type !== 'slider') continue;
+    const n = propertyNumber(source[ctrl.propertyKey ?? ctrl.key]);
+    if (n !== undefined) values[ctrl.key] = n;
+  }
+  return values;
 }
 
 export function registerSensorControls(defs: Record<string, SensorControlDef>): void {

@@ -31,6 +31,20 @@ export function emitPropertyChange(componentId: string, propName: string, value:
   window.dispatchEvent(new CustomEvent(PROPERTY_CHANGE_EVENT, { detail }));
 }
 
+/**
+ * A numeric value the canvas copied onto an element (a number, or the numeric
+ * string the property dialog and older saves store), or `fallback` when the
+ * project leaves it unset or it is not a number.
+ */
+export function elementNumber(raw: unknown, fallback: number): number {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : fallback;
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    const n = Number(raw.trim());
+    return Number.isFinite(n) ? n : fallback;
+  }
+  return fallback;
+}
+
 /** Read the ADC instance from the simulator (returns null if not initialized) */
 export function getADC(avrSimulator: AnySimulator): any | null {
   return (avrSimulator as any).getADC?.() ?? null;
