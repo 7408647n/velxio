@@ -58,11 +58,16 @@ RUN cd /qemu \
       exit 1 ; \
     fi
 
+# The asset versions the gated endpoint serves right now. The download below
+# lives in a cached layer, so a new libqemu on velxio.dev would otherwise never
+# reach a rebuilt image: bump this when an asset is republished (2026-09-27:
+# libqemu-xtensa 1.2.8 stopped the phantom camera VSYNC on GPIO25, #333).
+ARG QEMU_ASSETS_REV=xtensa-1.2.8
 # Download arch-specific .so and arch-independent ROM files.
 # The gated endpoint serves the same byte-for-byte content as the legacy
 # GitHub Release path; asset paths just drop the .so extension since the
 # license module's manifest carries the real filename.
-RUN cd /qemu \
+RUN echo "[qemu-provider] assets rev ${QEMU_ASSETS_REV}" && cd /qemu \
  && for base in libqemu-xtensa libqemu-riscv32; do \
       f="${base}.so" ; \
       if [ -f "$f" ]; then \
