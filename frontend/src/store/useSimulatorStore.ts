@@ -1801,7 +1801,7 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
   pinManagerMap.set(INITIAL_BOARD_ID, initialPm);
 
   function getOscilloscopeCallback(boardId: string) {
-    return (pin: number, state: boolean, timeMs: number) => {
+    const feed = (pin: number, state: boolean, timeMs: number) => {
       const { channels, pushSample } = useOscilloscopeStore.getState();
       for (const ch of channels) {
         // Analog channels are fed by the SPICE bridge, not by GPIO edges —
@@ -1810,6 +1810,19 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
         if (ch.boardId === boardId && ch.pin === pin) pushSample(ch.id, timeMs, state);
       }
     };
+    // Whether a sample for this pin would land anywhere. A producer whose
+    // timestamp costs something (the in-browser engines read
+    // performance.now() per edge, a few hundred ns in some browsers, times
+    // millions of edges on a bit-banged bus) asks first; the answer is the
+    // same test the feed runs, so skipping it drops nothing.
+    const wants = (pin: number): boolean => {
+      const { channels } = useOscilloscopeStore.getState();
+      for (const ch of channels) {
+        if (ch.kind === 'digital' && ch.boardId === boardId && ch.pin === pin) return true;
+      }
+      return false;
+    };
+    return Object.assign(feed, { wants });
   }
 
   // Create + fully wire the simulation bridge and shim for an ESP32-family
