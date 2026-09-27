@@ -52,6 +52,15 @@ PIXELS = [(i * 37) & 0xFF for i in range(640)]
 # the ESP32's SPI bridge reports for the first one.
 HW_CS0 = 0
 
+# The two numberings of the classic ESP32's general-purpose SPI controllers:
+# the SoC's units, which the tab's bus map uses, and the ids QEMU's
+# picsimlab_spi shim reports them by (attach order, spi[2] first).
+HSPI, VSPI = 2, 3
+QEMU_HSPI, QEMU_VSPI = 0, 1
+# gpio_sig_map.h: VSPICS0_OUT_IDX, and the "plain GPIO output" out_sel value.
+VSPICS0_OUT = 68
+GPIO_OUT = 256
+
 
 def probe_entry(owner: str, cs: dict, sig: int, bus_id=None) -> dict:
     """The bus-map entry the tab sends for a responder with a portable model.
@@ -265,45 +274,132 @@ class TestHardwareChipSelect:
         w.cs(HW_CS0, 1)
         assert w.spi([0x33]) == [0xFF]
 
-    def test_a_gpio_on_that_pad_does_not_select_it(self, worker):
-        """The pad belongs to the peripheral: a level the tab injects on it as
+    def test_a_gpio_on_that_pad_does_not_select_it_while_the_peripheral_drives_it(self, worker):
+        """The matrix routes the pad to the peripheral's CS0 (setHwCs(true)):
+        the pad belongs to the peripheral, and a level the tab injects on it as
         a plain GPIO must not be read as a chip select."""
         entry = probe_entry('hw', {'kind': 'hw', 'index': HW_CS0, 'gpio': CHIP_A_CS,
-                                   'active_low': True}, 0xC0)
+                                   'active_low': True}, 0xC0, bus_id=VSPI)
         w = worker(bus_map={'spi': [entry]})
+        w.guest('matrix', out_sel={str(CHIP_A_CS): VSPICS0_OUT})
+        w.pin(CHIP_A_CS, 1)
         w.pin(CHIP_A_CS, 0)
-        assert w.spi([0x11]) == [0xFF]
+        assert w.spi([0x11], bus=QEMU_VSPI) == [0xFF]
+        w.cs(HW_CS0, 1, bus=QEMU_VSPI)
+        w.cs(HW_CS0, 0, bus=QEMU_VSPI)
+        assert w.spi([0x11], bus=QEMU_VSPI) == [0xC0]
+
+    def test_a_pad_the_sketch_drives_as_a_gpio_follows_the_gpio(self, worker):
+        """GPIO 5 is VSPI's CS0 in the pin table, so the tab sends it as `hw`,
+        but SD.begin(5) drives it with digitalWrite and the matrix leaves the
+        pad a GPIO (signal 256). The peripheral still toggles its own CS0
+        around every byte, on no pad at all. The device follows the pad:
+        selected while the GPIO is low, whatever CS0 does, and deselected while
+        it is high even inside a peripheral transaction (the 74 dummy clocks an
+        SD card needs with CS high). This is the 2026-09-27 velxio.dev
+        regression: the card followed CS0 and never saw its command frame."""
+        entry = probe_entry('hw', {'kind': 'hw', 'index': HW_CS0, 'gpio': CHIP_A_CS,
+                                   'active_low': True}, 0xC0, bus_id=VSPI)
+        w = worker(bus_map={'spi': [entry]})
+        w.guest('matrix', out_sel={str(CHIP_A_CS): GPIO_OUT})
+        w.pin(CHIP_A_CS, 1)
+        w.cs(HW_CS0, 0, bus=QEMU_VSPI)
+        assert w.spi([0x11], bus=QEMU_VSPI) == [0xFF], 'CS0 asserted, the pad is high'
+        w.cs(HW_CS0, 1, bus=QEMU_VSPI)
+        w.pin(CHIP_A_CS, 0)
+        for _ in range(3):
+            # The per-byte transactions arduino-esp32 makes: CS0 around each.
+            w.cs(HW_CS0, 0, bus=QEMU_VSPI)
+            w.spi([0x22], bus=QEMU_VSPI)
+            w.cs(HW_CS0, 1, bus=QEMU_VSPI)
+        w.pin(CHIP_A_CS, 1)
+        # One frame: the model's own select watch heard the GPIO, not the
+        # three CS0 pulses, so it logs the three bytes as one transaction.
+        assert w.wait_for(lambda: 'probe c0 rx=22 22 22' in w.chip_log(), 2.0), w.chip_log()
+
+    def test_without_a_matrix_a_pad_written_as_a_gpio_follows_the_gpio(self, worker):
+        """An older libqemu cannot show the matrix. A pad the guest wrote as a
+        GPIO then follows what it wrote; one it never wrote follows the
+        peripheral (the tests above that start from a fresh pad)."""
+        entry = probe_entry('hw', {'kind': 'hw', 'index': HW_CS0, 'gpio': CHIP_A_CS,
+                                   'active_low': True}, 0xC0, bus_id=VSPI)
+        w = worker(bus_map={'spi': [entry]})
+        w.pin(CHIP_A_CS, 1)
+        w.cs(HW_CS0, 0, bus=QEMU_VSPI)
+        assert w.spi([0x11], bus=QEMU_VSPI) == [0xFF]
+        w.pin(CHIP_A_CS, 0)
+        assert w.spi([0x11], bus=QEMU_VSPI) == [0xC0]
+
+    def test_hspi_cs0_does_not_select_a_device_on_vspi(self, worker):
+        """Both controllers report their CS0 as index 0; the controller is what
+        tells them apart."""
+        entry = probe_entry('hw', {'kind': 'hw', 'index': HW_CS0, 'gpio': CHIP_A_CS,
+                                   'active_low': True}, 0xC0, bus_id=VSPI)
+        w = worker(bus_map={'spi': [entry]})
+        w.guest('matrix', out_sel={str(CHIP_A_CS): VSPICS0_OUT})
+        w.cs(HW_CS0, 1, bus=QEMU_HSPI)
+        w.cs(HW_CS0, 0, bus=QEMU_HSPI)
+        assert w.spi([0x11], bus=QEMU_VSPI) == [0xFF]
+        w.cs(HW_CS0, 1, bus=QEMU_VSPI)
+        w.cs(HW_CS0, 0, bus=QEMU_VSPI)
+        assert w.spi([0x11], bus=QEMU_VSPI) == [0xC0]
 
 
 class TestBusId:
-    """A board with two SPI controllers: a device is on ONE of them."""
+    """A board with two SPI controllers: a device is on ONE of them.
+
+    The map names a controller by the SoC's unit (HSPI = 2, VSPI = 3 on the
+    classic ESP32, what the tab's pin tables say); QEMU's events name it by
+    the attach order of its host shim (HSPI = 0, VSPI = 1). The worker
+    translates once, at the callback; a map in QEMU's numbering is wrong."""
 
     def test_a_responder_pinned_to_a_controller_ignores_the_other_one(self, worker):
-        w = worker(bus_map={'spi': [probe_entry('a', pin_cs(CHIP_A_CS), 0xA0, bus_id=0),
-                                    probe_entry('b', pin_cs(CHIP_B_CS), 0xB0, bus_id=1)]})
+        w = worker(bus_map={'spi': [probe_entry('a', pin_cs(CHIP_A_CS), 0xA0, bus_id=HSPI),
+                                    probe_entry('b', pin_cs(CHIP_B_CS), 0xB0, bus_id=VSPI)]})
         select(w, CHIP_A_CS)
         select(w, CHIP_B_CS)
-        assert w.spi([0x00], bus=0) == [0xA0]
-        assert w.spi([0x00], bus=1) == [0xB0]
+        assert w.spi([0x00], bus=QEMU_HSPI) == [0xA0]
+        assert w.spi([0x00], bus=QEMU_VSPI) == [0xB0]
 
     def test_the_only_selected_responder_is_still_deaf_to_the_other_controller(self, worker):
         # One selected model is served by a shortcut that skips the table (a
         # streamed card sector is 515 bytes of it). The shortcut must not skip
-        # the controller check with it: this chip is on bus 1 and hears
-        # nothing clocked on bus 0.
-        w = worker(bus_map={'spi': [probe_entry('b', pin_cs(CHIP_B_CS), 0xB0, bus_id=1)]})
+        # the controller check with it: this chip is on VSPI and hears
+        # nothing clocked on HSPI.
+        w = worker(bus_map={'spi': [probe_entry('b', pin_cs(CHIP_B_CS), 0xB0, bus_id=VSPI)]})
         select(w, CHIP_B_CS)
-        assert w.spi([0x00], bus=0) == [0xFF]
-        assert w.spi([0x00], bus=1) == [0xB0]
+        assert w.spi([0x00], bus=QEMU_HSPI) == [0xFF]
+        assert w.spi([0x00], bus=QEMU_VSPI) == [0xB0]
+
+    def test_the_tabs_vspi_is_qemus_bus_1(self, worker):
+        """The exact entry the tab sent on velxio.dev (bus_id 3) against the
+        id QEMU reports VSPI bytes with (1). Before the translation the two
+        never matched and the card answered nothing."""
+        w = worker(bus_map={'spi': [probe_entry('sd', pin_cs(CHIP_A_CS), 0x5D, bus_id=VSPI)]})
+        select(w, CHIP_A_CS)
+        assert w.spi([0x00, 0x00], bus=QEMU_VSPI) == [0x5D, 0x5E]
+
+    def test_a_write_only_block_reaches_the_controller_that_clocked_it(self, worker):
+        """esp32_spi.c passes a literal 0 as the id of every write-only batch,
+        whichever controller clocked it. The block belongs to the controller of
+        the last event, not to HSPI: arduino-esp32 writes an SD command in bulk
+        on VSPI."""
+        w = worker(bus_map={'spi': [probe_entry('sd', pin_cs(CHIP_A_CS), 0x5D, bus_id=VSPI)]})
+        select(w, CHIP_A_CS)
+        w.spi([0x01], bus=QEMU_VSPI)
+        w.batch([0x40, 0x00, 0x00, 0x00, 0x00, 0x95])
+        w.pin(CHIP_A_CS, 1)
+        assert w.wait_for(lambda: 'probe 5d rx=01 40 00 00 00 00 95' in w.chip_log(), 2.0), \
+            w.chip_log()
 
     def test_two_responders_on_different_controllers_are_not_a_contention(self, worker):
         """Both are selected, but a byte on one controller never reaches the
         other's chip, so there is nothing to fight over."""
-        w = worker(bus_map={'spi': [probe_entry('a', pin_cs(CHIP_A_CS), 0x0F, bus_id=0),
-                                    probe_entry('b', pin_cs(CHIP_B_CS), 0x33, bus_id=1)]})
+        w = worker(bus_map={'spi': [probe_entry('a', pin_cs(CHIP_A_CS), 0x0F, bus_id=HSPI),
+                                    probe_entry('b', pin_cs(CHIP_B_CS), 0x33, bus_id=VSPI)]})
         select(w, CHIP_A_CS)
         select(w, CHIP_B_CS)
-        assert w.spi([0x00] * 4, bus=0) == [0x0F, 0x10, 0x11, 0x12]
+        assert w.spi([0x00] * 4, bus=QEMU_HSPI) == [0x0F, 0x10, 0x11, 0x12]
         w.sync()
         assert diags(w, 'spi-contention') == []
 
@@ -313,8 +409,34 @@ class TestBusId:
         answer and the one that keeps a one-controller board working."""
         w = worker(bus_map={'spi': [probe_entry('a', pin_cs(CHIP_A_CS), 0xA0)]})
         select(w, CHIP_A_CS)
-        assert w.spi([0x00], bus=0) == [0xA0]
-        assert w.spi([0x00], bus=1) == [0xA1]
+        assert w.spi([0x00], bus=QEMU_HSPI) == [0xA0]
+        assert w.spi([0x00], bus=QEMU_VSPI) == [0xA1]
+
+
+class TestPeripheralSelectStaysInTheWorker:
+    """The peripheral asserts CS0-CS2 around every transaction whether or not
+    a pad carries them. The tab reads such an edge as its CS pad moving, so
+    it hears one only when the matrix routes that select to a pad."""
+
+    def test_an_unrouted_select_is_not_relayed(self, worker):
+        entry = probe_entry('sd', {'kind': 'hw', 'index': HW_CS0, 'gpio': CHIP_A_CS,
+                                   'active_low': True}, 0x5D, bus_id=VSPI)
+        w = worker(bus_map={'spi': [entry]})
+        w.guest('matrix', out_sel={str(CHIP_A_CS): GPIO_OUT})
+        for idx in (0, 1, 2):
+            w.cs(idx, 0, bus=QEMU_VSPI)
+            w.cs(idx, 1, bus=QEMU_VSPI)
+        w.flush()
+        assert w.events('spi_event') == []
+
+    def test_a_routed_select_is_relayed_in_the_maps_numbering(self, worker):
+        entry = probe_entry('sd', {'kind': 'hw', 'index': HW_CS0, 'gpio': CHIP_A_CS,
+                                   'active_low': True}, 0x5D, bus_id=VSPI)
+        w = worker(bus_map={'spi': [entry]})
+        w.guest('matrix', out_sel={str(CHIP_A_CS): VSPICS0_OUT})
+        w.cs(HW_CS0, 0, bus=QEMU_VSPI)
+        w.flush()
+        assert w.events('spi_event') == [{'type': 'spi_event', 'bus': VSPI, 'event': 0x01}]
 
 
 class TestTheBusIsNotSwallowed:

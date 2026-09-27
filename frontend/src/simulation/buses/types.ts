@@ -114,6 +114,15 @@ export interface SpiDeviceDescriptor {
    */
   remoteModel?(): RemoteSpiModel | null;
   /**
+   * Whether `remoteModel()` would return a model, answered WITHOUT building
+   * one. The bus asks on every chip-select edge of a remote lane, to name a
+   * selected responder that has no model (`bus-remote-responder-missing`),
+   * and building the microSD's model is a dump and a base64 of its whole
+   * image: 8 MB per edge. A part whose model is that expensive answers here;
+   * one that leaves it out is asked through `remoteModel()` itself.
+   */
+  hasRemoteModel?(): boolean;
+  /**
    * The tab still needs the bytes clocked under this device's select when a
    * worker hosts its model: the model only answers MISO, and what the master
    * WRITES is decoded here. A panel that answers its id (M5GFX's board probe)

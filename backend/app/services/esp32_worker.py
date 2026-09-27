@@ -850,12 +850,19 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     _spi_resp:   list = []        # every responder on the bus, in one list
     _spi_sel:    list = []        # the selected ones; recomputed on CS edges
     _spi_any_bus_id = [False]     # does any entry name one controller?
-    # The byte function of the ONE selected model, when that is the whole
-    # answer (one selected, no controller to tell apart): a streamed card read
-    # is 515 callbacks a sector, and each layer of _spi_answer costs as much
-    # as the card itself. None sends the byte through _spi_answer.
+    # The byte function of the ONE selected model and the controller it is
+    # pinned to (None: any), when that is the whole answer: a streamed card
+    # read is 515 callbacks a sector, and each layer of _spi_answer costs as
+    # much as the card itself. None sends the byte through _spi_answer.
     _spi_one: list = [None]
-    _hw_cs: dict[int, bool] = {}  # hardware chip-select index -> asserted
+    # (SoC SPI unit, CS index) -> asserted, from the peripheral's own CS
+    # events. Keyed by unit: the classic ESP32 reports HSPI's and VSPI's CS0
+    # alike, and one must not select a device on the other.
+    _hw_cs: dict[tuple[int, int], bool] = {}
+    # The controller of the last SPI event QEMU reported. A write-only batch
+    # names no controller of its own (see _on_spi_batch), and it is always the
+    # one that just asserted its select or clocked the previous byte.
+    _spi_last_unit: list = [None]
     _spi_diag_seen: set = set()
     # What the tab LISTENS to. A byte goes into the batch for the browser only
     # if some sink there could be selected while it is clocked (F4-SPEC,
@@ -927,6 +934,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             rmt_signal_base,
             i2c_sda_signals,
             uart_tx_signals,
+            spi_units,
+            spi_cs_signals,
         )
     except ImportError:
         import importlib.util as _ilu, pathlib as _pl
@@ -943,10 +952,14 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         rmt_signal_base = sys.modules['esp32_signals'].rmt_signal_base
         i2c_sda_signals = sys.modules['esp32_signals'].i2c_sda_signals
         uart_tx_signals = sys.modules['esp32_signals'].uart_tx_signals
+        spi_units = sys.modules['esp32_signals'].spi_units
+        spi_cs_signals = sys.modules['esp32_signals'].spi_cs_signals
     _signal_router = SignalRouter()
     _rmt_sig_base = rmt_signal_base(machine)
     _i2c_sda_sig = i2c_sda_signals(machine)
     _uart_tx_sig = uart_tx_signals(machine)
+    _spi_unit_of = spi_units(machine)
+    _spi_cs_sig = spi_cs_signals(machine)
 
     def _resolve_uart_tx_pad(pad: int) -> int | None:
         """Which UART the guest transmits on through pad `pad` right now.
@@ -1932,29 +1945,120 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
 
     # ── SPI arbitration (project board-buses-2026-09, F4) ─────────────────
 
-    def _cs_active(cs: dict) -> bool:
+    def _spi_unit(qemu_id: int) -> int:
+        """The SoC's unit for QEMU's picsimlab_spi id. The ONE place the two
+        numberings meet: everything past this speaks the unit, which is what
+        the tab's bus map names (esp32_signals.SPI_UNIT_BY_QEMU_ID_BY_CHIP)."""
+        return _spi_unit_of.get(int(qemu_id), int(qemu_id))
+
+    _out_sel_view: list = [None]
+
+    def _read_out_sel():
+        """The live gpio_out_sel table, or None when this libqemu cannot say.
+        The table is a static array in libqemu, so the view is made once:
+        this is asked on every chip-select edge, several per SPI byte."""
+        view = _out_sel_view[0]
+        if view is not None:
+            return view
+        try:
+            ptr = lib.qemu_picsimlab_get_internals(2)
+            if not ptr:
+                return None
+            view = (ctypes.c_uint32 * _GPIO_COUNT).from_address(ptr)
+        except Exception:  # noqa: BLE001 - called from QEMU callbacks
+            return None
+        _out_sel_view[0] = view
+        return view
+
+    def _cs_signals(unit, index: int) -> tuple:
+        """The matrix output signal(s) that are CS `index` of `unit` (of any
+        controller when the unit is not known)."""
+        units = _spi_cs_sig.values() if unit is None else [_spi_cs_sig.get(unit, ())]
+        return tuple(sigs[index] for sigs in units if 0 <= index < len(sigs))
+
+    def _pad_carries_cs(gpio: int, unit, index: int):
+        """Is pad `gpio` driven by the controller's own chip select right now?
+
+        True or False from the GPIO matrix; None when the matrix cannot be
+        read or the chip's signals are not known."""
+        sigs = _cs_signals(unit, index)
+        if not sigs or gpio < 0 or gpio >= _GPIO_COUNT:
+            return None
+        out_sel = _read_out_sel()
+        if out_sel is None:
+            return None
+        return (int(out_sel[gpio]) & 0x1FF) in sigs
+
+    def _cs_signal_reaches_a_pad(unit: int, index: int) -> bool:
+        """Does ANY pad carry this chip select? The peripheral asserts its CS
+        lines around every transaction whether or not the matrix routes them
+        anywhere (arduino-esp32 never does unless setHwCs(true)); an edge on a
+        line no pad carries is invisible on the board, so the tab is not told.
+        Unknown (no matrix) counts as yes, which is what the worker did before
+        it could tell."""
+        sigs = _cs_signals(unit, index)
+        if not sigs:
+            return True
+        out_sel = _read_out_sel()
+        if out_sel is None:
+            return True
+        return any((v & 0x1FF) in sigs for v in out_sel[:])
+
+    def _hw_cs_asserted(unit, index: int) -> bool:
+        if unit is None:
+            return any(v for (u, i), v in _hw_cs.items() if i == index)
+        return bool(_hw_cs.get((unit, index), False))
+
+    def _cs_follows_peripheral(cs: dict, unit) -> bool:
+        """Which source a `hw` select's pad follows, as the wire would.
+
+        The tab sends `hw` for a device whose CS is on a pad its static table
+        lists as the controller's CS0 (GPIO 5 is VSPI's), but whether the
+        peripheral drives that pad is the SKETCH's choice: SD.begin(5) drives
+        it with digitalWrite, and the peripheral's own CS then toggles around
+        every byte on no pad at all. So the level comes from where the matrix
+        routes the pad: the controller's CS signal -> the CS events; a GPIO ->
+        the level the guest wrote. When the matrix cannot tell (or routes the
+        pad through IO_MUX, which gpio_out_sel does not show), a pad the guest
+        has written as a GPIO follows that, and one it never wrote follows the
+        peripheral, as before.
+        """
+        gpio = cs.get('gpio')
+        if gpio is None:
+            return True
+        index = int(cs.get('index', 0))
+        if _pad_carries_cs(int(gpio), unit, index):
+            return True
+        return int(gpio) not in _pin_state
+
+    def _gpio_cs_active(cs: dict) -> bool:
+        level = _pin_state.get(int(cs.get('gpio', -1)))
+        if level is None:
+            return False
+        return level == 0 if cs.get('active_low', True) else level == 1
+
+    def _cs_active(cs: dict, unit=None) -> bool:
         """Is this entry's chip select asserted right now?
 
         `pin`  a GPIO, read from the state QEMU reports; a pin the guest has
                never driven reads as floating, which is NOT selected, because
                a chip whose select nobody drives does not answer on a bench
                either.
-        `hw`   a chip select the SPI peripheral drives itself: the level comes
-               from the last op 0x01 event, never from the GPIO channel, which
-               QEMU does not move for a pad the peripheral owns. The entry
-               carries that pad's number as well, so the model's own watch on
-               its select line can be fired from here (see _hw_cs_edge): a chip
-               that arms on CS falling would otherwise never arm.
+        `hw`   a pad the tab's table lists as a controller's own chip select.
+               It follows what the pad really carries (_cs_follows_peripheral):
+               the controller's CS events when the matrix routes that signal
+               to it (QEMU moves no GPIO for such a pad), the GPIO level when
+               the sketch drives it as a GPIO. `unit` is the controller the
+               entry is on, so HSPI's CS0 never selects a device on VSPI.
         `const` tied to a rail, `none` no select line at all (a 74HC595).
         """
         kind = cs.get('kind')
         if kind == 'pin':
-            level = _pin_state.get(int(cs.get('gpio', -1)))
-            if level is None:
-                return False
-            return level == 0 if cs.get('active_low', True) else level == 1
+            return _gpio_cs_active(cs)
         if kind == 'hw':
-            return bool(_hw_cs.get(int(cs.get('index', 0)), False))
+            if _cs_follows_peripheral(cs, unit):
+                return _hw_cs_asserted(unit, int(cs.get('index', 0)))
+            return _gpio_cs_active(cs)
         if kind == 'const':
             return bool(cs.get('active', False))
         return kind == 'none'
@@ -1966,22 +2070,29 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         return {'owner': owner, 'bus_id': bus_id, 'drives': drives,
                 'sel': sel, 'xfer': xfer, 'block': block}
 
-    def _hw_cs_edge(index: int, level: int) -> None:
+    def _hw_cs_edge(unit: int, index: int, level: int) -> None:
         """A chip select the peripheral drives itself just moved.
 
         QEMU reports it here and nowhere else, so this is also the only place
-        a model watching that pad can hear about it. Feeding it into the
-        runtime keeps ONE story: whether the select is a GPIO or a peripheral
-        output, the chip sees the same edge it would see on a bench.
+        a model watching that pad can hear about it, and it is told only when
+        the pad really carries the signal: on a pad the sketch drives as a
+        GPIO the model hears the GPIO edges (_on_pin_change) and nothing else.
+        The microSD ends a command frame on CS rising; the peripheral's CS
+        rises after every byte, so passing those on would cut every command
+        into one-byte frames.
         """
-        _hw_cs[index] = level == 0
+        _hw_cs[(unit, index)] = level == 0
         for r in _spi_models:
             cs = r.get('cs') or {}
             if cs.get('kind') != 'hw' or int(cs.get('index', 0)) != index:
                 continue
+            if r.get('bus_id') is not None and r['bus_id'] != unit:
+                continue
             gpio = cs.get('gpio')
             rt = r.get('runtime')
             if gpio is None or rt is None:
+                continue
+            if not _cs_follows_peripheral(cs, unit):
                 continue
             try:
                 rt.notify_pin_change(int(gpio), level)
@@ -1991,11 +2102,12 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     def _model_responder(entry: dict, rt) -> dict:
         cs = entry.get('cs') or {'kind': 'none'}
         bus_id = entry.get('bus_id')
+        unit = None if bus_id is None else int(bus_id)
         out = _responder(
             str(entry.get('owner') or 'responder'),
-            None if bus_id is None else int(bus_id),
+            unit,
             True,
-            lambda _cs=cs: _cs_active(_cs),
+            lambda _cs=cs, _u=unit: _cs_active(_cs, _u),
             lambda mosi, _rt=rt: _rt.spi_transfer_byte(mosi) & 0xFF,
         )
         out['runtime'] = rt
@@ -2039,8 +2151,9 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             except Exception as e:  # noqa: BLE001
                 _log(f'[spi] selection check failed for {r["owner"]}: {e!r}')
         _spi_sel[:] = sel
-        _spi_one[0] = (sel[0].get('fast') if len(sel) == 1 and not _spi_any_bus_id[0]
-                       else None)
+        one = sel[0] if len(sel) == 1 else None
+        _spi_one[0] = ((one['fast'], one['bus_id'])
+                       if one is not None and one.get('fast') is not None else None)
         _recompute_spi_forward()
         # A model just let go of the bus: whatever it wrote into its storage
         # during that transaction goes back to the tab now, because the tab no
@@ -2074,7 +2187,7 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             return True
         if (level == 0) == bool(cs.get('active_low', True)):
             return True
-        return kind == 'hw' and bool(_hw_cs.get(int(cs.get('index', 0)), False))
+        return kind == 'hw' and _hw_cs_asserted(None, int(cs.get('index', 0)))
 
     def _recompute_spi_forward() -> None:
         if not _spi_sinks_known[0]:
@@ -2148,11 +2261,14 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             return
         _spi_diag_seen.add(key)
         _emit({'type': 'bus_diag', 'code': code, 'bus': 'spi',
-               'controller': int(bus_id), 'owners': sorted(owners),
+               'controller': -1 if bus_id is None else int(bus_id),
+               'owners': sorted(owners),
                'message': message})
 
-    def _spi_selected(bus_id: int) -> list:
-        if not _spi_any_bus_id[0]:
+    def _spi_selected(bus_id) -> list:
+        """The selected devices a byte on controller `bus_id` (the SoC unit;
+        None: not known) reaches."""
+        if not _spi_any_bus_id[0] or bus_id is None:
             return _spi_sel
         return [r for r in _spi_sel if r['bus_id'] is None or r['bus_id'] == bus_id]
 
@@ -2354,6 +2470,10 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             event = ((((cs_idx & 3) << 1) | level) << 8) | 0x01 → CS line change
                                                                   (op = 0x01)
 
+        `bus_id` is QEMU's id for the controller, which is NOT the unit the
+        bus map names (_spi_unit): it is translated first, and nothing below
+        sees QEMU's number.
+
         The byte's MISO is the bus table's answer (_spi_answer), and the byte
         also joins the batch going to the browser when a sink there could be
         selected (_spi_forward); the tab's own fabric then decides by chip
@@ -2361,34 +2481,43 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         it. A card read the tab has no sink for stays here: relaying it cost
         as much as the card itself.
         """
+        unit = _spi_unit(bus_id)
+        _spi_last_unit[0] = unit
         op   = event & 0xFF
         mosi = (event >> 8) & 0xFF
         if op != 0x00:
-            # CS line change. The peripheral owns this pad, so QEMU moves no
-            # GPIO for it and this event is the only place its level exists:
-            # record it before recomputing who is selected.
+            # CS line change of the peripheral's own chip select. Recorded
+            # before recomputing who is selected; whether it selects anything
+            # depends on which pad, if any, the matrix routes it to.
             cs_idx = (event >> 9) & 0x3
             level  = (event >> 8) & 0x1
-            _hw_cs_edge(cs_idx, level)
+            _hw_cs_edge(unit, cs_idx, level)
             _recompute_spi_selection()
             if _stopped.is_set():
+                return SPI_IDLE_MISO
+            # The tab hears the edge only if a pad carries it: the peripheral
+            # toggles CS0-CS2 around EVERY transaction even when the sketch
+            # drives its select as a GPIO, and relaying those was six frames a
+            # byte that the tab read as its CS pad moving (2026-09-27: the tab
+            # re-selected its copy of the card per byte and stalled).
+            if not _cs_signal_reaches_a_pad(unit, cs_idx):
                 return SPI_IDLE_MISO
             # Flush the previous transaction's bytes so the browser processes
             # them before it sees this edge.
             with _spi_buf_lock:
                 _flush_spi_batch_locked()
-            _emit({'type': 'spi_event', 'bus': bus_id, 'event': event})
+            _emit({'type': 'spi_event', 'bus': unit, 'event': event})
             return SPI_IDLE_MISO
 
         one = _spi_one[0]
-        if one is not None:
+        if one is not None and (one[1] is None or one[1] == unit):
             try:
-                miso = one(mosi)
+                miso = one[0](mosi)
             except Exception as e:  # noqa: BLE001
                 _log(f'[spi] {_spi_sel[0]["owner"] if _spi_sel else "?"} raised on a byte: {e!r}')
                 miso = SPI_IDLE_MISO
         else:
-            miso = _spi_answer(bus_id, mosi)
+            miso = _spi_answer(unit, mosi)
         # The cheap test first: a byte the tab does not get needs no word from
         # _stopped (a method call per byte, and every sector is 515 of them).
         if not _spi_forward[0] or _stopped.is_set():
@@ -2404,14 +2533,21 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         single call instead of one picsimlab_spi_event per byte. libqemu only
         invokes this for rx==0 (MISO-ignored) transfers on the host SPI shim, so
         nothing is returned. Same arbitration as the per-byte path, in bulk:
-        this is what removes ~150k C->Python crossings/frame for TFTs."""
+        this is what removes ~150k C->Python crossings/frame for TFTs.
+
+        The C side passes a literal 0 for `bus_id` whichever controller clocked
+        the block (esp32_spi.c and esp32s3_gpspi.c), so it names nothing: the
+        block belongs to the controller of the last event, which asserted its
+        select or clocked the byte before (None, any, before the first one).
+        Taking 0 at its word put every VSPI write on HSPI, and an SD card on
+        VSPI never saw the command bytes arduino-esp32 writes in bulk."""
         if length <= 0 or _stopped.is_set():
             return
         try:
             data = ctypes.string_at(mosi_ptr, length)
         except Exception:
             return
-        _spi_feed_block(bus_id, data)
+        _spi_feed_block(_spi_last_unit[0], data)
         if not _spi_forward[0]:
             return
         with _spi_buf_lock:

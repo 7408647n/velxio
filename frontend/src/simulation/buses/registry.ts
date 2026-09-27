@@ -25,7 +25,7 @@
 
 import { BoardBusFabric } from './fabric';
 import type { I2cBus, I2cMember } from './i2cBus';
-import type { SpiBus, SpiMember } from './spiBus';
+import { hasRemoteModel, type SpiBus, type SpiMember } from './spiBus';
 import type {
   BusDiagnostic,
   BusHandle,
@@ -348,7 +348,7 @@ export class BusRegistry {
    */
   private spiAttrsChanged(e: SpiEntry): void {
     if (!e.bus || !e.desc.remoteAttrs) return;
-    if (!e.desc.remoteModel?.()) return;
+    if (!hasRemoteModel(e.desc)) return;
     const attrs = e.desc.remoteAttrs();
     const key = attrsKey(attrs);
     if (this.sentAttrs.get(e.desc.owner) === key) return;

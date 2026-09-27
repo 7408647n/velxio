@@ -262,12 +262,26 @@ describe('QEMU lane: the remote controller port', () => {
     const { id, ws } = qemuBoard();
     const a = device(id, 'a', { cs: HW_CS_PAD });
     const csEvent = (level: 0 | 1) => ((((0 & 3) << 1) | level) << 8) | 0x01;
-    ws.receive('spi_event', { bus: 0, event: csEvent(1) });
+    // The worker names the controller by the SoC's unit, as the map does:
+    // VSPI = 3 (esp32_worker._spi_unit translates QEMU's own id).
+    ws.receive('spi_event', { bus: 3, event: csEvent(1) });
     ws.receive('spi_batch', { b64: b64([0x11]) });
     expect(a.seen, 'deasserted').toEqual([]);
-    ws.receive('spi_event', { bus: 0, event: csEvent(0) });
+    ws.receive('spi_event', { bus: 3, event: csEvent(0) });
     ws.receive('spi_batch', { b64: b64([0x22, 0x33]) });
     expect(a.seen, 'asserted').toEqual([0x22, 0x33]);
+  });
+
+  it("does not take another controller's chip select for its own", () => {
+    // HSPI's CS0 arrives as index 0 too. It is on another pad (GPIO 15), so
+    // it must not move VSPI's CS0 pad under a device wired there.
+    const { id, ws } = qemuBoard();
+    const a = device(id, 'a', { cs: HW_CS_PAD });
+    const csEvent = (level: 0 | 1) => ((((0 & 3) << 1) | level) << 8) | 0x01;
+    ws.receive('spi_event', { bus: 3, event: csEvent(1) });
+    ws.receive('spi_event', { bus: 2, event: csEvent(0) });
+    ws.receive('spi_batch', { b64: b64([0x44]) });
+    expect(a.seen, 'HSPI asserted its CS0; the VSPI pad stays high').toEqual([]);
   });
 });
 
@@ -545,6 +559,42 @@ describe('QEMU lane: a responder that cannot run where the master is', () => {
     const seen = collectDiagnostics();
     device(id, 'sd1', { cs: GPIO_CS, remote: true });
     ws.receive('gpio_change', { pin: GPIO_CS, state: 0 });
+    expect(seen.filter((d) => d.code === 'bus-remote-responder-missing')).toEqual([]);
+  });
+
+  it('asks whether a model exists without building one, on every chip-select edge', () => {
+    // Building the microSD's model is a dump and a base64 of its whole image.
+    // On velxio.dev (2026-09-27) the bus built it on each chip-select edge,
+    // hundreds a second, and the tab stalled until the backend dropped its
+    // socket. The edges ask the cheap question; only a map builds the model.
+    const { id, ws } = qemuBoard();
+    const seen = collectDiagnostics();
+    let built = 0;
+    let asked = 0;
+    wire(id, 'sd1', { ...ESP32_SPI, CS: `D${GPIO_CS}` });
+    const handle = attachSpiDevice(
+      {
+        owner: 'sd1',
+        pins: { sck: 'SCK', mosi: 'MOSI', miso: 'MISO', cs: 'CS' },
+        remoteModel: () => {
+          built++;
+          return { wasmB64: WASM_B64, blobs: { card: 'AAEC' } };
+        },
+        hasRemoteModel: () => {
+          asked++;
+          return true;
+        },
+      },
+      { transfer: () => 0x01 },
+    );
+    cleanups.push(() => handle.dispose());
+    const builtBefore = built;
+    for (let i = 0; i < 50; i++) {
+      ws.receive('gpio_change', { pin: GPIO_CS, state: 0 });
+      ws.receive('gpio_change', { pin: GPIO_CS, state: 1 });
+    }
+    expect(built - builtBefore, 'models built by 100 chip-select edges').toBe(0);
+    expect(asked).toBeGreaterThanOrEqual(50);
     expect(seen.filter((d) => d.code === 'bus-remote-responder-missing')).toEqual([]);
   });
 

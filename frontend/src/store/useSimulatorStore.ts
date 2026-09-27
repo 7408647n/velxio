@@ -97,6 +97,7 @@ import {
   loadSdBusChip,
   SdSpiCard,
   sdCardRemoteBlobWrite,
+  sdCardHasRemoteModel,
   sdCardRemoteModel,
   sdSpiFabricDevice,
 } from '../simulation/parts/sdSpiCard';
@@ -258,7 +259,13 @@ export class Esp32BridgeShim {
     // fabric arbitrates them with the same information a local engine gives
     // it. What a device here answers goes nowhere: see RemoteSpiPort.
     bridge.onSpiBatch = (mosi) => this.remoteLane.port?.deliver(mosi);
-    bridge.onSpiCsChange = (csIdx, low) => this.remoteLane.port?.hardwareCs(csIdx, low);
+    // Only the lane's own controller: the worker also relays HSPI's selects,
+    // and HSPI's CS0 is not the pad this port's CS0 is on.
+    bridge.onSpiCsChange = (csIdx, low, unit) => {
+      const port = this.remoteLane.port;
+      if (!port || (unit !== undefined && unit !== port.unit)) return;
+      port.hardwareCs(csIdx, low);
+    };
     // What a hosted model wrote (the guest saved to the card) comes back as a
     // span, because the worker keeps the bytes no sink here can see.
     bridge.onBusBlob = (owner, name, offset, data, blobId) =>
@@ -467,6 +474,7 @@ export class Esp32BridgeShim {
           if (pins.miso !== undefined) pinMap.DO = pins.miso;
           return { ...model, pinMap };
         },
+        hasRemoteModel: () => sdCardHasRemoteModel(card, bytes),
         remoteBlobWrite: sdCardRemoteBlobWrite(card),
       },
       sdSpiFabricDevice(card),

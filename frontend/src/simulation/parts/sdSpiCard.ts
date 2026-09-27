@@ -185,6 +185,11 @@ export class SdSpiCard {
     }
   }
 
+  /** Would {@link dumpImage} return any bytes? Answered without building them. */
+  hasImage(minBytes = 0): boolean {
+    return minBytes > 0 || this.store.size > 0;
+  }
+
   /** Reassemble the card's CURRENT contents (initial image + every write the
    *  guest made) into a flat image. `minBytes` pads the dump to at least the
    *  original volume size so a FAT parser sees the full filesystem even when
@@ -560,4 +565,12 @@ export function sdCardRemoteModel(card: SdSpiCard, minBytes = 0): RemoteSpiModel
   const image = card.dumpImage(minBytes);
   if (image.length === 0) return null;
   return { wasmB64, blobs: { card: bytesToBase64(image) }, blobIds: { card: card.imageId } };
+}
+
+/**
+ * Would {@link sdCardRemoteModel} return a model? Answered without building it
+ * (SpiDeviceDescriptor.hasRemoteModel): the bus asks on chip-select edges.
+ */
+export function sdCardHasRemoteModel(card: SdSpiCard, minBytes = 0): boolean {
+  return busChipB64(SD_BUS_CHIP) !== null && card.hasImage(minBytes);
 }

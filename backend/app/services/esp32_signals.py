@@ -153,3 +153,56 @@ def uart_tx_signals(machine: str) -> dict[int, int]:
     if 's3' in machine:
         return UART_TX_OUT_IDX_BY_CHIP['esp32-s3']
     return UART_TX_OUT_IDX_BY_CHIP['esp32']
+
+
+# ── SPI: one numbering at the worker's boundary (project board-buses-2026-09) ─
+# The bus map the tab sends names each controller by the SoC's own unit, the
+# number the pin tables, the in-browser engines and the datasheets use: GP-SPI2
+# (HSPI / FSPI) = 2, GP-SPI3 (VSPI) = 3. QEMU names it otherwise: its
+# picsimlab_spi host shim numbers controllers in ATTACH order
+# (hw/ssi/picsimlab_spi.c `spi_id++`), and the classic machine attaches spi[2]
+# first (esp32_picsimlab.c), so HSPI reports 0 and VSPI 1; the CS irq handler
+# reports `n >> 2` over the same two. The S3 machine models only GP-SPI2 and
+# attaches one shim (id 0). The C3 machine attaches none today; the entry is
+# what it would report. The worker translates QEMU's id into the unit here and
+# nowhere else, before anything compares it with the map.
+SPI_UNIT_BY_QEMU_ID_BY_CHIP = {
+    'esp32': {0: 2, 1: 3},
+    'esp32-s3': {0: 2},
+    'esp32-c3': {0: 2},
+}
+
+# The chip-select OUTPUT signals of each controller, CS0 first (gpio_sig_map.h:
+# HSPICS0/1/2 = 11, 61, 62 and VSPICS0/1/2 = 68, 69, 70 on the ESP32; FSPICS0-5
+# = 110-115 and SPI3_CS0-2 = 71, 72, 127 on the S3; FSPICS0-5 = 68-73 on the
+# C3). A pad whose gpio_out_sel carries one of these is driven by that
+# controller's own chip select; any other value (SIG_GPIO_DIRECT_OUT_IDX above
+# all) means the pad is a GPIO, and the level the guest writes to it is what a
+# device on the wire sees.
+SPI_CS_OUT_IDX_BY_CHIP = {
+    'esp32': {2: (11, 61, 62), 3: (68, 69, 70)},
+    'esp32-s3': {2: (110, 111, 112, 113, 114, 115), 3: (71, 72, 127)},
+    'esp32-c3': {2: (68, 69, 70, 71, 72, 73)},
+}
+
+
+def _chip_of(machine: str) -> str:
+    if 'c3' in machine:
+        return 'esp32-c3'
+    if 's3' in machine:
+        return 'esp32-s3'
+    return 'esp32'
+
+
+def spi_units(machine: str) -> dict[int, int]:
+    """QEMU's picsimlab_spi id -> the SoC's SPI unit, for a machine string."""
+    if not machine:
+        return {}
+    return SPI_UNIT_BY_QEMU_ID_BY_CHIP[_chip_of(machine)]
+
+
+def spi_cs_signals(machine: str) -> dict[int, tuple[int, ...]]:
+    """SPI unit -> its CS0, CS1... output signal ids, for a machine string."""
+    if not machine:
+        return {}
+    return SPI_CS_OUT_IDX_BY_CHIP[_chip_of(machine)]
