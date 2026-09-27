@@ -80,6 +80,7 @@ import {
   SENSOR_CONTROLS,
   getSensorControl,
   getSensorControlForComponent,
+  projectSensorValues,
 } from '../simulation/sensorControlConfig';
 import { SINGLE_WIRE_SENSOR_MODELS } from '../simulation/sensorModels';
 import type { LineSupport } from '../simulation/line/LineHost';
@@ -101,7 +102,10 @@ import {
   sdCardRemoteModel,
   sdSpiFabricDevice,
 } from '../simulation/parts/sdSpiCard';
-import { dispatchSensorUpdate } from '../simulation/SensorUpdateRegistry';
+import {
+  isReplayingProjectValues,
+  replayProjectSensorValues,
+} from '../simulation/SensorUpdateRegistry';
 
 // ── Sensor pre-registration ──────────────────────────────────────────────────
 // Sensors whose model drives its own line (DHT22, HC-SR04) — declared once in
@@ -1538,7 +1542,7 @@ interface SimulatorState {
   compiledHex: string | null;
   hexEpoch: number;
   /** Bumped on every Reset so the open SensorControlPanel remounts and
-   *  re-reads each interactive sensor's freshly-defaulted value. */
+   *  snaps back to each interactive sensor's project value. */
   sensorResetNonce: number;
   /** Ids of components destroyed at runtime (P4 burnout) — the canvas renders
    *  them charred. Cleared on Reset / restart. */
@@ -1580,6 +1584,15 @@ interface SimulatorState {
   addComponent: (component: Component) => void;
   removeComponent: (id: string) => void;
   updateComponent: (id: string, updates: Partial<Component>) => void;
+  /**
+   * A property a RUNNING part writes on its own (the sensor panel, a knob, a
+   * button): the canvas routes every part's property-change event here. For a
+   * sensor with panel controls the value is a live input, not a project edit:
+   * the project value it replaces is kept aside and Reset puts it back. Any
+   * other write to that property (updateComponent: the property dialog, the
+   * agent) makes the new value the project value.
+   */
+  applyLivePropertyChange: (id: string, propName: string, value: unknown) => void;
   /** Recompute the breadboard seating wires (bb: true) of one component. */
   reseatComponentOnBreadboard: (id: string) => void;
   updateComponentState: (id: string, state: boolean) => void;
@@ -1795,6 +1808,38 @@ export function appendSimulatorNote(boardId: string, text: string): void {
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────
+// ── Live sensor values mirrored into properties ──────────────────────────────
+// Per component, per property: the project value a live write replaced
+// (`had` false when the project did not set the property at all) and the last
+// live value written. Reset restores `original` only while the property still
+// holds `live`, so a later write from anywhere else wins.
+interface LivePropertyRecord {
+  had: boolean;
+  original: unknown;
+  live: unknown;
+}
+const liveSensorProperties = new Map<string, Map<string, LivePropertyRecord>>();
+
+const sameValue = (a: unknown, b: unknown): boolean =>
+  Object.is(a, b) ||
+  (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null &&
+    JSON.stringify(a) === JSON.stringify(b));
+
+/** Properties with every live sensor value taken back out; the same object
+ *  when there is nothing to undo. */
+function withoutLiveSensorValues(c: Component): Component['properties'] {
+  const recs = liveSensorProperties.get(c.id);
+  if (!recs || recs.size === 0) return c.properties;
+  let props: Component['properties'] | null = null;
+  for (const [key, rec] of recs) {
+    if (!sameValue(c.properties[key], rec.live)) continue;
+    props ??= { ...c.properties };
+    if (rec.had) props[key] = rec.original;
+    else delete props[key];
+  }
+  return props ?? c.properties;
+}
+
 export const useSimulatorStore = create<SimulatorState>((set, get) => {
   // Initialise runtime objects for the default board
   const initialPm = new PinManager();
@@ -3354,35 +3399,37 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
       });
 
       // Reset interactive sensors (temperature / lux / gas sliders, etc.) back
-      // to their configured defaults so a restart starts from a clean state
-      // instead of freezing on the last slider position the user dragged to.
-      // dispatchSensorUpdate re-injects the default into the running sim (so the
-      // NTC's injected ADC voltage and the SPICE solve both return to 25°C /
-      // 2.5V) and refreshes the panel's cached value; bumping sensorResetNonce
-      // remounts the open SensorControlPanel so its slider snaps back too.
-      const sensorComps = get().components.filter(
-        (c) => c.metadataId && getSensorControlForComponent(c),
-      );
-      if (sensorComps.length > 0) {
-        set((s) => ({
-          components: s.components.map((c) => {
-            const def = getSensorControlForComponent(c);
-            if (!def) return c;
-            // Custom chips keep control values under properties.attrs (the
-            // chip reads them via vx_attr_read) — never as top-level props.
-            if (c.metadataId === 'custom-chip') {
-              const prev = (c.properties.attrs ?? {}) as Record<string, number>;
-              return {
-                ...c,
-                properties: { ...c.properties, attrs: { ...prev, ...def.defaultValues } },
-              };
-            }
-            return { ...c, properties: { ...c.properties, ...def.defaultValues } };
-          }),
-          sensorResetNonce: s.sensorResetNonce + 1,
-        }));
-        for (const c of sensorComps) {
-          dispatchSensorUpdate(c.id, getSensorControlForComponent(c)!.defaultValues);
+      // to the value the PROJECT has for them, so a restart starts from what
+      // the user configured instead of freezing on the last slider position
+      // dragged during the run, and never from the panel's generic default
+      // (a BMP280 set to 35 C read 24 C after Reset, and saving then lost the
+      // 35). Only live values are undone: properties a running part mirrored
+      // a slider into (the NTC's temperature for SPICE) go back to their
+      // project value, everything else in properties is left as it is.
+      // replayProjectSensorValues re-injects those values into the running
+      // sim (the NTC's ADC voltage, a DHT22's element) and refreshes the
+      // panel's cache; bumping sensorResetNonce remounts the open
+      // SensorControlPanel so its slider snaps back too.
+      const hasSensors = get().components.some((c) => getSensorControlForComponent(c));
+      if (hasSensors) {
+        set((s) => {
+          let changed = false;
+          const components = s.components.map((c) => {
+            if (!getSensorControlForComponent(c)) return c;
+            const properties = withoutLiveSensorValues(c);
+            liveSensorProperties.delete(c.id);
+            if (properties === c.properties) return c;
+            changed = true;
+            return { ...c, properties };
+          });
+          return {
+            ...(changed ? { components } : {}),
+            sensorResetNonce: s.sensorResetNonce + 1,
+          };
+        });
+        for (const c of get().components) {
+          const def = getSensorControlForComponent(c);
+          if (def) replayProjectSensorValues(c.id, projectSensorValues(c, def));
         }
       }
     },
@@ -3816,6 +3863,15 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
 
     updateComponent: (id, updates) => {
       const before = get().components.find((c) => c.id === id);
+      // Any write that is not a live one makes its value the project value.
+      const recs = updates.properties ? liveSensorProperties.get(id) : undefined;
+      if (recs && updates.properties) {
+        for (const [key, rec] of recs) {
+          if (!(key in updates.properties) || !sameValue(updates.properties[key], rec.live)) {
+            recs.delete(key);
+          }
+        }
+      }
       const isBbMove =
         !!before &&
         isBreadboard(before.metadataId) &&
@@ -3916,9 +3972,31 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
 
     handleComponentEvent: (_componentId, _eventName, _data) => {},
 
+    applyLivePropertyChange: (id, propName, value) => {
+      // A part answering a replay of its project values mirrors them back:
+      // properties already hold them.
+      if (isReplayingProjectValues()) return;
+      const comp = get().components.find((c) => c.id === id);
+      if (!comp) return;
+      if (!getSensorControlForComponent(comp)) {
+        get().updateComponent(id, { properties: { ...comp.properties, [propName]: value } });
+        return;
+      }
+      const prev = liveSensorProperties.get(id)?.get(propName);
+      const rec: LivePropertyRecord = prev
+        ? { ...prev, live: value }
+        : { had: propName in comp.properties, original: comp.properties[propName], live: value };
+      get().updateComponent(id, { properties: { ...comp.properties, [propName]: value } });
+      let recs = liveSensorProperties.get(id);
+      if (!recs) liveSensorProperties.set(id, (recs = new Map()));
+      recs.set(propName, rec);
+    },
+
     setComponents: (components) => {
       // Bulk replacement (project load / clear) — any pending undo/redo
-      // would point at component IDs that no longer exist after this.
+      // would point at component IDs that no longer exist after this, and a
+      // live sensor value kept for an id belongs to the previous canvas.
+      liveSensorProperties.clear();
       set((state) => ({
         components,
         history: [],

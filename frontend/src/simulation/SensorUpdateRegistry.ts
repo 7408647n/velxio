@@ -32,6 +32,30 @@ export function dispatchSensorUpdate(componentId: string, values: SensorValues):
   lastValues.set(componentId, prev ? { ...prev, ...values } : { ...values });
 }
 
+let replaying = 0;
+
+/**
+ * Hand a component its PROJECT values (Reset, and the panel opening on a
+ * sensor it has not driven yet). Same delivery as dispatchSensorUpdate, but
+ * while the callback runs isReplayingProjectValues() is true, so whatever the
+ * part mirrors back into the store is known not to be a live edit: the store
+ * drops those writes (properties already hold these values) and the custom
+ * chip overlay skips its attrs mirror.
+ */
+export function replayProjectSensorValues(componentId: string, values: SensorValues): void {
+  replaying++;
+  try {
+    dispatchSensorUpdate(componentId, values);
+  } finally {
+    replaying--;
+  }
+}
+
+/** True while replayProjectSensorValues is delivering. */
+export function isReplayingProjectValues(): boolean {
+  return replaying > 0;
+}
+
 /**
  * Read the last values dispatched for a component. Returns undefined if the
  * component has never received a dispatch. Used by SensorControlPanel to

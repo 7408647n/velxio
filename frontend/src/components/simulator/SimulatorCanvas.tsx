@@ -656,10 +656,11 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
 
   // Runtime parts (pots, switches, sensor panels) emit
   // `velxio:property-change` instead of writing the store directly — one
-  // listener here routes every mutation through `updateComponent()`, which
-  // is the same path the Property Dialog uses. Keeps parts decoupled from
-  // Zustand and guarantees the SPICE netlist memo invalidates on every
-  // user-driven property change.
+  // listener here routes every mutation through `applyLivePropertyChange()`,
+  // which lands on `updateComponent()` like the Property Dialog does (so the
+  // SPICE netlist memo invalidates) and, for a sensor, keeps the project value
+  // the live one replaced so Reset can put it back. Keeps parts decoupled
+  // from Zustand.
   useEffect(() => {
     const onPropertyChange = (evt: Event) => {
       const { componentId, propName, value } = (evt as CustomEvent<PropertyChangeDetail>).detail;
@@ -667,9 +668,7 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
       const comp = state.components.find((c) => c.id === componentId);
       if (!comp) return;
       if (String(comp.properties?.[propName]) === String(value)) return;
-      state.updateComponent(componentId, {
-        properties: { ...comp.properties, [propName]: value },
-      });
+      state.applyLivePropertyChange(componentId, propName, value);
     };
     window.addEventListener(PROPERTY_CHANGE_EVENT, onPropertyChange);
     return () => window.removeEventListener(PROPERTY_CHANGE_EVENT, onPropertyChange);
@@ -3291,7 +3290,7 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
               different instance of the same sensor type (e.g. a second photoresistor); the
               slider state is local and would otherwise show the previously-clicked sensor's
               value until the user manually moved it. The sensorResetNonce suffix also remounts
-              it on Reset, so the slider snaps back to the sensor's default value. */}
+              it on Reset, so the slider snaps back to the sensor's project value. */}
           {sensorControlComponentId &&
             sensorControlMetadataId &&
             (() => {
