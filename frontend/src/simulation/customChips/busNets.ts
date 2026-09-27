@@ -52,6 +52,9 @@ export interface BoardPinHost extends PinManagerLike {
    */
   getPinDirection?(pin: number): 0 | 1 | undefined;
   getPinPull?(pin: number): 0 | 1 | 2;
+  /** The level the channel carries now: what an output pad of such an
+   *  engine last put on it, read when a net forms over that pad. */
+  getPinState?(pin: number): boolean;
   /** The net answers every level proposed for the pin (PinManager.claimLevel). */
   claimLevel?(
     pin: number,
@@ -120,6 +123,9 @@ interface BoardNet {
   /** The level this net last put on the channel, to tell its own echo from
    *  a write by someone else. */
   lastLevel: boolean | undefined;
+  /** An engine without the pad channel: the level its output pad drives,
+   *  from the levels it reports (it reports one only when its latch moves). */
+  mcuLevel: boolean | undefined;
 }
 
 // One table per PinManager: board pin numbers repeat on every board, so D2
@@ -183,7 +189,10 @@ function proposeBoardPin(
 ): boolean | undefined {
   const pad = padDrive(host, pin);
   if (pad.strength === Strength.STRONG) return source === 'mcu' ? proposed : undefined;
-  if (source === 'mcu' && !host.peekPad?.(pin)) return proposed;
+  if (source === 'mcu' && !host.peekPad?.(pin)) {
+    net.mcuLevel = proposed;
+    return proposed;
+  }
   const resolved = resolveNet([...net.drivers.values(), pad]);
   if (resolved.v === 'X' || resolved.v === 'Z') return proposed;
   const level = resolved.v === '1';
@@ -214,8 +223,23 @@ function recomputeBoardPin(host: BoardPinHost, pin: number, net: BoardNet): void
   // already put it on the level channel; there is nothing to feed back into
   // the guest (its own output reads its latch). A released pad with nothing
   // pulling it keeps the level it had, as a floating input does.
-  if (pad.strength === Strength.STRONG || resolved.v === 'Z') return;
-  const level = resolved.v === '1';
+  if (pad.strength === Strength.STRONG) return;
+  let level: boolean;
+  if (resolved.v === 'Z') {
+    // An engine without the pad channel keeps an output pad at HIGHZ here
+    // and reports its level only when the latch moves. When the chips let go
+    // of such a pad, the wire is the MCU's output again, not the chip's last
+    // level: a TM1637 that ACKs by pulling DIO low while the sketch's latch
+    // is HIGH would otherwise leave the line low, and the next 1 bit, which
+    // moves no latch, never reaches the chip (finding
+    // chip-release-leaves-esp32-output-at-chip-level).
+    const mcu = net.mcuLevel;
+    if (mcu === undefined || host.peekPad?.(pin) || host.getPinDirection?.(pin) !== 1) return;
+    if (net.lastLevel === mcu) return;
+    level = mcu;
+  } else {
+    level = resolved.v === '1';
+  }
   const sinks = [...net.sinks.values()];
   publishNetLevel(host, pin, level, (lvl) => {
     net.lastLevel = lvl;
@@ -265,6 +289,9 @@ export function setBoardPinDrive(
       unwatch: () => {},
       contended: false,
       lastLevel: undefined,
+      // The channel carries the output pad's level until a chip drives it.
+      mcuLevel:
+        !host.peekPad?.(pin) && host.getPinDirection?.(pin) === 1 ? host.getPinState?.(pin) : undefined,
     };
     // The pad decides the resolution as much as the chips do, so a pinMode
     // in the sketch re-resolves the pin. And the net claims the pin's level:
