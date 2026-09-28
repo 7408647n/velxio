@@ -683,6 +683,7 @@ export function projectSensorValues(
     if (ctrl.type !== 'slider') continue;
     const n = propertyNumber(source[ctrl.propertyKey ?? ctrl.key]);
     if (n !== undefined) values[ctrl.key] = n;
+    else if (values[ctrl.key] === undefined) values[ctrl.key] = ctrl.defaultValue;
   }
   return values;
 }
@@ -760,4 +761,17 @@ export function registerSensorControls(defs: Record<string, SensorControlDef>): 
 export function getSensorControl(id: string | null | undefined): SensorControlDef | undefined {
   if (!id) return undefined;
   return SENSOR_CONTROLS[id] ?? proSensorControls[id];
+}
+
+/**
+ * Where a sensor's control `key` starts when the project leaves it unset: the
+ * control definition's default, the one number the panel, the property
+ * dialog and the part all share. A part reads its starting value from here
+ * instead of a literal of its own (the BMP280 used to start at 25 C while
+ * its panel and dialog said 24). `fallback` is only for a part whose control
+ * definition is missing, which the sensor-defaults test forbids.
+ */
+export function sensorControlDefault(id: string, key: string, fallback: number): number {
+  const v = getSensorControl(id)?.defaultValues[key];
+  return typeof v === 'number' ? v : fallback;
 }

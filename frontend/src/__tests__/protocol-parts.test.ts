@@ -21,6 +21,7 @@ import type { LineHostPort } from '../simulation/line/LineHost';
 import { INITIAL_PAD, type PadEvent, type PadState } from '../simulation/line/padEvent';
 import { clearLineGaps, lineGaps } from '../simulation/line/requestLine';
 import { dispatchSensorUpdate } from '../simulation/SensorUpdateRegistry';
+import { SENSOR_CONTROLS } from '../simulation/sensorControlConfig';
 import { DHT22_RESPONSE_START_US } from '../simulation/line/models/dht22';
 import {
   emitIr,
@@ -597,6 +598,15 @@ describe('mpu6050 — I2C IMU', () => {
     const rig = i2cRig({ imu: HW_I2C_PINS });
     PartSimulationRegistry.get('mpu6050')!.attachEvents!(makeElement(), makeI2CSim() as any, noPins, 'imu');
     expect(rig.readReg(0x68, 0x75, 1)).toEqual([0x68]);
+  });
+
+  it('TEMP_OUT starts at the panel default (24 C), not the chip model power-on 25 C', () => {
+    const rig = i2cRig({ imu: HW_I2C_PINS });
+    PartSimulationRegistry.get('mpu6050')!.attachEvents!(makeElement(), makeI2CSim() as any, noPins, 'imu');
+    expect(SENSOR_CONTROLS.mpu6050.defaultValues.temp).toBe(24);
+    const [hi, lo] = rig.readReg(0x68, 0x41, 2)!;
+    const raw = ((hi << 8) | lo) << 16 >> 16;
+    expect(raw / 340 + 36.53).toBeCloseTo(24, 2);
   });
 
   it('ACCEL_ZOUT reports +1g (0x40, 0x00)', () => {
@@ -1334,6 +1344,17 @@ describe('bmp280 — ESP32 path', () => {
       'bmp280',
       i2cPartWorkerPin('bmp-esp-1'),
       expect.objectContaining({ addr: 0x76, owner: 'bmp-esp-1' }),
+    );
+  });
+
+  it('an element with no temperature starts the worker at the panel default (24 C, 1013.25 hPa)', () => {
+    const sim = makeEsp32Sim();
+    PartSimulationRegistry.get('bmp280')!.attachEvents!(makeElement(), sim as any, noPins, 'bmp-esp-def');
+    expect(SENSOR_CONTROLS.bmp280.defaultValues).toMatchObject({ temperature: 24, pressure: 1013.25 });
+    expect(sim.registerSensor).toHaveBeenCalledWith(
+      'bmp280',
+      i2cPartWorkerPin('bmp-esp-def'),
+      expect.objectContaining({ temperature: 24, pressure: 1013.25 }),
     );
   });
 

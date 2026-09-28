@@ -397,7 +397,7 @@ describe('the BMP280 temperature set in the property dialog, on real firmware', 
 });
 
 // A BMP280 whose attach does NOT read the project off its element (it starts
-// on its own 25 C whatever the element says): the value set in the dialog
+// on its own start whatever the element says): the value set in the dialog
 // still reaches the firmware on the first run, because the canvas replays the
 // project's values to every sensor part it attaches.
 PartSimulationRegistry.register('test-bmp280-own-start', {
@@ -435,12 +435,56 @@ describe('a part that keeps its own start still starts on the dialog value', () 
     expect(getLastSensorValues('bmp')).toBeUndefined();
   });
 
-  it('a control the project leaves unset keeps the part start, as before', () => {
+  it('a control the project leaves unset starts at the control default (24 C), like the panel and the dialog', () => {
     const b = bench();
     bmp280(b, {});
     b.load();
     b.run();
-    expect(b.reading()).toBe('T=25.0');
+    expect(SENSOR_CONTROLS.bmp280.defaultValues.temperature).toBe(24);
+    expect(b.reading()).toBe('T=24.0');
+  });
+});
+
+// A part with a starting value of its OWN that disagrees with its control
+// definition (here: an element that always says 25 C, the way a part with a
+// literal in its attach behaves). The project sets nothing, so the panel and
+// the dialog show the control default, 24 C; the first run must read that
+// too, not the part's literal.
+PartSimulationRegistry.register('test-bmp280-literal-start', {
+  attachEvents: (_el, sim, getPin, id, resolver) =>
+    PartSimulationRegistry.get('bmp280')!.attachEvents!(
+      Object.assign(new EventTarget(), { temperature: 25 }) as never,
+      sim,
+      getPin,
+      id,
+      resolver,
+    ),
+});
+registerSensorControls({ 'test-bmp280-literal-start': SENSOR_CONTROLS.bmp280 });
+
+describe('an unset sensor starts on its control default, whatever the part would start on', () => {
+  it('first run: the sketch reads the control default (24 C), not the part literal (25 C)', () => {
+    const b = bench();
+    b.wire('bmp', 'VCC', '5V');
+    b.wire('bmp', 'GND', 'GND.1');
+    b.wire('bmp', 'SDA', 'A4');
+    b.wire('bmp', 'SCL', 'A5');
+    b.mount({ id: 'bmp', metadataId: 'test-bmp280-literal-start', properties: {} });
+    b.load();
+    b.run();
+    expect(b.reading()).toBe('T=24.0');
+  });
+
+  it('a value the project sets still wins over the default', () => {
+    const b = bench();
+    b.wire('bmp', 'VCC', '5V');
+    b.wire('bmp', 'GND', 'GND.1');
+    b.wire('bmp', 'SDA', 'A4');
+    b.wire('bmp', 'SCL', 'A5');
+    b.mount({ id: 'bmp', metadataId: 'test-bmp280-literal-start', properties: { temperature: 31 } });
+    b.load();
+    b.run();
+    expect(b.reading()).toBe('T=31.0');
   });
 });
 
