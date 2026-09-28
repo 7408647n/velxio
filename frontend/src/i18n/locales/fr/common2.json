@@ -417,7 +417,9 @@
       "datasheetTab": "Fiche technique",
       "examplesTitle": "Projets d’exemple",
       "productPage": "Page produit",
-      "datasheetPage": "Specifications"
+      "datasheetPage": "Specifications",
+      "sensorValues": "Valeurs du capteur",
+      "sensorValuesHint": "Les valeurs avec lesquelles le capteur démarre la simulation, et auxquelles Reset le ramène. Déplacer son curseur pendant la simulation ne les modifie pas."
     },
     "flash": {
       "title": "Flasher {{board}}",

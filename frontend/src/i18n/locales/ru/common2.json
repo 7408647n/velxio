@@ -417,7 +417,9 @@
       "datasheetTab": "Спецификация",
       "examplesTitle": "Примеры проектов",
       "productPage": "Страница товара",
-      "datasheetPage": "Specifications"
+      "datasheetPage": "Specifications",
+      "sensorValues": "Значения датчика",
+      "sensorValuesHint": "С этими значениями датчик запускается в симуляции, и к ним его возвращает Reset. Перемещение ползунка во время симуляции их не меняет."
     },
     "flash": {
       "title": "Прошить {{board}}",

@@ -42,10 +42,18 @@ let replaying = 0;
  * drops those writes (properties already hold these values) and the custom
  * chip overlay skips its attrs mirror.
  */
-export function replayProjectSensorValues(componentId: string, values: SensorValues): void {
+export function replayProjectSensorValues(
+  componentId: string,
+  values: SensorValues,
+  opts: { cache?: boolean } = {},
+): void {
   replaying++;
   try {
-    dispatchSensorUpdate(componentId, values);
+    // cache: false hands the part its values without seeding the panel's
+    // cache, so a panel opened later still replays the full project set
+    // (defaults included) on first open, as it always has.
+    if (opts.cache === false) registry.get(componentId)?.(values);
+    else dispatchSensorUpdate(componentId, values);
   } finally {
     replaying--;
   }

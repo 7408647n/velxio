@@ -13,7 +13,11 @@
 
 import React, { useRef, useEffect, useCallback, useReducer } from 'react';
 import type { ComponentMetadata } from '../types/component-metadata';
-import { useSimulatorStore, getBoardSimulator } from '../store/useSimulatorStore';
+import {
+  useSimulatorStore,
+  getBoardSimulator,
+  replayProjectSensorValuesOnAttach,
+} from '../store/useSimulatorStore';
 import { useElectricalStore } from '../store/useElectricalStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { buildProjectSdImage, decodeSdFiles } from '../utils/sdCardFiles';
@@ -719,6 +723,13 @@ export const DynamicComponent: React.FC<DynamicComponentProps> = ({
       } catch (e) {
         console.error(`[part] ${metadata.id} (${id}) failed to attach:`, e);
         cleanupSimulationEvents = undefined;
+      }
+      // A sensor starts from the values its project sets (the property
+      // dialog's fields), including a part whose attach does not read them.
+      try {
+        replayProjectSensorValuesOnAttach(id);
+      } catch (e) {
+        console.error(`[part] ${metadata.id} (${id}) rejected its project values:`, e);
       }
     }
 

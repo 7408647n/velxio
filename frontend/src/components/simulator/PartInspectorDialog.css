@@ -483,6 +483,33 @@
   max-width: 150px;
 }
 
+/* ── Sensor project values (SensorProjectFields) ─────────────────────── */
+
+.pid-sensor-title {
+  color: var(--wb-10);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: help;
+}
+
+.pid-sensor-row .pid-row-label {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.pid-sensor-range {
+  flex: 1 1 60px;
+  min-width: 40px;
+  accent-color: var(--accent, #0071e3);
+}
+
+.pid-sensor-input {
+  flex: 0 0 auto;
+  width: 78px;
+  text-align: right;
+}
+
 .pid-defaults {
   margin-top: 8px;
   border-top: 1px dashed var(--wb-7);
