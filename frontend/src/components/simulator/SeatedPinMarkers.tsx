@@ -14,6 +14,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { rotatePinLocal } from '../../utils/pinPositionCalculator';
+import { readPinInfo } from '../../utils/readPinInfo';
 
 interface PinInfo {
   name: string;
@@ -59,8 +60,9 @@ export const SeatedPinMarkers: React.FC<SeatedPinMarkersProps> = ({
     let timer: ReturnType<typeof setTimeout> | undefined;
     const tryRead = (): boolean => {
       const element = document.getElementById(componentId);
-      if (element && (element as unknown as { pinInfo?: PinInfo[] }).pinInfo) {
-        setPins((element as unknown as { pinInfo: PinInfo[] }).pinInfo);
+      const info = readPinInfo<PinInfo>(element);
+      if (element && info) {
+        setPins(info);
         const wrapper = element.closest('.dynamic-component-wrapper') as HTMLElement | null;
         if (wrapper) setWrapperBox({ w: wrapper.offsetWidth, h: wrapper.offsetHeight });
         return true;

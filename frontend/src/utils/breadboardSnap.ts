@@ -22,6 +22,7 @@ import {
 } from '../velxio-elements/breadboard-mini-element';
 import { breadboardGroupKey, isBreadboard } from './breadboardNets';
 import { calculatePinPosition } from './pinPositionCalculator';
+import { readPinInfo } from './readPinInfo';
 
 export interface Hole {
   name: string;
@@ -95,7 +96,7 @@ function breadboardsOf(components: ComponentLike[]): ComponentLike[] {
 /** Pin names of a mounted component, from its DOM element's pinInfo. */
 function pinNames(componentId: string): string[] | null {
   const el = document.getElementById(componentId);
-  const pinInfo = el && (el as { pinInfo?: Array<{ name: string }> }).pinInfo;
+  const pinInfo = readPinInfo<{ name: string }>(el);
   if (!pinInfo || !Array.isArray(pinInfo) || pinInfo.length === 0) return null;
   return pinInfo.map((p) => p.name);
 }

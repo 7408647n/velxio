@@ -36,6 +36,8 @@ import { mountDigitalGateEngine } from '../../simulation/digital/digitalGateCont
 import { isSpiceMapped } from '../../simulation/spice/componentToSpice';
 import { PinOverlay } from './PinOverlay';
 import { SeatedPinMarkers } from './SeatedPinMarkers';
+import { pinStateEchoHandler } from './pinStateEcho';
+import { PartErrorBoundary } from './PartErrorBoundary';
 import { calculatePinPosition } from '../../utils/pinPositionCalculator';
 import { isBoardComponent, boardPinToNumber } from '../../utils/boardPinMapping';
 import { isBreadboard } from '../../utils/breadboardNets';
@@ -1367,37 +1369,30 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
       // ~2 ms under PWM (490 Hz) and the solver would effectively never run — the
       // root cause of the MOSFET-PWM-LED regression. This single rule makes every
       // current and future SPICE mapper immune to that feedback loop.
-      const logic = PartSimulationRegistry.get(component.metadataId);
-      const spiceOwned = isSpiceMapped(component.metadataId);
+      //
       // Breadboards have no visual on/off state, but they ARE direct-wired to
       // many board pins (one wire per strip → GPIO). Writing properties.state
       // per edge minted a new components array thousands of times per second
       // on multiplexed sketches — pure churn that re-rendered the whole
       // editor. Treat them as self-managed: skip the generic state echo.
-      const hasSelfManagedVisuals =
-        !!(logic && logic.attachEvents) || spiceOwned || isBreadboard(component.metadataId);
-
-      // Generic GND check: for wire-connected output components that don't manage
-      // their own state, require at least one GND wire before activating.
-      // Skip the check for pin-property components (no GND wire to detect) and for
-      // self-managed components (they handle GND themselves via attachEvents).
-      const hasGnd =
-        !wireConnected || hasSelfManagedVisuals ? true : componentHasGndWire(component);
-
-      const unsubscribe = pinManager.onPinChange(pin, (_pin, state) => {
-        if (!hasSelfManagedVisuals) {
-          // Update React state — gate on GND for wire-connected components.
-          updateComponentState(component.id, hasGnd && state);
-        }
-
-        // Delegate to PartSimulationRegistry for custom visual updates
-        if (logic && logic.onPinStateChange) {
-          const el = document.getElementById(component.id);
-          if (el) {
-            logic.onPinStateChange(componentPinName || 'A', hasGnd && state, el);
-          }
-        }
-      });
+      //
+      // Which kind a part is gets decided per change, and a part the app does
+      // not know yet is never echoed (an overlay part whose logic lands after
+      // this effect ran): see pinStateEcho.ts.
+      const unsubscribe = pinManager.onPinChange(
+        pin,
+        pinStateEchoHandler({
+          componentId: component.id,
+          metadataId: component.metadataId,
+          componentPinName,
+          wireConnected,
+          hasGndWire: () => componentHasGndWire(component),
+          isKnownPart: (metadataId) => !!registry.getById(metadataId),
+          ownsVisualsAnyway: (metadataId) => isSpiceMapped(metadataId) || isBreadboard(metadataId),
+          getLogic: (metadataId) => PartSimulationRegistry.get(metadataId),
+          updateComponentState,
+        }),
+      );
       unsubscribers.push(unsubscribe);
     };
 
@@ -1443,7 +1438,7 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
     return () => {
       unsubscribers.forEach((unsub) => unsub());
     };
-  }, [components, wires, boards, pinManager, updateComponentState]);
+  }, [components, wires, boards, pinManager, updateComponentState, registry]);
 
   // Board built-in LED: subscribe directly to pinManager for the LED pin of each board.
   // This works even when no external led-builtin component exists (e.g. basic Blink example).
@@ -2694,58 +2689,72 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
             pointerEvents: 'auto',
           }}
         >
-          <DynamicComponent
-            id={component.id}
-            metadata={metadata}
-            properties={component.properties}
+          <PartErrorBoundary
+            partId={component.id}
+            label={metadata.name || component.metadataId}
             x={component.x}
             y={component.y}
-            isSelected={isSelected}
-            isHovered={isHovered}
-            onMouseDown={(e) => {
-              handleComponentMouseDown(component.id, e);
-            }}
+            resetKey={component.properties}
+            onMouseDown={(e) => handleComponentMouseDown(component.id, e)}
             onContextMenu={(e) => {
-              // Right click is where properties and pins live now. Selecting
-              // first means the ants mark what the dialog is about to edit.
-              // While the simulation runs the inspector still opens (boards
-              // always did), read-only: no rotate/delete/wiring, but the
-              // datasheet, the pin roles and the SD card's live contents are
-              // exactly what a running circuit makes you want to look at.
               e.preventDefault();
               e.stopPropagation();
               openComponentInspector(component.id, { x: e.clientX, y: e.clientY });
             }}
-            onOpenInspector={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              openComponentInspector(component.id, { x: e.clientX, y: e.clientY });
-            }}
-          />
+          >
+            <DynamicComponent
+              id={component.id}
+              metadata={metadata}
+              properties={component.properties}
+              x={component.x}
+              y={component.y}
+              isSelected={isSelected}
+              isHovered={isHovered}
+              onMouseDown={(e) => {
+                handleComponentMouseDown(component.id, e);
+              }}
+              onContextMenu={(e) => {
+                // Right click is where properties and pins live now. Selecting
+                // first means the ants mark what the dialog is about to edit.
+                // While the simulation runs the inspector still opens (boards
+                // always did), read-only: no rotate/delete/wiring, but the
+                // datasheet, the pin roles and the SD card's live contents are
+                // exactly what a running circuit makes you want to look at.
+                e.preventDefault();
+                e.stopPropagation();
+                openComponentInspector(component.id, { x: e.clientX, y: e.clientY });
+              }}
+              onOpenInspector={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                openComponentInspector(component.id, { x: e.clientX, y: e.clientY });
+              }}
+            />
 
-          {/* Green dots on pins plugged into a breadboard — always visible so
-              "seated & connected" is legible without hovering. */}
-          <SeatedPinMarkers
-            componentId={component.id}
-            componentX={component.x}
-            componentY={component.y}
-            seatedPins={seatedPinsByComponent.get(component.id) ?? []}
-            rotation={Number(component.properties?.rotation) || 0}
-          />
-
-          {/* Pin overlay for wire creation - hide while interacting/running */}
-          {!interactionRunning && (
-            <PinOverlay
+            {/* Green dots on pins plugged into a breadboard — always visible so
+                "seated & connected" is legible without hovering. */}
+            <SeatedPinMarkers
               componentId={component.id}
               componentX={component.x}
               componentY={component.y}
-              onPinClick={handlePinClick}
-              showPins={showPinsForComponent}
-              zoom={zoom}
+              seatedPins={seatedPinsByComponent.get(component.id) ?? []}
               rotation={Number(component.properties?.rotation) || 0}
-              wiring={wireInProgress}
             />
-          )}
+
+            {/* Pin overlay for wire creation - hide while interacting/running */}
+            {!interactionRunning && (
+              <PinOverlay
+                componentId={component.id}
+                componentX={component.x}
+                componentY={component.y}
+                onPinClick={handlePinClick}
+                showPins={showPinsForComponent}
+                zoom={zoom}
+                rotation={Number(component.properties?.rotation) || 0}
+                wiring={wireInProgress}
+              />
+            )}
+          </PartErrorBoundary>
         </div>
       </React.Fragment>
     );

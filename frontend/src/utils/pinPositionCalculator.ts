@@ -11,6 +11,7 @@
  *
  * Note: wokwi-elements pinInfo x/y are already in CSS pixels.
  */
+import { readPinInfo } from './readPinInfo';
 
 /**
  * Calculates the absolute canvas position of a specific pin.
@@ -49,7 +50,7 @@ export function calculatePinPosition(
   }
 
   // Access the pinInfo property (all wokwi-elements expose this)
-  const pinInfo = (element as any).pinInfo;
+  const pinInfo: any = readPinInfo(element);
   if (!pinInfo || !Array.isArray(pinInfo)) {
     if (import.meta.env.MODE !== 'test') {
       console.warn(`[pinPositionCalculator] Component ${componentId} does not have pinInfo`);
@@ -202,7 +203,7 @@ export function getAllPinPositions(
   const element = document.getElementById(componentId);
   if (!element) return [];
 
-  const pinInfo = (element as any).pinInfo;
+  const pinInfo: any = readPinInfo(element);
   if (!pinInfo || !Array.isArray(pinInfo)) return [];
 
   return pinInfo.map((pin: any) => ({
