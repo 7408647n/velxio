@@ -6,7 +6,9 @@
  * predecessor — same I2C interface, same 4-pin pinout) loaded as a static
  * asset from /component-svgs/bmp280.svg. Original SVG copied verbatim from
  * third-party/fritzing-parts/svg/core/breadboard/bmp180_breadboard.svg
- * (CC-BY-SA, see THIRDPARTY_LICENSES.md).
+ * (CC-BY-SA, see THIRDPARTY_LICENSES.md), with one change: the silkscreen
+ * "1" of "BMP180" is redrawn as a "2", so the board says what the part is.
+ * The ?v= on the href busts the 30-day image cache the old art sits in.
  *
  * Geometry (matches the Fritzing source):
  *   viewBox 28.35 × 35.43 mm, scaled uniformly at 2.822 px/mm → 80 × 100 px.
@@ -49,9 +51,10 @@ class Bmp280Element extends HTMLElement {
         }
       </style>
       <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-        <!-- Fritzing BMP180 breakout artwork (CC-BY-SA). The asset
-             ships as a public static file so it stays editable separately. -->
-        <image href="/component-svgs/bmp280.svg" x="0" y="0" width="${W}" height="${H}" />
+        <!-- Fritzing BMP180 breakout artwork (CC-BY-SA), silkscreen relabelled
+             BMP280. The asset ships as a public static file so it stays
+             editable separately. -->
+        <image href="/component-svgs/bmp280.svg?v=2" x="0" y="0" width="${W}" height="${H}" />
 
         <!-- Pin labels overlaid above the connector circles. The Fritzing
              source has no silkscreen labels on the pins themselves. -->

@@ -2356,7 +2356,7 @@
       "tagName": "velxio-bmp280",
       "name": "BMP280 (Pressure + Temp)",
       "category": "sensor",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"64\" height=\"64\" rx=\"4\" fill=\"#0d1730\"/><rect x=\"10\" y=\"8\" width=\"44\" height=\"48\" rx=\"2\" fill=\"#172952\"/><circle cx=\"16\" cy=\"15\" r=\"3\" fill=\"#9a916c\"/><circle cx=\"26\" cy=\"15\" r=\"3\" fill=\"#9a916c\"/><circle cx=\"36\" cy=\"15\" r=\"3\" fill=\"#9a916c\"/><circle cx=\"46\" cy=\"15\" r=\"3\" fill=\"#9a916c\"/><rect x=\"22\" y=\"24\" width=\"14\" height=\"10\" fill=\"#303030\"/><rect x=\"14\" y=\"38\" width=\"18\" height=\"14\" fill=\"#e0e0e0\"/><text x=\"23\" y=\"48\" text-anchor=\"middle\" font-size=\"5\" fill=\"#222\" font-family=\"monospace\" font-weight=\"bold\">BMP180</text><circle cx=\"44\" cy=\"45\" r=\"5\" fill=\"#999\"/></svg>",
+      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"64\" height=\"64\" rx=\"4\" fill=\"#0d1730\"/><rect x=\"10\" y=\"8\" width=\"44\" height=\"48\" rx=\"2\" fill=\"#172952\"/><circle cx=\"16\" cy=\"15\" r=\"3\" fill=\"#9a916c\"/><circle cx=\"26\" cy=\"15\" r=\"3\" fill=\"#9a916c\"/><circle cx=\"36\" cy=\"15\" r=\"3\" fill=\"#9a916c\"/><circle cx=\"46\" cy=\"15\" r=\"3\" fill=\"#9a916c\"/><rect x=\"22\" y=\"24\" width=\"14\" height=\"10\" fill=\"#303030\"/><rect x=\"14\" y=\"38\" width=\"18\" height=\"14\" fill=\"#e0e0e0\"/><text x=\"23\" y=\"48\" text-anchor=\"middle\" font-size=\"5\" fill=\"#222\" font-family=\"monospace\" font-weight=\"bold\">BMP280</text><circle cx=\"44\" cy=\"45\" r=\"5\" fill=\"#999\"/></svg>",
       "properties": [],
       "defaultValues": {},
       "pinCount": 4,
