@@ -303,15 +303,42 @@ What follows from it:
   model) already answers a released read slot with a timed rise, so it needs
   no declared pull.
 
-Remote hosts. The QEMU ESP32 and STM32 workers have no pad model: QEMU's pin
-injection carries a level and no float state, so a chip's release keeps the
-chip's last level there (the ABI parity table says so) and a module pull
-does not reach the guest either. The tab's net still resolves the level
-channel, but the guest's register is the worker's. Closing it means a pad
-model in `esp32_worker.py` and `stm32_worker.py` (track `gpio_dir` per pad;
-when a pad goes input and no chip holds it, inject the pull's level) and the
-part's pulls in the chip record. The Raspberry Pi runs its tab-hosted chips
-through this same net, with the no-direction rule above.
+Remote hosts. On the QEMU ESP32 and STM32 boards the guest's input register
+is the worker's, and QEMU's pin injection carries a level and no float state:
+a line the guest or a chip hosted there released kept the last level anybody
+wrote. The worker has a pad model for the pads a module pull is on
+(`backend/app/services/pad_model.py`, shared by `esp32_worker.py` and
+`stm32_worker.py`), with the same tiers as the table above:
+
+- the tab sends every module pull on the board's pins as the `pulls` half of
+  the bus map (`[{pin, pull, owner}]`, `busNets.boardPinPulls`, sent by
+  `buses/remotePulls.ts` with `start_*` and again when a part's resistors
+  come, move or go);
+- strong drivers are the guest's output (its latch while the pad is an
+  output), a chip hosted in the worker between its `vx_pin_write` and its
+  release (`vx_pin_set_mode` to an input mode, or the chip leaving), and a
+  level the tab injected (`set_pin`), which holds until the guest drives the
+  pad as an output, as the store's own release does;
+- with none of them the module pulls decide, and the level goes into the pad
+  inside the direction write that released it (`picsimlab_dir_pin`), so the
+  sketch's next `digitalRead` already sees it; an up and a down from two
+  modules leave the pad and are said once;
+- what reads pads in the worker hears the resolved level: a chip's
+  `vx_pin_read` and its `vx_pin_watch` callbacks, and a GPIO chip select;
+- a pad with no module pull is not the model's: it keeps the old behaviour,
+  the last level written, and the MCU's own internal pull is not modelled
+  there (the ABI parity row `board_pin:DIR:worker` still says so).
+
+A custom chip the worker hosts puts its `chip.json` `"pulls"` on the tab's net
+from `CustomChipPart` (no `ChipInstance` in the tab does it on that path), so
+the level channel and the worker agree.
+
+The Raspberry Pi needs no pad model on the host: the guest's input reads are
+answered from the levels the tab injected (`qemu_manager.set_pin_state`), and
+the host forgets a pin's output level when the guest turns it into an input.
+Its tab-hosted chips run through this same net, with the no-direction rule
+above: the Pi bridge reports the direction in `gpio_setup`, and the store
+reads only its pull.
 
 ### Lifecycle
 
@@ -763,12 +790,17 @@ membership as for any board and sends the result:
 - **UART** (`busRegistry.uartMap(boardId)`): per endpoint with a leg on that
   board, `rx_uart` (the controller whose TX feeds its RX), `tx_uart`, the
   pins, `baud` and `frame`, or `null` for a leg on no controller.
+- **Pulls** (`busNets.boardPinPulls(pinManager)`, `buses/remotePulls.ts`):
+  every module resistor on the board's pins as `{pin, pull: 'up'|'down',
+  owner}`, for the worker's pad model (see "Pull resistors on a line").
 - **Raspberry Pi**: `PiBridgeShim.busTopology()` carries the SPI responders
   as `spi.responders` (the same entries, the CS as a GPIO the relay maps to a
   CE) inside `pi_bus_topology`.
 
 The maps go with `start_*` and again on every membership change
-(`onSpiMapChange`, `onI2cMapChange`, `onUartMapChange`, coalesced per task).
+(`onSpiMapChange`, `onI2cMapChange`, `onUartMapChange`,
+`onBoardPinPullsChange`, coalesced per task). A half that is absent from a
+live map leaves the worker's copy of it as it was.
 Field names are the wire's, which is Python's.
 
 ---
@@ -955,13 +987,14 @@ reopened.
 | `buses/pinFunctions.ts`, `boardPinTables/` | the static routing tables |
 | `buses/storeResolver.ts`, `boardPins.ts` | the store's net resolver and the PinManager adapter |
 | `customChips/busNets.ts` | a board pin as a net with drivers: chips, the MCU's pad, module pulls (`setBoardPinPull`) |
-| `buses/remotePort.ts`, `remoteI2c.ts`, `remoteUart.ts`, `remoteLane.ts` | the ports of a board whose CPU is in a worker |
+| `buses/remotePort.ts`, `remoteI2c.ts`, `remoteUart.ts`, `remoteLane.ts`, `remotePulls.ts` | the ports and maps of a board whose CPU is in a worker |
 | `buses/busChips.ts`, `models/` | portable model artifacts; `models/microsd.c` with `build.sh` and `manifest.json` (source sha, checked by the suites) |
 | `buses/conformance/` | the three kits |
-| `backend/app/services/wasm_chip_runtime.py`, `i2c_bus_table.py`, `uart_bus_table.py`, `esp32_worker.py` | the worker side |
+| `backend/app/services/wasm_chip_runtime.py`, `i2c_bus_table.py`, `uart_bus_table.py`, `pad_model.py`, `esp32_worker.py` | the worker side |
 | `pro/backend/app/pro_boards/stm32_worker.py`, `pi_bus_relay.py`, `pi_spi_responders.py` | the STM32 and Pi hosts (velxio-prod) |
 | `buses/__tests__/` | layer 1: arbitration tables, order permutations, decoders, cross-board I2C and UART |
 | `frontend/src/__tests__/board-buses/` | conformance suites, F0 reproduction rows (`board-buses-repro-*`), the F4 to F7 suites, `board-buses-module-pulls.test.ts`, fixtures |
 | `buses/__tests__/soft-i2c-bus-pullups.test.ts` | SoftwareWire with its pull-ups off, on a real PinManager |
-| `test/backend/unit/test_board_buses_*.py`, `test_wasm_chip_*.py`, `test_microsd_wasm_model.py` | the worker, the runtime, the microSD golden table |
+| `test/backend/unit/test_board_buses_*.py`, `test_wasm_chip_*.py`, `test_microsd_wasm_model.py`, `test_pad_model.py` | the worker, the runtime, the microSD golden table, the pad model |
+| `test/backend/integration/test_esp32_qemu_pads.py`, `test_esp32_qemu_sd_card.py` | the ESP32 and S3 workers on the real libqemu-xtensa with compiled sketches |
 | `project/board-buses-2026-09/harness/` (velxio-prod) | the in-app matrix, the perf bench, the fixture compiler, the cost and latency harnesses |

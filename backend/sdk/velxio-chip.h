@@ -97,8 +97,10 @@ extern void   vx_pin_pwm_write(vx_pin p, double duty);
  * done: VX_OUTPUT_LOW / VX_OUTPUT_HIGH drive their level at once, VX_OUTPUT
  * drives nothing until the first vx_pin_write, and an INPUT mode releases
  * the line: the chip leaves the wire and the pad's pull, or whoever else
- * holds it, has it. On the QEMU boards there is no pad model and a released
- * pin keeps the last level the chip drove.
+ * holds it, has it. On the QEMU boards the worker's pad model decides a
+ * released board pin the same way when a module's pull resistor is on it
+ * (the guest's output, another driver, else the pull); a board pin with no
+ * module pull keeps the last level the chip drove there.
  */
 extern void   vx_pin_set_mode(vx_pin p, vx_pin_mode mode);
 

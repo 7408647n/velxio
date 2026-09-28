@@ -413,6 +413,7 @@ class WasmChipRuntime:
         blobs: dict[str, bytes] | None = None,
         clock: Optional[Callable[[], int]] = None,
         pad_volts: dict[str, float | None] | None = None,
+        pin_releaser: Optional[Callable[[int], None]] = None,
     ):
         """
         Args:
@@ -460,6 +461,11 @@ class WasmChipRuntime:
                         vx_pin_wired reads; see update_pad_volts. The tab's
                         padVolts.ts computes the same numbers the browser
                         runtime reads, so both hosts answer alike.
+            pin_releaser: (gpio) -> void - the chip stopped driving a mapped
+                        GPIO (vx_pin_set_mode to an input mode). The worker's
+                        pad model (pad_model.py) then decides the pad: the
+                        guest's output, another driver, or a module's pull.
+                        Absent, a release changes nothing, as before.
         """
         self._engine = wasmtime.Engine()
         self._store = wasmtime.Store(self._engine)
@@ -493,6 +499,7 @@ class WasmChipRuntime:
         self._pin_map = dict(pin_map or {})       # logical name → real GPIO
         self._pin_writer = pin_writer
         self._pin_reader = pin_reader
+        self._pin_releaser = pin_releaser
         self._uart_writer = uart_writer
         self._timer_scheduler = timer_scheduler
         self._net_map = {str(k): str(v) for k, v in (net_map or {}).items()}
@@ -1082,15 +1089,23 @@ class WasmChipRuntime:
             # VX_OUTPUT_LOW / VX_OUTPUT_HIGH carry a level, at set_mode as at
             # registration: the open-drain idiom pulls a line with
             # set_mode(VX_OUTPUT_LOW) and never writes it (the browser runtime
-            # drives it the same way). Plain VX_OUTPUT keeps the last value.
+            # drives it the same way). Plain VX_OUTPUT drives nothing until
+            # the first vx_pin_write (velxio-chip.h).
             if mode in (self.MODE_OUTPUT_LOW, self.MODE_OUTPUT_HIGH):
                 vx_pin_write(handle, 1 if mode == self.MODE_OUTPUT_HIGH else 0)
-            # VX_INPUT is the documented tri-state idiom. There is nothing to
-            # release here: QEMU's pin injection (qemu_picsimlab_set_pin)
-            # carries a level and no float state, so the pad keeps the last
-            # level the chip drove. The cross-host table says so on that row
-            # rather than pretending; a pad model in the worker is what would
-            # close it.
+            # VX_INPUT (and the input pulls, and VX_ANALOG) is the documented
+            # tri-state idiom: the chip lets go of the pad. QEMU's pin
+            # injection carries a level and no float state, so what the pad
+            # reads now is the worker's to say: its pad model (pad_model.py)
+            # hands it back to the guest's output, another driver, or a
+            # module's pull resistor, and a pad none of those decides keeps
+            # the chip's last level, as before.
+            elif (mode != 1 and p["gpio"] is not None
+                    and self._pin_releaser is not None):
+                try:
+                    self._pin_releaser(p["gpio"])
+                except Exception as e:
+                    self._emit({"type": "chip_error", "where": "pin_release", "error": str(e)})
 
         def vx_pin_watch(handle: int, edge: int, cb_idx: int, user_data: int) -> None:
             if not (0 <= handle < len(self._pins)):

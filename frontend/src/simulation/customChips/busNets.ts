@@ -153,6 +153,70 @@ interface BoardNet {
 // of two Unos in one project are two nets, never one.
 const boardNets = new Map<BoardPinHost, Map<number, BoardNet>>();
 
+// ── Module pulls, for a board whose guest runs elsewhere ────────────────────
+
+/** One module resistor on a board pin, as the bus map carries it to a QEMU
+ *  worker (field names are the wire's). */
+export interface BoardPinPullEntry {
+  pin: number;
+  pull: 'up' | 'down';
+  owner: string;
+}
+
+type PullsListener = (host: BoardPinHost) => void;
+const pullsListeners = new Set<PullsListener>();
+
+/**
+ * Hear that the module pulls on some host's board pins changed: a part
+ * mounted, re-wired or removed. A board whose guest runs in a QEMU worker
+ * forwards them (boardPinPulls) in its bus map, because the guest's input
+ * register is the worker's and only a pad model there can put the resistor
+ * on it (backend pad_model.py). The listener filters by host.
+ */
+export function onBoardPinPullsChange(listener: PullsListener): () => void {
+  pullsListeners.add(listener);
+  return () => pullsListeners.delete(listener);
+}
+
+function pullsChanged(host: BoardPinHost): void {
+  for (const l of [...pullsListeners]) {
+    try {
+      l(host);
+    } catch (e) {
+      console.warn('[chipbus] a pulls listener failed', e);
+    }
+  }
+}
+
+// A part mounting puts several pulls in one go, and a re-wire takes them off
+// and back on: the listeners hear the host once, after the burst.
+const pendingPulls = new Set<BoardPinHost>();
+
+function queuePullsChanged(host: BoardPinHost): void {
+  if (pullsListeners.size === 0 || pendingPulls.has(host)) return;
+  pendingPulls.add(host);
+  queueMicrotask(() => {
+    if (!pendingPulls.delete(host)) return;
+    pullsChanged(host);
+  });
+}
+
+/** Every module pull on `host`'s board pins, sorted so two equal sets
+ *  compare equal as JSON. */
+export function boardPinPulls(host: BoardPinHost): BoardPinPullEntry[] {
+  const out: BoardPinPullEntry[] = [];
+  const byPin = boardNets.get(host);
+  if (!byPin) return out;
+  for (const [pin, net] of byPin) {
+    for (const [owner, d] of net.drivers) {
+      if (d.strength !== Strength.PULL) continue;
+      out.push({ pin, pull: d.value === 1 ? 'up' : 'down', owner });
+    }
+  }
+  out.sort((a, b) => a.pin - b.pin || (a.owner < b.owner ? -1 : a.owner > b.owner ? 1 : 0));
+  return out;
+}
+
 /** The MCU's pad as a driver of its own pin: strong while it drives, a pull
  *  while released with one, nothing while released and floating. A pad the
  *  engine never reported on has not been touched by the guest: floating,
@@ -374,6 +438,8 @@ export function setBoardPinDrive(
     boardNets.set(host, byPin);
   }
   let net = byPin.get(pin);
+  const wasPull = net?.drivers.get(driverId)?.strength === Strength.PULL;
+  if (wasPull || drive.strength === Strength.PULL) queuePullsChanged(host);
   if (drive.strength <= Strength.HIGHZ) {
     if (!net || !net.drivers.has(driverId)) return;
     net.drivers.delete(driverId);
@@ -480,6 +546,9 @@ export function clearBusDriversForChip(pm: PinManagerLike, componentId: string):
   for (const [pin, net] of [...byPin.entries()]) {
     const gone = [...net.drivers.keys()].filter((id) => id.startsWith(prefix));
     if (gone.length === 0) continue;
+    if (gone.some((id) => net.drivers.get(id)?.strength === Strength.PULL)) {
+      queuePullsChanged(pm as BoardPinHost);
+    }
     for (const id of gone) net.drivers.delete(id);
     // Same order as a release: the level the others leave goes into the
     // guest through the departing chip's door too, then the door closes.
@@ -495,5 +564,6 @@ export function resetBusNets(): void {
   inContention.clear();
   for (const byPin of boardNets.values()) for (const net of byPin.values()) net.unwatch();
   boardNets.clear();
+  pendingPulls.clear();
   resetBusKernel();
 }

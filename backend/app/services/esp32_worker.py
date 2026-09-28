@@ -16,7 +16,8 @@ stdin  line 2+: JSON commands
                {"cmd": "uart_send",        "uart": N,      "data": "<base64>"}
                {"cmd": "set_i2c_response", "addr": N,      "response": V}
                {"cmd": "bus_map",          "spi": [{"owner","bus_id","cs","model"}],
-                                           "i2c": [{"owner","bus_id","sda","scl","addresses"}, {"unplaced": [...]}]}
+                                           "i2c": [{"owner","bus_id","sda","scl","addresses"}, {"unplaced": [...]}],
+                                           "pulls": [{"pin","pull": "up"|"down","owner"}]}
                {"cmd": "bus_attrs",        "owner": "...", "attrs": {name: number}}
                {"cmd": "stop"}
 
@@ -168,6 +169,21 @@ except ImportError:
     _UartBusTable = _mod.UartBusTable      # type: ignore[assignment]
     _UART_NOT_ROUTED = _mod.NOT_ROUTED     # type: ignore[assignment]
     _uart_owner_of = _mod.owner_of         # type: ignore[assignment]
+
+# The level of the pads a module's pull resistor is on (board-buses.md, "Pull
+# resistors on a line"): QEMU's injection keeps the last level written, and a
+# released line has to go where the module's resistor takes it. Shared with
+# the STM32 worker.
+try:
+    from app.services.pad_model import PadModel as _PadModel
+except ImportError:
+    import importlib.util, pathlib, sys as _sys
+    _here = pathlib.Path(__file__).parent
+    _spec = importlib.util.spec_from_file_location('pad_model', _here / 'pad_model.py')
+    _mod = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
+    _sys.modules['pad_model'] = _mod
+    _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+    _PadModel = _mod.PadModel              # type: ignore[assignment]
 
 # The microSD has no slave of its own here any more (project
 # board-buses-2026-09, F4). It used to be `esp32_sd_slave.SdSpiSlave`, a third
@@ -1141,6 +1157,63 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     # sketch's business (the Keypad library drives the columns).
     _keypad_by_gpio: dict[int, '_MatrixKeypad'] = {}
 
+    # ── Pads with a module pull (pad_model.py) ───────────────────────────────
+    # The tab maps every board pin a module's resistor is on (`pulls` in the
+    # bus map). When nothing strong drives such a pad (the guest released it,
+    # a chip hosted here let go, no injection holds it) the resistor's level
+    # goes into GPIO_IN, synchronously, inside the GPIO_ENABLE write that
+    # released it, so the guest's next digitalRead sees it. A pad with no
+    # module pull is not touched.
+    def _pad_write(gpio: int, level: int) -> None:
+        lib.qemu_picsimlab_set_pin(gpio + 1, level)
+
+    def _pad_level_moved(gpio: int, level: int) -> None:
+        # What reads pads in this worker hears the resolved level: a chip's
+        # vx_pin_read and its watches (a TM1637 model waits for CLK to rise,
+        # and avishorp's driver raises it by releasing), and a GPIO chip
+        # select. The tab is not told: its own net resolves the same pull
+        # from the direction it already reported.
+        if _pin_state.get(gpio) == level:
+            return
+        _pin_state[gpio] = level
+        for rt in list(_chip_pin_watch_runtimes):
+            try:
+                rt.notify_pin_change(gpio, level)
+            except Exception as e:
+                _log(f'[custom-chip pin_watch] error: {e!r}')
+        _recompute_spi_selection()
+
+    _LINE_OWNED = ('dht22', 'dht11', 'ir-nec', 'hc-sr04')
+
+    def _pad_owned_elsewhere(gpio: int) -> bool:
+        # A line model or a keypad wire answers for its pad on its own clock.
+        if gpio in _keypad_by_gpio:
+            return True
+        for pin, sd in list(_sensors.items()):
+            t = sd.get('type')
+            if t not in _LINE_OWNED:
+                continue
+            if pin == gpio or (t == 'hc-sr04' and int(sd.get('echo_pin', pin + 1)) == gpio):
+                return True
+        return False
+
+    _pads = _PadModel(_pad_write, on_level=_pad_level_moved,
+                      skip=_pad_owned_elsewhere, log=_log)
+
+    def _apply_pull_map(entries) -> None:
+        # From the command loop or the start: under the IO-thread lock, like
+        # set_pin (the level can raise a GPIO interrupt into the guest).
+        if entries is None:
+            return
+        if _lock_iothread:
+            _lock_iothread(b'esp32_worker.py:pulls', 0)
+        try:
+            _pads.set_pulls(entries)
+        finally:
+            if _unlock_iothread:
+                _unlock_iothread()
+        _log(f'[pads] module pulls: {_pads.pulls()}')
+
     def _keypad_apply(changes) -> None:
         for kp_gpio, kp_level in changes:
             lib.qemu_picsimlab_set_pin(kp_gpio + 1, kp_level)
@@ -1539,6 +1612,7 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             return
         gpio = int(_PINMAP[slot]) if 1 <= slot <= _GPIO_COUNT else slot
         _pin_state[gpio] = value & 1
+        _pads.guest_level(gpio, value)
         # Matrix keypad: the output latch of one of its wires moved.
         _kp = _keypad_by_gpio.get(gpio)
         if _kp is not None:
@@ -1668,6 +1742,9 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         gpio = int(_PINMAP[slot]) if 1 <= slot <= _GPIO_COUNT else slot
         if direction in (0, 1):
             _pin_dir[gpio] = direction
+            # A released pad goes where a module's pull takes it, before the
+            # guest's next read; one the guest drives stops being the host's.
+            _pads.guest_dir(gpio, direction == 1)
             # A sink's select released to an input is one this side can no
             # longer read (see _sink_may_be_selected).
             if _spi_sinks_known[0]:
@@ -2704,8 +2781,17 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
 
                 # ── Plumbing: hook the runtime to QEMU's live peripherals ──
                 # GPIO output: chip's vx_pin_write → qemu_picsimlab_set_pin
-                def _chip_pin_writer(gpio: int, value: int, _lib=lib):
+                # The chip's identity in the pad model: its drives are strong
+                # until it lets go (vx_pin_set_mode to an input) or leaves.
+                _pad_owner = object()
+                sensor_data['pad_owner'] = _pad_owner
+
+                def _chip_pin_writer(gpio: int, value: int, _lib=lib, _o=_pad_owner):
                     _lib.qemu_picsimlab_set_pin(gpio + 1, value)
+                    _pads.chip_drive(gpio, _o, value)
+
+                def _chip_pin_releaser(gpio: int, _o=_pad_owner):
+                    _pads.chip_release(gpio, _o)
 
                 # GPIO input: chip reads current QEMU pin state; None for a
                 # pad the guest never drove, so the runtime reads the pull.
@@ -2754,6 +2840,7 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                     pin_map=pin_map,
                     pin_writer=_chip_pin_writer,
                     pin_reader=_chip_pin_reader,
+                    pin_releaser=_chip_pin_releaser,
                     uart_writer=_chip_uart_writer,
                     timer_scheduler=_chip_timer_scheduler,
                     net_map=net_map,
@@ -2892,6 +2979,9 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     _i2c_table.apply_map((cfg.get('bus_map') or {}).get('i2c'))
     # And which UART each endpoint's legs are wired to (F6).
     _uart_table.apply_map((cfg.get('bus_map') or {}).get('uart'))
+    # And the module pulls, so a pad the guest reads before it ever drives it
+    # (a released line from reset) already reads its resistor.
+    _apply_pull_map((cfg.get('bus_map') or {}).get('pulls'))
     _emit({'type': 'system', 'event': 'booted'})
     _log(f'QEMU started: machine={machine} firmware={firmware_path}')
     _log(f'QEMU args: {[a.decode() for a in args_list]}')
@@ -3016,6 +3106,9 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                     _lock_iothread(b'esp32_worker.py:set_pin', 0)
                 try:
                     lib.qemu_picsimlab_set_pin(int(cmd['pin']) + 1, int(cmd['value']))
+                    # A strong drive: it beats a module pull until the guest
+                    # takes the pad as an output.
+                    _pads.inject(int(cmd['pin']), int(cmd['value']))
                 finally:
                     if _unlock_iothread:
                         _unlock_iothread()
@@ -3127,6 +3220,10 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             # And for UART (F6): the controllers each endpoint's legs reach,
             # or that it reaches none. No `uart` key leaves it as it was.
             _uart_table.apply_map(cmd.get('uart'))
+            # And the module pulls on the board pins. No `pulls` key leaves
+            # them as they were.
+            if 'pulls' in cmd:
+                _apply_pull_map(cmd.get('pulls') or [])
 
         elif c == 'bus_attrs':
             # Live inputs of one responder the map put here, between two maps.
@@ -3294,6 +3391,18 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                 # By identity, the record's pin: a second device at the same
                 # address (the same sensor on the other controller) stays.
                 _i2c_table.remove(('sensor', gpio))
+            # The pads a departed chip drove go back to the guest, another
+            # driver or their pull. Outside _sensors_lock: the QEMU thread
+            # takes that lock while it holds the IO-thread lock.
+            _owner = sensor.get('pad_owner') if sensor else None
+            if _owner is not None:
+                if _lock_iothread:
+                    _lock_iothread(b'esp32_worker.py:chip_gone', 0)
+                try:
+                    _pads.chip_gone(_owner)
+                finally:
+                    if _unlock_iothread:
+                        _unlock_iothread()
             _log(f'Sensor detached from GPIO {gpio}')
 
         # ── ESP32-CAM frame injection ────────────────────────────────────

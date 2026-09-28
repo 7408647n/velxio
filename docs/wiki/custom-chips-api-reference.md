@@ -178,8 +178,9 @@ line (an open-drain protocol, a bus the chip only sometimes drives) is done:
   pad's pull (a `pinMode(INPUT_PULLUP)` in the sketch restores HIGH) or
   another chip, or a pull the module declares in `chip.json` (`"pulls"`); a
   floating pad keeps the level it had. The chip's own pull is not put on a
-  board pin. On the QEMU boards the worker has no pad model,
-  so a released pin keeps the last level the chip drove.
+  board pin. On the QEMU boards the worker's pad model decides a released
+  board pin the same way when a module pull is on it; a board pin with no
+  module pull keeps the last level the chip drove there.
 
 ### `vx_pin_watch`
 
