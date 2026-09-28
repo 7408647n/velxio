@@ -183,7 +183,11 @@ describe('QEMU ESP32: a target that arrives or leaves mid-run', () => {
     const handle = target(id, 'bmp-a', 'D21', 'D22');
     shim.registerSensor('bmp280', 276, { addr: 0x76, owner: 'bmp-a' });
     await flush();
-    const maps = ws.sent.slice(before).filter((m) => m.type === 'esp32_bus_map');
+    // The I2C frames: the target's pull-ups on SDA and SCL arrive in a
+    // `pulls` frame of their own (buses/remotePulls.ts).
+    const i2cFrames = () =>
+      ws.sent.slice(before).filter((m) => m.type === 'esp32_bus_map' && m.data && 'i2c' in m.data);
+    const maps = i2cFrames();
     expect(maps).toEqual([
       {
         type: 'esp32_bus_map',
@@ -194,7 +198,7 @@ describe('QEMU ESP32: a target that arrives or leaves mid-run', () => {
     handle.dispose();
     shim.unregisterSensor(276);
     await flush();
-    const after = ws.sent.slice(before).filter((m) => m.type === 'esp32_bus_map');
+    const after = i2cFrames();
     expect(after.map((m) => m.data)).toEqual([maps[0].data, { i2c: [] }]);
   });
 

@@ -93,6 +93,7 @@ import {
 } from '../simulation/buses';
 import { RemoteI2cLane } from '../simulation/buses/remoteI2c';
 import { RemoteUartLane } from '../simulation/buses/remoteUart';
+import { remotePullLane, type RemotePullLane } from '../simulation/buses/remotePulls';
 import { i2cPartWorkerPin } from '../simulation/parts/i2cPart';
 import {
   loadSdBusChip,
@@ -235,6 +236,8 @@ export class Esp32BridgeShim {
    * instead of leaving them on the UART their record alone named.
    */
   private readonly sensorOwners = new Map<number, string>();
+  /** The module pulls on this board's pins, the `pulls` half of the map. */
+  private readonly pullLane: RemotePullLane;
 
   constructor(bridge: Esp32Bridge, pm: PinManager) {
     this.bridge = bridge;
@@ -281,9 +284,15 @@ export class Esp32BridgeShim {
     // The start config asks for the I2C and UART halves as they are when the
     // socket opens: a first Run may come before any membership change pushed
     // one.
+    // The module pulls on the board's pins, for the worker's pad model: sent
+    // with the start and whenever a part's resistors come or go.
+    this.pullLane = remotePullLane(pm, (pulls) =>
+      (bridge as unknown as { sendPullMap?: (m: unknown[]) => void }).sendPullMap?.(pulls),
+    );
     (bridge as unknown as { onBusMapRequest?: unknown }).onBusMapRequest = () => ({
       i2c: this.i2cLane.poll().i2c,
       uart: this.uartLane.poll(this.sensorOwners.values()).uart,
+      pulls: this.pullLane.poll().pulls,
     });
   }
 
@@ -1028,6 +1037,8 @@ class Stm32BridgeShim {
   private readonly uartLane: RemoteUartLane;
   /** The owners of the records the worker holds, by pin; see Esp32BridgeShim.sensorOwners. */
   private readonly sensorOwners = new Map<number, string>();
+  /** The module pulls on its pins (the `pulls` half); see Esp32BridgeShim.pullLane. */
+  private readonly pullLane: RemotePullLane;
 
   constructor(bridge: Stm32Bridge, pm: PinManager) {
     this.bridge = bridge;
@@ -1045,9 +1056,13 @@ class Stm32BridgeShim {
     );
     bridge.onSpiBatch = (mosi) => this.remoteLane.port?.deliver(mosi);
     bridge.onUartTxBytes = (uart, bytes) => this.uartLane.deliver(uart, bytes);
+    // The module pulls on the board's pins, for the worker's pad model; see
+    // Esp32BridgeShim.pullLane.
+    this.pullLane = remotePullLane(pm, (pulls) => bridge.sendPullMap(pulls));
     bridge.onBusMapRequest = () => ({
       i2c: this.i2cLane.poll().i2c,
       uart: this.uartLane.poll(this.sensorOwners.values()).uart,
+      pulls: this.pullLane.poll().pulls,
     });
   }
 

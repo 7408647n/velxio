@@ -26,6 +26,7 @@ import { padVoltsFor, samePadVolts } from '../customChips/padVolts';
 import { readChipUartPads } from '../customChips/chipUartPads';
 import { setAdcVoltage, analogRailVolts } from './partUtils';
 import { attachUartEndpoint } from '../buses';
+import { setBoardPinPull, type BoardPinHost } from '../customChips/busNets';
 import { isBusCapable, type GuestClock, type UartHandle } from '../buses/types';
 
 // Physical-key (KeyboardEvent.code) -> Galaksija keyboard matrix offset, from
@@ -252,6 +253,26 @@ PartSimulationRegistry.register('custom-chip', {
         console.error(`[custom-chip:${componentId}] failed to register on ESP32 backend:`, e);
       }
 
+      // The module's resistors (chip.json "pulls"). The chip runs in the
+      // worker, so no ChipInstance here puts them on the board pins, and the
+      // tab's net would never know them: they go on the net here, as the
+      // browser runtime does (_applyModulePulls), which resolves the level
+      // channel for the parts watching the pin AND is what the shim's pulls
+      // lane sends the worker, whose pad model puts them on the guest's pad
+      // (backend pad_model.py). No sink: the guest's register is the
+      // worker's to move, not this tab's.
+      const pullHost = (sim as { pinManager?: BoardPinHost }).pinManager;
+      const placedPulls: Array<[number, string]> = [];
+      if (pullHost) {
+        for (const [name, pull] of Object.entries(pulls)) {
+          const gpio = pinMap[name];
+          if (gpio == null) continue;
+          const id = `${componentId}::${name}~pull`;
+          setBoardPinPull(pullHost, gpio, id, pull, () => {});
+          placedPulls.push([gpio, id]);
+        }
+      }
+
       // Which of the guest's UARTs the chip is on is the circuit's business,
       // and the circuit is in this tab (board-buses F6). The chip's RX and TX
       // pads go on the bus fabric under the chip's own id, the identity its
@@ -365,6 +386,7 @@ PartSimulationRegistry.register('custom-chip', {
         unsubscribePadVolts();
         offFramebuffer();
         cleanupExtensions();
+        if (pullHost) for (const [gpio, id] of placedPulls) setBoardPinPull(pullHost, gpio, id, null, () => {});
         // Off the wires, so the map the shim sends next no longer names it.
         uartGone = true;
         for (const h of uartHandles) h.dispose();

@@ -404,17 +404,40 @@ export class Stm32Bridge {
 
   /** Asked for the I2C and UART halves as the fabric has them when the start
    *  config is built; see Esp32Bridge.onBusMapRequest. */
-  onBusMapRequest: (() => { i2c?: unknown[]; uart?: unknown[] } | null) | null = null;
+  onBusMapRequest: (() => { i2c?: unknown[]; uart?: unknown[]; pulls?: unknown[] } | null) | null =
+    null;
 
   private _busMap: unknown[] = [];
   private _busMapI2c: unknown[] | null = null;
   private _busMapUart: unknown[] | null = null;
 
-  private startBusMap(): { spi: unknown[]; i2c?: unknown[]; uart?: unknown[] } {
+  /** The last pulls half, or null when none was ever given. */
+  private _busMapPulls: unknown[] | null = null;
+
+  /**
+   * The module pulls on the board's pins alone (buses/remotePulls.ts): which
+   * board pins a module's resistor is on, and which way. The worker's pad
+   * model puts the resistor on a pad nothing strong drives, which is how a
+   * line the guest releases with pinMode(INPUT) reads HIGH through a
+   * module's pull-up. Sent when the list changed; the worker leaves a half
+   * that is absent as it has it.
+   */
+  sendPullMap(pulls: unknown[]): void {
+    this._busMapPulls = pulls;
+    if (this._connected) this._send({ type: 'stm32_bus_map', data: { pulls } });
+  }
+
+  private startBusMap(): {
+    spi: unknown[];
+    i2c?: unknown[];
+    uart?: unknown[];
+    pulls?: unknown[];
+  } {
     try {
       const fresh = this.onBusMapRequest?.();
       if (fresh?.i2c) this._busMapI2c = fresh.i2c;
       if (fresh?.uart) this._busMapUart = fresh.uart;
+      if (fresh?.pulls) this._busMapPulls = fresh.pulls;
     } catch (e) {
       console.warn(`[Stm32Bridge:${this.boardId}] the I2C and UART maps could not be built`, e);
     }
@@ -422,6 +445,7 @@ export class Stm32Bridge {
       spi: this._busMap,
       ...(this._busMapI2c ? { i2c: this._busMapI2c } : {}),
       ...(this._busMapUart ? { uart: this._busMapUart } : {}),
+      ...(this._busMapPulls ? { pulls: this._busMapPulls } : {}),
     };
   }
 

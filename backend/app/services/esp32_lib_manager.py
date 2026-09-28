@@ -451,15 +451,19 @@ class EspLibManager:
             self._write_cmd(inst, {'cmd': 'set_i2c_response', 'addr': addr,
                                    'response': response_byte & 0xFF})
 
-    def set_bus_map(self, client_id: str, spi: list | None, i2c: list | None = None) -> None:
+    def set_bus_map(self, client_id: str, spi: list | None, i2c: list | None = None,
+                    uart: list | None = None, pulls: list | None = None) -> None:
         """Replace the worker's view of who is on the board's SPI bus, and,
-        when the tab sends it, which I2C controller each target is on.
+        when the tab sends them, which I2C controller each target is on, which
+        UART each endpoint's legs reach, and which module pulls sit on the
+        board pins.
 
         The tab sends the whole map on every membership change, so a device
         the user deleted is gone by being absent. It replaced
         set_spi_response, which sent one MISO byte for a byte the guest had
-        already clocked (project board-buses-2026-09, F4). `i2c` is F5's half;
-        None (a tab that predates it) leaves the worker's I2C placement alone,
+        already clocked (project board-buses-2026-09, F4). `i2c` is F5's half,
+        `uart` F6's and `pulls` the module resistors (pad_model.py); None (a
+        tab that predates one) leaves the worker's copy of that half alone,
         and so does a None `spi` for the SPI half: an I2C membership change
         does not re-ship every SPI model's artifact and card image."""
         with self._instances_lock:
@@ -470,6 +474,10 @@ class EspLibManager:
                 cmd['spi'] = spi
             if i2c is not None:
                 cmd['i2c'] = i2c
+            if uart is not None:
+                cmd['uart'] = uart
+            if pulls is not None:
+                cmd['pulls'] = pulls
             self._write_cmd(inst, cmd)
 
     def set_bus_attrs(self, client_id: str, owner: str, attrs: dict) -> None:

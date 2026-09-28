@@ -107,10 +107,13 @@ function startEsp32(id: string): ScriptedSocket {
 /** Long enough for the store's netlist microtask, the registry's flush and the send. */
 const settle = () => new Promise<void>((r) => setTimeout(r, 0));
 
+// The frames that carry the I2C half. A wire move also moves the software
+// bus's pull-ups on SDA and SCL, and those travel in a `pulls` frame of their
+// own (buses/remotePulls.ts).
 const i2cMaps = (ws: ScriptedSocket, from: number) =>
   ws.sent
     .slice(from)
-    .filter((m) => m.type === 'esp32_bus_map')
+    .filter((m) => m.type === 'esp32_bus_map' && m.data && 'i2c' in m.data)
     .map((m) => m.data?.i2c);
 
 describe('QEMU ESP32: the I2C map follows a wire moved mid-run', () => {

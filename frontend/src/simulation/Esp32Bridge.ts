@@ -13,7 +13,8 @@
  *     { type: 'esp32_gpio_in',      data: { pin: number, state: 0 | 1 } }
  *     { type: 'esp32_adc_set',      data: { channel: number, millivolts: number } }
  *     { type: 'esp32_i2c_response', data: { addr: number, response: number } }
- *     { type: 'esp32_bus_map',       data: { spi?: BusMapEntry[], i2c?: I2cMapEntry[] } }
+ *     { type: 'esp32_bus_map',       data: { spi?: BusMapEntry[], i2c?: I2cMapEntry[],
+ *                                          uart?: UartMapEntry[], pulls?: PullEntry[] } }
  *     { type: 'esp32_bus_attrs',     data: { owner: string, attrs: Record<string, number> } }
  *     { type: 'esp32_sensor_attach', data: { sensor_type: string, pin: number, ... } }
  *     { type: 'esp32_sensor_update', data: { pin: number, ... } }
@@ -964,7 +965,8 @@ export class Esp32Bridge {
    * overlay's delegating bridge forwards every `on*` field to the bridge it
    * builds per Run, so the question reaches the one that opens the socket.
    */
-  onBusMapRequest: (() => { i2c?: unknown[]; uart?: unknown[] } | null) | null = null;
+  onBusMapRequest: (() => { i2c?: unknown[]; uart?: unknown[]; pulls?: unknown[] } | null) | null =
+    null;
 
   /** The last map, replayed after a reconnect: the worker starts empty. */
   private _busMap: unknown[] = [];
@@ -975,11 +977,33 @@ export class Esp32Bridge {
    *  keeps every UART chip silent: a record no map places is on no unit). */
   private _busMapUart: unknown[] | null = null;
 
-  private startBusMap(): { spi: unknown[]; i2c?: unknown[]; uart?: unknown[] } {
+  /** The last pulls half, or null when none was ever given. */
+  private _busMapPulls: unknown[] | null = null;
+
+  /**
+   * The module pulls on the board's pins alone (buses/remotePulls.ts): which
+   * board pins a module's resistor is on, and which way. The worker's pad
+   * model puts the resistor on a pad nothing strong drives, which is how a
+   * line the guest releases with pinMode(INPUT) reads HIGH through a
+   * module's pull-up. Sent when the list changed; the worker leaves a half
+   * that is absent as it has it.
+   */
+  sendPullMap(pulls: unknown[]): void {
+    this._busMapPulls = pulls;
+    if (this._connected) this._send({ type: 'esp32_bus_map', data: { pulls } });
+  }
+
+  private startBusMap(): {
+    spi: unknown[];
+    i2c?: unknown[];
+    uart?: unknown[];
+    pulls?: unknown[];
+  } {
     try {
       const fresh = this.onBusMapRequest?.();
       if (fresh?.i2c) this._busMapI2c = fresh.i2c;
       if (fresh?.uart) this._busMapUart = fresh.uart;
+      if (fresh?.pulls) this._busMapPulls = fresh.pulls;
     } catch (e) {
       console.warn(`[Esp32Bridge:${this.boardId}] the I2C and UART maps could not be built`, e);
     }
@@ -987,6 +1011,7 @@ export class Esp32Bridge {
       spi: this._busMap,
       ...(this._busMapI2c ? { i2c: this._busMapI2c } : {}),
       ...(this._busMapUart ? { uart: this._busMapUart } : {}),
+      ...(this._busMapPulls ? { pulls: this._busMapPulls } : {}),
     };
   }
 
