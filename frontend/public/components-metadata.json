@@ -2,7 +2,7 @@
   "version": "1.0.0",
   "components": [
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        DIODE-1N4007\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "diode",
         "1n4007",
@@ -20,7 +20,7 @@
       "description": "1 A / 1000 V silicon rectifier diode. Mains bridge rectifiers, back-EMF protection."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        DIODE-1N4148\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "diode",
         "1n4148",
@@ -37,7 +37,7 @@
       "description": "Small-signal silicon diode. Fast switching, low capacitance. Go-to for logic-level protection."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        ZENER-1N4733\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "diode",
         "zener",
@@ -56,7 +56,7 @@
       "description": "5.1 V Zener diode, 1 W. Voltage reference / regulator / ESD clamp."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        DIODE-1N5817\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "diode",
         "schottky",
@@ -74,7 +74,7 @@
       "description": "Schottky diode, 1 A / 20 V. Vf ≈ 0.32 V at 1 A. Used in low-drop rectification and reverse-polarity protection."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        DIODE-1N5819\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "diode",
         "schottky",
@@ -92,7 +92,7 @@
       "description": "Schottky diode, 1 A / 40 V. Higher breakdown than 1N5817, same low Vf."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        BJT-2N2222\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "transistor",
         "bjt",
@@ -110,7 +110,7 @@
       "description": "General-purpose NPN bipolar transistor. The go-to part for low-power switching and small-signal amplification."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        BJT-2N3055\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "transistor",
         "bjt",
@@ -129,7 +129,7 @@
       "description": "Power NPN bipolar transistor. 15A / 60V / 115W TO-3 package. Classic audio amp output stage."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        BJT-2N3906\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "transistor",
         "bjt",
@@ -147,7 +147,7 @@
       "description": "General-purpose PNP bipolar transistor. Complement of the 2N3904/2N2222."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        MOSFET-2N7000\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "transistor",
         "mosfet",
@@ -167,7 +167,7 @@
       "description": "Logic-level N-channel MOSFET. Vth ≈ 1.6 V, fully enhanced at 3.3 V — perfect for GPIO-driven load switching."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        OPTO-4N25\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "optocoupler",
         "optoisolator",
@@ -185,7 +185,7 @@
       "description": "Single-channel optocoupler with IR LED + phototransistor. CTR ≈ 50%. Provides galvanic isolation between two circuits."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        REG-7805\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "regulator",
         "linear",
@@ -204,7 +204,7 @@
       "description": "Fixed +5V linear regulator, 1A, TO-220. Dropout ≈ 2V. Classic MCU power supply."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        REG-7812\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "regulator",
         "linear",
@@ -223,7 +223,7 @@
       "description": "Fixed +12V linear regulator, 1A, TO-220. Dropout ≈ 2V. Motor drivers, fan supplies."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        REG-7905\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "regulator",
         "linear",
@@ -243,7 +243,7 @@
       "description": "Fixed −5V linear regulator, 1A, TO-220. Negative-rail complement of the 7805."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        BATTERY-9V\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "battery",
         "source",
@@ -261,7 +261,7 @@
       "description": "PP3 / 6LR61 9V alkaline battery. Modelled as 9V DC with ~1.5Ω internal resistance."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        BATTERY-AA\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "battery",
         "source",
@@ -279,7 +279,7 @@
       "description": "AA alkaline cell. 1.5V, low ESR (~0.15Ω). Pair up for 3V/4.5V/6V packs."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        BJT-BC547\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "transistor",
         "bjt",
@@ -297,7 +297,7 @@
       "description": "Small-signal NPN bipolar transistor, European equivalent of 2N3904. High gain (~400)."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        BJT-BC557\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "transistor",
         "bjt",
@@ -315,7 +315,7 @@
       "description": "Small-signal PNP bipolar transistor. Complement of the BC547."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        BATTERY-COIN-CELL\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "battery",
         "source",
@@ -334,7 +334,7 @@
       "description": "Lithium coin cell. 3V, high ESR (~10Ω) — limits peak current."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        DIODE\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "diode",
         "rectifier",
@@ -350,7 +350,7 @@
       "description": "Generic silicon diode. Vf ≈ 0.7 V. Use for textbook rectification examples."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        MOSFET-FQP27P06\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "transistor",
         "mosfet",
@@ -370,7 +370,7 @@
       "description": "Logic-level P-channel MOSFET. Suitable for 3.3V / 5V gate drive."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        OPAMP-IDEAL\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "opamp",
         "amplifier",
@@ -388,7 +388,7 @@
       "description": "Idealized operational amplifier. Infinite gain, infinite input impedance, no saturation. Use for textbook circuits where real-chip limitations are irrelevant."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        MOSFET-IRF540\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "transistor",
         "mosfet",
@@ -408,7 +408,7 @@
       "description": "Power N-channel MOSFET. Vth ≈ 3 V (needs 10 V for full enhancement), 33 A / 100 V, R_DS(on) ≈ 77 mΩ. Classic motor / solenoid driver."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        MOSFET-IRF9540\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "transistor",
         "mosfet",
@@ -427,7 +427,7 @@
       "description": "Power P-channel MOSFET. Used for high-side load switching with logic input."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        REG-LM317\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "regulator",
         "linear",
@@ -445,7 +445,7 @@
       "description": "Adjustable +1.25V to +37V linear regulator. V_out = 1.25·(1 + R2/R1). Versatile workhorse."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        OPAMP-LM324\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "opamp",
         "amplifier",
@@ -464,7 +464,7 @@
       "description": "Quad single-supply op-amp. Same electrical spec as LM358, four channels per package."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        OPAMP-LM358\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "opamp",
         "amplifier",
@@ -482,7 +482,7 @@
       "description": "Dual single-supply op-amp. Output swings close to both rails. Ideal for MCU-powered signal conditioning."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        OPAMP-LM741\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "opamp",
         "amplifier",
@@ -500,7 +500,7 @@
       "description": "Classic general-purpose op-amp. Requires ~1.5V of headroom from each supply rail. Used in didactic circuits."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        OPTO-PC817\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "optocoupler",
         "optoisolator",
@@ -578,7 +578,7 @@
       "description": "Bench DC/AC power supply with optional current limit. DC mode for fixed rails (5V, 12V, etc.); AC mode for sine sources. Visually shares the signal-generator chassis so no new Web Component is needed. The current limit is enforced by the circuit verifier — if any load pulls more than the configured amperage, Run is blocked with a 'source-overload' warning, mimicking a real bench supply's foldback behavior."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        SIGNAL-GENERATOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "signal-generator",
         "source",
@@ -635,7 +635,7 @@
       "description": "Benchtop AC/DC signal source. Sine, square, or DC output. Configurable frequency, amplitude, DC offset."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        OPAMP-TL072\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "opamp",
         "amplifier",
@@ -658,7 +658,7 @@
       "tagName": "wokwi-arduino-mega",
       "name": "Arduino Mega",
       "category": "boards",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        ARDUINO-MEGA\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "led13",
@@ -711,7 +711,7 @@
       "tagName": "wokwi-arduino-nano",
       "name": "Arduino Nano",
       "category": "boards",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        ARDUINO-NANO\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "led13",
@@ -764,7 +764,7 @@
       "tagName": "wokwi-arduino-uno",
       "name": "Arduino Uno",
       "category": "boards",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        ARDUINO-UNO\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "led13",
@@ -817,7 +817,7 @@
       "tagName": "wokwi-esp32-devkit-v1",
       "name": "ESP32 Devkit V1",
       "category": "boards",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        ESP32-DEVKIT-V1\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "led1",
@@ -1148,7 +1148,7 @@
       "tagName": "wokwi-ili9341",
       "name": "ILI9341",
       "category": "displays",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        ILI9341\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "flipHorizontal",
@@ -1263,7 +1263,7 @@
       "tagName": "wokwi-lcd1602",
       "name": "LCD1602",
       "category": "displays",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LCD1602\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "color",
@@ -1419,7 +1419,7 @@
       "tagName": "wokwi-lcd2004",
       "name": "LCD2004",
       "category": "displays",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LCD2004\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [],
       "defaultValues": {},
       "pinCount": 0,
@@ -1432,7 +1432,7 @@
       "tagName": "wokwi-ssd1306",
       "name": "SSD1306 OLED",
       "category": "displays",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        SSD1306\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "imageData",
@@ -1490,7 +1490,7 @@
       "category": "displays"
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        MOTOR-DRIVER-L293D\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "motor",
         "driver",
@@ -1510,7 +1510,7 @@
       "description": "Dual H-bridge motor driver IC. Each channel: EN, IN1, IN2 drive OUT1/OUT2 with the motor supply voltage (VCC2). Rated 600 mA continuous / 1.2 A peak per channel."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        RELAY\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "relay",
         "electromechanical",
@@ -1564,7 +1564,7 @@
       "tagName": "wokwi-dip-switch-8",
       "name": "DIP Switch 8",
       "category": "input",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        DIP-SWITCH-8\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "values",
@@ -1654,7 +1654,7 @@
       "tagName": "wokwi-membrane-keypad",
       "name": "Membrane Keypad",
       "category": "input",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        MEMBRANE-KEYPAD\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "columns",
@@ -1727,7 +1727,7 @@
       "tagName": "wokwi-potentiometer",
       "name": "Potentiometer",
       "category": "input",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        POTENTIOMETER\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "min",
@@ -1784,7 +1784,7 @@
       "tagName": "wokwi-pushbutton",
       "name": "Pushbutton",
       "category": "input",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        PUSHBUTTON\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "color",
@@ -1827,7 +1827,7 @@
       "tagName": "wokwi-slide-switch",
       "name": "Slide Switch",
       "category": "input",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        SLIDE-SWITCH\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "value",
@@ -1848,7 +1848,7 @@
       ]
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        IC-74HC00\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "ic",
         "74hc",
@@ -1868,7 +1868,7 @@
       "description": "Four 2-input NAND gates in one 14-pin DIP package. 74HC family (high-speed CMOS)."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        IC-74HC02\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "ic",
         "74hc",
@@ -1888,7 +1888,7 @@
       "description": "Four 2-input NOR gates in one 14-pin DIP package."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        IC-74HC04\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "ic",
         "74hc",
@@ -1908,7 +1908,7 @@
       "description": "Six NOT gates (inverters) in one 14-pin DIP package."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        IC-74HC08\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "ic",
         "74hc",
@@ -1928,7 +1928,7 @@
       "description": "Four 2-input AND gates in one 14-pin DIP package."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        IC-74HC14\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "ic",
         "74hc",
@@ -1950,7 +1950,7 @@
       "description": "Six Schmitt-trigger inverters in one 14-pin DIP package. Provides input hysteresis — essential for debouncing noisy signals."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        IC-74HC32\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "ic",
         "74hc",
@@ -1970,7 +1970,7 @@
       "description": "Four 2-input OR gates in one 14-pin DIP package."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        IC-74HC86\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "ic",
         "74hc",
@@ -1990,7 +1990,7 @@
       "description": "Four 2-input XOR gates in one 14-pin DIP package."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-AND\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2007,7 +2007,7 @@
       "description": "2-input AND logic gate. Output Y = A · B."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-AND-3\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2025,7 +2025,7 @@
       "description": "3-input AND gate. Output Y = A · B · C."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-AND-4\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2043,7 +2043,7 @@
       "description": "4-input AND gate."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        FLIP-FLOP-D\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "flip-flop",
         "ff",
@@ -2063,7 +2063,7 @@
       "description": "Edge-triggered D-type flip-flop. On rising edge of CLK, Q ← D. Digital simulation only (SPICE cannot do edge detection in .op analysis)."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        FLIP-FLOP-JK\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "flip-flop",
         "ff",
@@ -2082,7 +2082,7 @@
       "description": "JK flip-flop. On rising CLK: J=0/K=0 hold, J=1/K=0 set, J=0/K=1 reset, J=1/K=1 toggle."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-NAND\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2099,7 +2099,7 @@
       "description": "2-input NAND logic gate. Output Y = NOT(A · B)."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-NAND-3\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2117,7 +2117,7 @@
       "description": "3-input NAND gate."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-NAND-4\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2135,7 +2135,7 @@
       "description": "4-input NAND gate."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-NOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2152,7 +2152,7 @@
       "description": "2-input NOR logic gate. Output Y = NOT(A + B)."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-NOR-3\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2170,7 +2170,7 @@
       "description": "3-input NOR gate."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-NOR-4\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2188,7 +2188,7 @@
       "description": "4-input NOR gate."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-NOT\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2206,7 +2206,7 @@
       "description": "1-input inverter. Output Y = NOT(A)."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-OR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2223,7 +2223,7 @@
       "description": "2-input OR logic gate. Output Y = A + B."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-OR-3\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2241,7 +2241,7 @@
       "description": "3-input OR gate. Output Y = A + B + C."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-OR-4\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2259,7 +2259,7 @@
       "description": "4-input OR gate."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        FLIP-FLOP-T\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "flip-flop",
         "ff",
@@ -2279,7 +2279,7 @@
       "description": "Toggle flip-flop. On rising CLK, Q ← Q ⊕ T (toggles when T=1). Useful for frequency dividers and counters."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-XNOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2296,7 +2296,7 @@
       "description": "2-input XNOR logic gate. Output Y = NOT(A ⊕ B)."
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LOGIC-GATE-XOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "logic",
         "gate",
@@ -2338,7 +2338,7 @@
       "tagName": "wokwi-biaxial-stepper",
       "name": "Biaxial Stepper",
       "category": "motors",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        BIAXIAL-STEPPER\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "outerHandLength",
@@ -2413,7 +2413,7 @@
       "name": "Servo",
       "category": "motors",
       "description": "The angle of the servo (0-180 degrees)",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        SERVO\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "angle",
@@ -2449,7 +2449,7 @@
       "tagName": "wokwi-stepper-motor",
       "name": "Stepper Motor",
       "category": "motors",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        STEPPER-MOTOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "angle",
@@ -2500,7 +2500,7 @@
       "tagName": "wokwi-7segment",
       "name": "7 Segment",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        7SEGMENT\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "color",
@@ -2592,7 +2592,7 @@
       "tagName": "wokwi-analog-joystick",
       "name": "Analog Joystick",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        ANALOG-JOYSTICK\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "xValue",
@@ -2631,7 +2631,7 @@
       "tagName": "wokwi-big-sound-sensor",
       "name": "Big Sound Sensor",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        BIG-SOUND-SENSOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "led1",
@@ -2664,7 +2664,7 @@
       "tagName": "wokwi-ds1307",
       "name": "DS1307",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        DS1307\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [],
       "defaultValues": {},
       "pinCount": 0,
@@ -2706,7 +2706,7 @@
       "tagName": "wokwi-flame-sensor",
       "name": "Flame Sensor",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        FLAME-SENSOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "ledPower",
@@ -2738,7 +2738,7 @@
       "tagName": "wokwi-gas-sensor",
       "name": "Gas Sensor",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        GAS-SENSOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "ledPower",
@@ -2770,7 +2770,7 @@
       "tagName": "wokwi-hx711",
       "name": "HX711",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        HX711\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "type",
@@ -2789,7 +2789,7 @@
       "tagName": "wokwi-ks2e-m-dc5",
       "name": "KS2E-M-DC5",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        KS2E-M-DC5\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [],
       "defaultValues": {},
       "pinCount": 0,
@@ -2805,7 +2805,7 @@
       "tagName": "wokwi-led-ring",
       "name": "LED Ring",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LED-RING\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "pixels",
@@ -2851,7 +2851,7 @@
       "tagName": "wokwi-microsd-card",
       "name": "microSD Card",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        MICROSD-CARD\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [],
       "defaultValues": {},
       "pinCount": 0,
@@ -2867,7 +2867,7 @@
       "tagName": "wokwi-nano-rp2040-connect",
       "name": "Nano RP2040 Connect",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        NANO-RP2040-CONNECT\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "ledRed",
@@ -2921,7 +2921,7 @@
       "tagName": "wokwi-neopixel-matrix",
       "name": "NeoPixel Matrix",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        NEOPIXEL-MATRIX\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "rows",
@@ -2981,7 +2981,7 @@
       "tagName": "wokwi-pushbutton-6mm",
       "name": "Pushbutton 6mm",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        PUSHBUTTON-6MM\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "color",
@@ -3027,7 +3027,7 @@
       "tagName": "wokwi-rotary-dialer",
       "name": "Rotary Dialer",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        ROTARY-DIALER\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [],
       "defaultValues": {},
       "pinCount": 0,
@@ -3043,7 +3043,7 @@
       "tagName": "wokwi-slide-potentiometer",
       "name": "Slide Potentiometer",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        SLIDE-POTENTIOMETER\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "travelLength",
@@ -3096,7 +3096,7 @@
       "tagName": "wokwi-small-sound-sensor",
       "name": "Small Sound Sensor",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        SMALL-SOUND-SENSOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "ledPower",
@@ -3129,7 +3129,7 @@
       "tagName": "wokwi-tilt-switch",
       "name": "Tilt Switch",
       "category": "other",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        TILT-SWITCH\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [],
       "defaultValues": {},
       "pinCount": 0,
@@ -3146,7 +3146,7 @@
       "name": "Buzzer",
       "category": "output",
       "description": "Whether the buzzer is currently emitting a signal",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        BUZZER\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "hasSignal",
@@ -3168,7 +3168,7 @@
       "tagName": "wokwi-led",
       "name": "LED",
       "category": "output",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LED\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "value",
@@ -3234,7 +3234,7 @@
       "tagName": "wokwi-led-bar-graph",
       "name": "Led Bar Graph",
       "category": "output",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        LED-BAR-GRAPH\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "color",
@@ -3296,7 +3296,7 @@
       "tagName": "wokwi-neopixel",
       "name": "Neopixel",
       "category": "output",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        NEOPIXEL\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "r",
@@ -3332,7 +3332,7 @@
       "tagName": "wokwi-rgb-led",
       "name": "RGB Led",
       "category": "output",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        RGB-LED\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "ledRed",
@@ -3924,7 +3924,7 @@
       "tagName": "wokwi-franzininho",
       "name": "Franzininho",
       "category": "passive",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        FRANZININHO\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "led1",
@@ -4055,7 +4055,7 @@
       "tagName": "wokwi-ir-receiver",
       "name": "IR Receiver",
       "category": "passive",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        IR-RECEIVER\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "irAddress",
@@ -4104,7 +4104,7 @@
       "tagName": "wokwi-ir-remote",
       "name": "IR Remote",
       "category": "passive",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        IR-REMOTE\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "irAddress",
@@ -4466,7 +4466,7 @@
       "tagName": "wokwi-dht22",
       "name": "DHT22",
       "category": "sensors",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        DHT22\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [],
       "defaultValues": {},
       "pinCount": 0,
@@ -4534,7 +4534,7 @@
       "tagName": "wokwi-hc-sr04",
       "name": "HC-SR04",
       "category": "sensors",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        HC-SR04\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [],
       "defaultValues": {},
       "pinCount": 0,
@@ -4584,7 +4584,7 @@
       "tagName": "wokwi-mpu6050",
       "name": "MPU6050",
       "category": "sensors",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        MPU6050\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "led1",
@@ -4606,7 +4606,7 @@
       "tagName": "wokwi-ntc-temperature-sensor",
       "name": "NTC Temperature Sensor",
       "category": "sensors",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        NTC-TEMPERATURE-SENSOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [],
       "defaultValues": {},
       "pinCount": 0,
@@ -4619,7 +4619,7 @@
       ]
     },
     {
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        PHOTODIODE\n      </text>\n    </svg>",
+      "thumbnail": "",
       "tags": [
         "photodiode",
         "sensor",
@@ -4653,7 +4653,7 @@
       "tagName": "wokwi-photoresistor-sensor",
       "name": "Photoresistor Sensor",
       "category": "sensors",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        PHOTORESISTOR-SENSOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [
         {
           "name": "ledDO",
@@ -4685,7 +4685,7 @@
       "tagName": "wokwi-pir-motion-sensor",
       "name": "PIR Motion Sensor",
       "category": "sensors",
-      "thumbnail": "<svg width=\"64\" height=\"64\" xmlns=\"http://www.w3.org/2000/svg\">\n      <rect width=\"64\" height=\"64\" fill=\"#e0e0e0\" rx=\"4\"/>\n      <text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dy=\".3em\" font-size=\"10\" fill=\"#666\">\n        PIR-MOTION-SENSOR\n      </text>\n    </svg>",
+      "thumbnail": "",
       "properties": [],
       "defaultValues": {},
       "pinCount": 0,

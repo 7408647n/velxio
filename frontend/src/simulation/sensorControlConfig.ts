@@ -27,6 +27,14 @@ export interface SliderControl {
    *  is not `key` itself (the IR remote's `address` lives in `irAddress`).
    *  Reset and the panel read the project value from it. */
   propertyKey?: string;
+  /** Names of the values, for a slider that is really a CHOICE among a few
+   *  (an event kind, a surface, a key): value -> label. The panel and the
+   *  property dialog then show a select with these labels instead of a bare
+   *  number; the value stored and dispatched stays the number. A two-position
+   *  slider (0/1, step 1) without options is an on/off switch and shows as a
+   *  checkbox; one whose formatValue names both positions is a choice between
+   *  those two names. See sliderInput(). */
+  options?: Record<number, string>;
 }
 
 export interface ButtonControl {
@@ -44,6 +52,70 @@ export interface SensorControlDef {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** How a slider is edited: a range, an on/off switch, or a choice of names. */
+export type SliderInput =
+  | { kind: 'range' }
+  | { kind: 'toggle' }
+  | { kind: 'choice'; options: { value: number; label: string }[] };
+
+/** A formatted position that just prints its own number ("0", "1.0"), as
+ *  opposed to a name for it ("Manual", "0x68"). */
+const printsItself = (text: string, v: number) => text.trim() !== '' && Number(text.trim()) === v;
+
+/**
+ * The input a slider really is. Many sensors model a switch ("magnet
+ * present", "probe disconnected") or a small set of named cases ("event:
+ * strike / disturber / noise") as an integer slider, and a bare number is a
+ * poor way to set either:
+ *  - declared `options` make it a choice among those labels (values outside
+ *    min..max are dropped, the rest sorted);
+ *  - a 0..1 slider with step 1 is a two-position switch: a choice when its
+ *    formatValue names the positions (Source: Manual / Thermal zone), else a
+ *    checkbox (on = 1);
+ *  - everything else stays a range.
+ * The value is a number in every case, so stored projects, Reset and the
+ * parts' update callbacks are unchanged.
+ */
+export function sliderInput(ctrl: SliderControl): SliderInput {
+  if (ctrl.options) {
+    const options = Object.entries(ctrl.options)
+      .map(([v, label]) => ({ value: Number(v), label }))
+      .filter((o) => Number.isFinite(o.value) && o.value >= ctrl.min && o.value <= ctrl.max)
+      .sort((a, b) => a.value - b.value);
+    if (options.length > 0) return { kind: 'choice', options };
+  }
+  if (ctrl.min === 0 && ctrl.max === 1 && ctrl.step === 1 && ctrl.scale !== 'log') {
+    if (ctrl.formatValue) {
+      const off = ctrl.formatValue(0);
+      const on = ctrl.formatValue(1);
+      if (!printsItself(off, 0) && !printsItself(on, 1) && off !== on) {
+        return {
+          kind: 'choice',
+          options: [
+            { value: 0, label: off },
+            { value: 1, label: on },
+          ],
+        };
+      }
+    }
+    return { kind: 'toggle' };
+  }
+  return { kind: 'range' };
+}
+
+/** The option a stored value selects: the nearest one, so a project that
+ *  holds 0.6 (an old slider save) shows the option the part acts on. */
+export function nearestOption(
+  options: { value: number; label: string }[],
+  value: number,
+): { value: number; label: string } | undefined {
+  let best: { value: number; label: string } | undefined;
+  for (const o of options) {
+    if (!best || Math.abs(o.value - value) < Math.abs(best.value - value)) best = o;
+  }
+  return best;
+}
 
 const oneDecimal = (v: number) => v.toFixed(1);
 /** NEC address/command as every decoder prints them: 0x and two hex digits. */
@@ -611,6 +683,7 @@ export function projectSensorValues(
     if (ctrl.type !== 'slider') continue;
     const n = propertyNumber(source[ctrl.propertyKey ?? ctrl.key]);
     if (n !== undefined) values[ctrl.key] = n;
+    else if (values[ctrl.key] === undefined) values[ctrl.key] = ctrl.defaultValue;
   }
   return values;
 }
@@ -639,6 +712,8 @@ export interface SensorProjectField {
   /** The panel slider is logarithmic: the dialog edits the value itself,
    *  never a position on the log axis. */
   log: boolean;
+  /** Range, on/off switch or named choice (sliderInput()). */
+  input: SliderInput;
   formatValue?: (v: number) => string;
 }
 
@@ -672,6 +747,7 @@ export function sensorProjectFields(component: {
       defaultValue: ctrl.defaultValue,
       value: typeof value === 'number' ? value : ctrl.defaultValue,
       log: ctrl.scale === 'log',
+      input: sliderInput(ctrl),
       formatValue: ctrl.formatValue,
     });
   }
@@ -685,4 +761,17 @@ export function registerSensorControls(defs: Record<string, SensorControlDef>): 
 export function getSensorControl(id: string | null | undefined): SensorControlDef | undefined {
   if (!id) return undefined;
   return SENSOR_CONTROLS[id] ?? proSensorControls[id];
+}
+
+/**
+ * Where a sensor's control `key` starts when the project leaves it unset: the
+ * control definition's default, the one number the panel, the property
+ * dialog and the part all share. A part reads its starting value from here
+ * instead of a literal of its own (the BMP280 used to start at 25 C while
+ * its panel and dialog said 24). `fallback` is only for a part whose control
+ * definition is missing, which the sensor-defaults test forbids.
+ */
+export function sensorControlDefault(id: string, key: string, fallback: number): number {
+  const v = getSensorControl(id)?.defaultValues[key];
+  return typeof v === 'number' ? v : fallback;
 }

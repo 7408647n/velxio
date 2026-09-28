@@ -4783,14 +4783,17 @@ export function commitSensorProjectValue(componentId: string, controlKey: string
 
 /**
  * A sensor part just attached: hand it the values the PROJECT sets for it,
- * so it starts from them whether or not its attach reads them off the element
- * (most parts do; a part that keeps its own starting value would otherwise
- * ignore a value set in the property dialog until the panel opened or Reset
- * replayed it). Only the controls the project sets are delivered: one the
- * project leaves unset keeps the part's own start, as before, and the panel's
- * cache is not touched, so its first open still replays the full project set.
- * A replay, so nothing the part mirrors back is taken for a live edit. Custom chips are
- * left alone: they read properties.attrs themselves, once their module loads.
+ * and the control definition's default for every value the project leaves
+ * unset, so it starts from exactly what the panel and the property dialog
+ * show whether or not its attach reads them off the element. The control
+ * default is the one source of a sensor's starting value: a part that kept a
+ * literal of its own used to start somewhere else (an unset BMP280 read 25 C
+ * while the panel and the dialog said 24) until the panel opened or Reset
+ * replayed the full set, which is what this now does on every Run. The
+ * panel's cache is not touched, so its first open still replays the full
+ * project set. A replay, so nothing the part mirrors back is taken for a live
+ * edit. Custom chips are left alone: they read properties.attrs themselves,
+ * once their module loads, and their attribute defaults come from chip.json.
  */
 export function replayProjectSensorValuesOnAttach(componentId: string): void {
   if (!getSensorUpdate(componentId)) return;
@@ -4802,8 +4805,6 @@ export function replayProjectSensorValuesOnAttach(componentId: string): void {
   const set: Record<string, number | boolean> = {};
   for (const ctrl of def.controls) {
     if (ctrl.type !== 'slider') continue;
-    const raw = comp.properties?.[ctrl.propertyKey ?? ctrl.key];
-    if (raw === undefined || raw === null || raw === '') continue;
     if (all[ctrl.key] !== undefined) set[ctrl.key] = all[ctrl.key];
   }
   if (Object.keys(set).length > 0) replayProjectSensorValues(componentId, set, { cache: false });

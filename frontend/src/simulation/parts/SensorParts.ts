@@ -21,6 +21,7 @@ import { PartSimulationRegistry } from './PartSimulationRegistry';
 import { requestLine, releaseLineGap, recordPartGap } from '../line/requestLine';
 import { setAdcVoltage, emitPropertyChange, analogRailVolts, guestMillis, elementNumber } from './partUtils';
 import { registerSensorUpdate, unregisterSensorUpdate } from '../SensorUpdateRegistry';
+import { sensorControlDefault } from '../sensorControlConfig';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
 
 // ─── Tilt Switch ─────────────────────────────────────────────────────────────
@@ -144,7 +145,8 @@ PartSimulationRegistry.register('photodiode', {
 
 /**
  * Gas sensor — injects analog voltage on AOUT.
- * Default 1.5V (clean air / low gas). SensorControlPanel slider adjusts level (0–1023).
+ * Starts at the panel's default gas level (100 of 1023, about 0.49 V: clean
+ * air). SensorControlPanel slider adjusts level (0–1023).
  * Higher value → higher voltage (more gas detected).
  */
 PartSimulationRegistry.register('gas-sensor', {
@@ -158,9 +160,10 @@ PartSimulationRegistry.register('gas-sensor', {
 
     const unsubscribers: (() => void)[] = [];
 
-    // Inject baseline analog voltage (1.5V ≈ clean air / low gas)
+    // Baseline analog voltage: the panel's default gas level (100 of 1023,
+    // clean air), not a voltage of this part's own.
     if (pinAOUT !== null) {
-      setAdcVoltage(simulator, pinAOUT, 1.5);
+      setAdcVoltage(simulator, pinAOUT, (sensorControlDefault('gas-sensor', 'gasLevel', 100) / 1023) * 5.0);
     }
 
     // DOUT from Arduino → threshold LED indicator
@@ -199,7 +202,8 @@ PartSimulationRegistry.register('gas-sensor', {
 
 /**
  * Flame sensor — injects analog voltage on AOUT.
- * Default 4.5V (no flame). SensorControlPanel slider: 0 = no flame (high V),
+ * Starts at the panel's default intensity (0: no flame, 5 V). SensorControlPanel
+ * slider: 0 = no flame (high V),
  * 1023 = intense flame (low V).
  */
 PartSimulationRegistry.register('flame-sensor', {
@@ -213,8 +217,14 @@ PartSimulationRegistry.register('flame-sensor', {
 
     const unsubscribers: (() => void)[] = [];
 
+    // No flame = high voltage: the panel's default intensity (0), mapped the
+    // way the slider maps it below.
     if (pinAOUT !== null) {
-      setAdcVoltage(simulator, pinAOUT, 4.5); // no flame = high voltage
+      setAdcVoltage(
+        simulator,
+        pinAOUT,
+        5.0 - (sensorControlDefault('flame-sensor', 'intensity', 0) / 1023) * 5.0,
+      );
     }
 
     if (pinDOUT !== null && pinManager) {
@@ -236,7 +246,7 @@ PartSimulationRegistry.register('flame-sensor', {
 
     registerSensorUpdate(componentId, (values) => {
       if ('intensity' in values && pinAOUT !== null) {
-        // 0 = no flame → high voltage (4.5V); 1023 = flame → low voltage (0.2V)
+        // 0 = no flame → high voltage (5 V); 1023 = flame → low voltage (0 V)
         const volts = 5.0 - ((values.intensity as number) / 1023) * 5.0;
         setAdcVoltage(simulator, pinAOUT, volts);
       }

@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { PartSimulationRegistry } from '../simulation/parts/PartSimulationRegistry';
 import { dispatchSensorUpdate } from '../simulation/SensorUpdateRegistry';
+import { SENSOR_CONTROLS } from '../simulation/sensorControlConfig';
 
 // Side-effect imports — register all parts (including SensorParts)
 import '../simulation/parts/BasicParts';
@@ -203,8 +204,10 @@ describe('gas-sensor — attachEvents', () => {
 
     logic.attachEvents!(el, sim as any, pinMap({ AOUT: 14, DOUT: 7 }));
 
-    // AOUT → ADC channel 0, baseline 1.5V
-    expect(adc.channelValues[0]).toBeCloseTo(1.5, 2);
+    // AOUT → ADC channel 0, at the panel's default gas level (100 of 1023),
+    // the value the panel and the property dialog show for an unset part.
+    expect(SENSOR_CONTROLS['gas-sensor'].defaultValues.gasLevel).toBe(100);
+    expect(adc.channelValues[0]).toBeCloseTo((100 / 1023) * 5, 3);
     expect(el.ledPower).toBe(true);
   });
 
@@ -239,8 +242,10 @@ describe('flame-sensor — attachEvents', () => {
 
     logic.attachEvents!(el, sim as any, pinMap({ AOUT: 14 }), 'flame-sensor-test');
 
-    // No-flame baseline = 4.5V (inverse: no flame → high V, flame → low V)
-    expect(adc.channelValues[0]).toBeCloseTo(4.5, 2);
+    // At the panel's default intensity (0, no flame), mapped the way the
+    // slider maps it (inverse: no flame → high V, flame → low V): 5 V.
+    expect(SENSOR_CONTROLS['flame-sensor'].defaultValues.intensity).toBe(0);
+    expect(adc.channelValues[0]).toBeCloseTo(5.0, 3);
     expect(el.ledPower).toBe(true);
   });
 

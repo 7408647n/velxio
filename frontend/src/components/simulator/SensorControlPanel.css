@@ -153,6 +153,25 @@
   flex-shrink: 0;
 }
 
+/* ── Switch and choice controls (sliderInput: toggle / choice) ─────────── */
+
+.sensor-check {
+  margin: 0;
+  accent-color: var(--accent, #0071e3);
+  cursor: pointer;
+}
+
+.sensor-select {
+  flex: 1;
+  min-width: 0;
+  background: var(--wb-2);
+  border: 1px solid var(--wb-8);
+  border-radius: 4px;
+  color: var(--wb-13);
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
 /* ── Button control ──────────────────────────────────────────────────────── */
 
 .sensor-trigger-button {

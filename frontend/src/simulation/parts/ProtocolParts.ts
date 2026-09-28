@@ -36,6 +36,7 @@ import type { I2CDevice } from '../I2CBusManager';
 import { attachI2cPart } from './i2cPart';
 import { HD44780Decoder } from '../HD44780Decoder';
 import { registerSensorUpdate, unregisterSensorUpdate } from '../SensorUpdateRegistry';
+import { getSensorControl, sensorControlDefault } from '../sensorControlConfig';
 import {
   emitIr,
   listenIr,
@@ -588,10 +589,7 @@ PartSimulationRegistry.register('mpu6050', {
       device.registers[regH + 1] = v & 0xff;
     };
 
-    registerSensorUpdate(componentId, (values) => {
-      // The worker's copy answers a QEMU board; this one answers every board
-      // whose firmware runs in the tab, and the Pi relay reads its registers.
-      part.updateWorker(values);
+    const writeValues = (values: Record<string, number | boolean>) => {
       if ('accelX' in values) writeI16(0x3b, (values.accelX as number) * 16384);
       if ('accelY' in values) writeI16(0x3d, (values.accelY as number) * 16384);
       if ('accelZ' in values) writeI16(0x3f, (values.accelZ as number) * 16384);
@@ -599,6 +597,16 @@ PartSimulationRegistry.register('mpu6050', {
       if ('gyroY' in values) writeI16(0x45, (values.gyroY as number) * 131);
       if ('gyroZ' in values) writeI16(0x47, (values.gyroZ as number) * 131);
       if ('temp' in values) writeI16(0x41, ((values.temp as number) - 36.53) * 340);
+    };
+    // The registers start at the panel's defaults (the chip model's own
+    // power-on values put the die at 25 C; the panel and the dialog say 24).
+    writeValues(getSensorControl('mpu6050')?.defaultValues ?? {});
+
+    registerSensorUpdate(componentId, (values) => {
+      // The worker's copy answers a QEMU board; this one answers every board
+      // whose firmware runs in the tab, and the Pi relay reads its registers.
+      part.updateWorker(values);
+      writeValues(values);
     });
 
     return () => {
@@ -1051,8 +1059,16 @@ PartSimulationRegistry.register('bmp280', {
   attachEvents: (element, simulator, _getPin, componentId) => {
     const el = element as any;
     const addr = el.address === '0x77' || el.address === 0x77 ? 0x77 : 0x76;
-    const initTemp = el.temperature !== undefined ? parseFloat(el.temperature) : 25.0;
-    const initPressure = el.pressure !== undefined ? parseFloat(el.pressure) : 1013.25;
+    // An unset value starts where the panel and the property dialog say it
+    // does (24 C, 1013.25 hPa), not at a literal of this part's own.
+    const initTemp =
+      el.temperature !== undefined
+        ? parseFloat(el.temperature)
+        : sensorControlDefault('bmp280', 'temperature', 24);
+    const initPressure =
+      el.pressure !== undefined
+        ? parseFloat(el.pressure)
+        : sensorControlDefault('bmp280', 'pressure', 1013.25);
 
     const dev = new VirtualBMP280(addr);
     dev.temperatureC = initTemp;

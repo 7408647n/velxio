@@ -126,6 +126,17 @@ interface ParsedComponent {
   pinCount: number;
 }
 
+/**
+ * The thumbnail of a part with no art of its own: none. It used to be a grey
+ * square with the id printed in it at 10px, and every consumer treats an
+ * `<svg` thumbnail as the part's art, so the property dialog's 40px header
+ * showed the middle of "NTC-TEMPERATURE-SENSOR" ("ERATUR") for the 105
+ * catalogue parts drawn by their element rather than by an SVG. An empty
+ * thumbnail tells the consumers to draw the live element instead, which the
+ * picker card already did for every registered tag.
+ */
+const NO_THUMBNAIL = '';
+
 class MetadataGenerator {
   private wokwiElementsPath: string;
   private outputPath: string;
@@ -246,7 +257,7 @@ class MetadataGenerator {
         continue;
       }
       components.push({
-        thumbnail: custom.thumbnail ?? this.generateThumbnailPlaceholder(custom.id),
+        thumbnail: custom.thumbnail ?? NO_THUMBNAIL,
         tags: custom.tags ?? this.generateTags(custom.id, custom.name || custom.id),
         properties: custom.properties ?? [],
         defaultValues: custom.defaultValues ?? {},
@@ -360,7 +371,7 @@ class MetadataGenerator {
       name: storiesMetadata?.name || this.formatName(id),
       category,
       description: storiesMetadata?.description,
-      thumbnail: this.generateThumbnailPlaceholder(id),
+      thumbnail: NO_THUMBNAIL,
       properties: parsed.properties.map(prop => ({
         name: prop.name,
         type: this.mapPropertyType(prop.type),
@@ -515,17 +526,6 @@ class MetadataGenerator {
       }
     });
     return defaults;
-  }
-
-  private generateThumbnailPlaceholder(id: string): string {
-    // For now, return a simple SVG placeholder
-    // TODO: Extract actual SVG from render() method
-    return `<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
-      <rect width="64" height="64" fill="#e0e0e0" rx="4"/>
-      <text x="50%" y="50%" text-anchor="middle" dy=".3em" font-size="10" fill="#666">
-        ${id.toUpperCase()}
-      </text>
-    </svg>`;
   }
 
   private generateTags(id: string, name: string): string[] {
