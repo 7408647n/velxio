@@ -12,6 +12,15 @@
  * target side answers the same way: an ACK or a 0 bit is SDA pulled low with
  * driveInput, and everything else is SDA released (driven high).
  *
+ * The pull-up is on the wire, not only in the decoder: on a board whose pins
+ * come with the PinManager (BoardPins.pinHost) the bus puts a pull-up on SDA
+ * and on SCL of the board-pin net (busNets.setBoardPinPull), the resistors
+ * every I2C breakout carries, and the target's low as a strong driver of SDA.
+ * A master that releases a line with pinMode(INPUT) and no INPUT_PULLUP
+ * (SoftwareWire with pullups off, a hand-rolled bit-bang reading SCL for
+ * clock stretching) then reads HIGH in the guest, where it used to read the
+ * LOW it last drove and time out.
+ *
  * The target only ever changes SDA while SCL is low, which is also what keeps
  * an engine that echoes driveInput back as a pin change from reading its own
  * answer as a START or a STOP: those are SDA edges with SCL high, and only the
@@ -25,6 +34,8 @@
 
 import type { I2cBus } from './i2cBus';
 import type { BoardPins } from './types';
+import { setBoardPinDrive, setBoardPinPull } from '../customChips/busNets';
+import { HIGHZ_DRIVE, Strength } from '../customChips/busLogic';
 
 type Phase =
   | 'idle' // no transaction, or one this bus is not part of
@@ -69,12 +80,26 @@ export class SoftI2cDecoder {
       this.offs.push(pins.onPinChange(pin, cb));
       if (pins.onPadChange) this.offs.push(pins.onPadChange(pin, cb));
     }
+    const host = pins.pinHost;
+    if (host && pins.driveInput) {
+      for (const pin of [this.sdaPin, sclPin]) {
+        const id = this.pullId(pin);
+        const sink = (level: boolean) => pins.driveInput?.(pin, level);
+        setBoardPinPull(host, pin, id, 'up', sink);
+        this.offs.push(() => setBoardPinPull(host, pin, id, null, sink));
+      }
+    }
+  }
+
+  /** The bus's own drivers on the board-pin net, by line. */
+  private pullId(pin: number): string {
+    return `i2c-bus@${this.sdaPin}::${pin === this.sdaPin ? 'SDA' : 'SCL'}~pull`;
   }
 
   dispose(): void {
+    this.release();
     for (const off of this.offs) off();
     this.offs.length = 0;
-    this.release();
   }
 
   /** The MCU was reset: any half-clocked transaction is gone. */
@@ -96,6 +121,20 @@ export class SoftI2cDecoder {
   private drive(high: boolean): void {
     if (this.holding === high) return;
     this.holding = high;
+    const host = this.pins.pinHost;
+    if (host && this.pins.driveInput) {
+      // Open drain: a low is a strong driver of SDA, a 1 lets go and the
+      // bus pull-up has the line (or the master, if it holds it low).
+      const sda = this.sdaPin;
+      setBoardPinDrive(
+        host,
+        sda,
+        `i2c-bus@${sda}::target`,
+        high ? HIGHZ_DRIVE : { value: 0, strength: Strength.STRONG },
+        (level) => this.pins.driveInput?.(sda, level),
+      );
+      return;
+    }
     this.pins.driveInput?.(this.sdaPin, high);
   }
 

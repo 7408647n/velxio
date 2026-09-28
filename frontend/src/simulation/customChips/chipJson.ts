@@ -52,3 +52,18 @@ export function normalizeChipPins(pins: unknown): ChipPinEntry[] {
 export function normalizeChipPinNames(pins: unknown): string[] {
   return normalizeChipPins(pins).map((p) => p.name);
 }
+
+/**
+ * The resistors a chip's module carries on its lines, from chip.json:
+ * `"pulls": { "DIO": "up", "CLK": "up" }`, keyed by pin name. Anything that
+ * is not 'up' or 'down' is dropped. See ChipInstanceOptions.pulls.
+ */
+export function normalizeChipPulls(pulls: unknown): Record<string, 'up' | 'down'> {
+  const out: Record<string, 'up' | 'down'> = {};
+  if (!pulls || typeof pulls !== 'object' || Array.isArray(pulls)) return out;
+  for (const [name, v] of Object.entries(pulls as Record<string, unknown>)) {
+    const dir = typeof v === 'string' ? v.toLowerCase() : '';
+    if (dir === 'up' || dir === 'down') out[name] = dir;
+  }
+  return out;
+}

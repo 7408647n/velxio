@@ -24,10 +24,23 @@
  * nothing at all, so the board read the chip's last level forever (finding
  * chip-release-to-input-keeps-board-pin-driven).
  *
+ * A module's own resistor on a line (the 10k pull-ups of a Grove 4-Digit
+ * Display on CLK and DIO, the 4.7k of a DS18B20 module) is one more driver of
+ * the board pin, of PULL strength, that stays on the net for as long as the
+ * part is on the canvas (setBoardPinPull). The resolution is in tiers, as the
+ * wire does it: any strong drive (the MCU's output, a chip pulling low, a
+ * part's injection) decides the level; with none, the module's pull does,
+ * and it beats the MCU's internal pull the other way because the smaller
+ * resistor sets the divider (an external 4.7k-10k against the 20k-100k of a
+ * pad); with neither, the pad's own pull. A released line on a module with a
+ * pull-up therefore reads HIGH in the guest and on the level channel, which
+ * is what every open-drain driver that releases with pinMode(INPUT) relies on
+ * (avishorp's TM1637Display, finding module-pullup-not-modelled).
+ *
  * Single-chip-to-component synthetic pins keep the legacy direct PinManager
  * path untouched.
  */
-import { resolveNet, resolvedToBool, Strength, HIGHZ_DRIVE, type Drive } from './busLogic';
+import { resolveNet, resolvedToBool, Strength, HIGHZ_DRIVE, type Drive, type Resolved } from './busLogic';
 import { publishNetLevel, resetBusKernel } from './busKernel';
 
 interface PinManagerLike {
@@ -58,8 +71,14 @@ export interface BoardPinHost extends PinManagerLike {
   /** The net answers every level proposed for the pin (PinManager.claimLevel). */
   claimLevel?(
     pin: number,
-    resolve: (proposed: boolean, source: 'mcu' | 'external') => boolean | undefined,
+    resolve: (proposed: boolean, source: 'mcu' | 'external' | 'pull') => boolean | undefined,
   ): () => void;
+  /**
+   * Changes of the pin's direction or internal pull (PinManager.
+   * onPinConfigChange): how an engine without the pad channel says the guest
+   * released a pin, which moves no level there.
+   */
+  onPinConfigChange?(pin: number, cb: () => void): () => void;
 }
 
 // netKey -> (driverId -> Drive). driverId = `${componentId}::${pinName}`.
@@ -120,6 +139,8 @@ interface BoardNet {
   unwatch: () => void;
   /** Warned about contention with the pad; cleared when it ends. */
   contended: boolean;
+  /** Warned about two modules pulling the line opposite ways. */
+  pullsFight: boolean;
   /** The level this net last put on the channel, to tell its own echo from
    *  a write by someone else. */
   lastLevel: boolean | undefined;
@@ -169,6 +190,44 @@ function reportedPull(host: BoardPinHost, pin: number): Drive {
 }
 
 /**
+ * The net's resolution, in tiers (see the header): a strong drive, else the
+ * modules' pulls, else the pad's own pull. The only PULL-strength drivers a
+ * board net holds are module pulls (ChipRuntime keeps a chip's VX_INPUT_PULLUP
+ * off board pins), so the tier between them and the pad is the divider rule:
+ * the module's resistor wins against the MCU's internal one.
+ */
+function resolveBoardPin(net: BoardNet, pad: Drive): Resolved {
+  const strong: Drive[] = [];
+  const pulls: Drive[] = [];
+  for (const d of net.drivers.values()) {
+    if (d.strength >= Strength.STRONG) strong.push(d);
+    else if (d.strength === Strength.PULL) pulls.push(d);
+  }
+  if (pad.strength >= Strength.STRONG) strong.push(pad);
+  if (strong.length > 0) return resolveNet(strong);
+  if (pulls.length > 0) return resolveNet(pulls);
+  return resolveNet([pad]);
+}
+
+function modulePullsFight(net: BoardNet): boolean {
+  let up = false;
+  let down = false;
+  for (const d of net.drivers.values()) {
+    if (d.strength !== Strength.PULL) continue;
+    if (d.value === 1) up = true;
+    else down = true;
+  }
+  return up && down;
+}
+
+/** An engine without the pad channel drives this pad as an output: its
+ *  level comes from the level channel, and nothing weaker than a strong
+ *  drive moves it. */
+function isReportedOutput(host: BoardPinHost, pin: number): boolean {
+  return !host.peekPad?.(pin) && host.getPinDirection?.(pin) === 1;
+}
+
+/**
  * What the wire holds with `proposed` put on it through `source`.
  *
  * A level the engine reports ('mcu') on a pad it drives is the wire's: it
@@ -179,13 +238,19 @@ function reportedPull(host: BoardPinHost, pin: number): Drive {
  * input) is a proposal the net's resolution answers, which a strong driver
  * decides: undefined for an injection on a pad the guest drives (it moves
  * nothing), the proposal itself when nothing on the net holds the wire.
+ *
+ * A part's injection ('external': a button, a line model, a bus target, the
+ * SPICE connector) is a drive of its own, so it beats a pull, the module's
+ * included: a button to GND on a line with a module pull-up reads LOW. The
+ * latch of an input pad ('pull', the AVR's PORT bit under INPUT_PULLUP) is
+ * the pad's pull, not a drive, and the resolution answers it.
  */
 function proposeBoardPin(
   host: BoardPinHost,
   pin: number,
   net: BoardNet,
   proposed: boolean,
-  source: 'mcu' | 'external',
+  source: 'mcu' | 'external' | 'pull',
 ): boolean | undefined {
   const pad = padDrive(host, pin);
   if (pad.strength === Strength.STRONG) return source === 'mcu' ? proposed : undefined;
@@ -193,8 +258,9 @@ function proposeBoardPin(
     net.mcuLevel = proposed;
     return proposed;
   }
-  const resolved = resolveNet([...net.drivers.values(), pad]);
+  const resolved = resolveBoardPin(net, pad);
   if (resolved.v === 'X' || resolved.v === 'Z') return proposed;
+  if (source === 'external' && resolved.strength < Strength.STRONG) return proposed;
   const level = resolved.v === '1';
   net.lastLevel = level;
   // An overridden proposal came through a door that moved the guest's input
@@ -208,9 +274,19 @@ function proposeBoardPin(
 
 function recomputeBoardPin(host: BoardPinHost, pin: number, net: BoardNet): void {
   const pad = padDrive(host, pin);
-  const resolved = resolveNet([...net.drivers.values(), pad]);
+  // Two modules' resistors the opposite way are a fixed divider, not an
+  // event: said once while it lasts, whatever the MCU does meanwhile.
+  const pullsFight = modulePullsFight(net);
+  if (pullsFight && !net.pullsFight) {
+    console.warn(
+      `[chipbus] board pin ${pin} has a pull-up and a pull-down from two modules: ` +
+        `the line sits mid-rail while nothing drives it, and keeps its level`,
+    );
+  }
+  net.pullsFight = pullsFight;
+  const resolved = resolveBoardPin(net, pad);
   if (resolved.v === 'X') {
-    if (!net.contended) {
+    if (resolved.strength >= Strength.STRONG && !net.contended) {
       net.contended = true;
       console.warn(
         `[chipbus] contention on board pin ${pin}: a chip and the MCU drive it to opposite levels`,
@@ -219,13 +295,42 @@ function recomputeBoardPin(host: BoardPinHost, pin: number, net: BoardNet): void
     return;
   }
   net.contended = false;
-  // While the MCU drives the pad its level is the wire's, and the engine has
-  // already put it on the level channel; there is nothing to feed back into
-  // the guest (its own output reads its latch). A released pad with nothing
+  // While the MCU drives the pad its level is the wire's; there is nothing to
+  // feed back into the guest (its own output reads its latch). The engine
+  // puts that level on the channel when its latch moves, but not when only
+  // the direction does: the AVR's pinMode(OUTPUT) over a latch already at 0
+  // pulls the line low and moves no PORT bit. On a line the net had pulled
+  // HIGH that drive would never reach the parts on the pin (avishorp's
+  // TM1637Display clocks every bit that way), so the pad's level is put on
+  // the channel here when the channel disagrees. A released pad with nothing
   // pulling it keeps the level it had, as a floating input does.
-  if (pad.strength === Strength.STRONG) return;
+  if (pad.strength === Strength.STRONG) {
+    const driven = pad.value === 1;
+    if (host.peekPad?.(pin) && host.getPinState && host.getPinState(pin) !== driven) {
+      publishNetLevel(host, pin, driven, (lvl) => {
+        net.lastLevel = lvl;
+        host.triggerPinChange(pin, lvl, 'mcu');
+      });
+    }
+    return;
+  }
+  // An engine that reports neither pads nor directions (the Pi and STM32
+  // bridges) cannot say when the guest lets go of a pin it has driven, so a
+  // pin it has put a level on is taken as still driven, and a module's pull
+  // only sets the level of a pin that engine has never driven.
+  if (
+    resolved.strength < Strength.STRONG &&
+    !host.peekPad?.(pin) &&
+    host.getPinDirection?.(pin) === undefined &&
+    net.mcuLevel !== undefined
+  ) {
+    return;
+  }
   let level: boolean;
-  if (resolved.v === 'Z') {
+  // A pull (a module's resistor) loses to an output of an engine without the
+  // pad channel exactly as to any strong drive: that output is simply not in
+  // the resolution, so it is handled with the Z case below.
+  if (resolved.v === 'Z' || (resolved.strength < Strength.STRONG && isReportedOutput(host, pin))) {
     // An engine without the pad channel keeps an output pad at HIGHZ here
     // and reports its level only when the latch moves. When the chips let go
     // of such a pad, the wire is the MCU's output again, not the chip's last
@@ -234,7 +339,7 @@ function recomputeBoardPin(host: BoardPinHost, pin: number, net: BoardNet): void
     // moves no latch, never reaches the chip (finding
     // chip-release-leaves-esp32-output-at-chip-level).
     const mcu = net.mcuLevel;
-    if (mcu === undefined || host.peekPad?.(pin) || host.getPinDirection?.(pin) !== 1) return;
+    if (mcu === undefined || !isReportedOutput(host, pin)) return;
     if (net.lastLevel === mcu) return;
     level = mcu;
   } else {
@@ -288,6 +393,7 @@ export function setBoardPinDrive(
       sinks: new Map(),
       unwatch: () => {},
       contended: false,
+      pullsFight: false,
       lastLevel: undefined,
       // The channel carries the output pad's level until a chip drives it.
       mcuLevel:
@@ -303,6 +409,13 @@ export function setBoardPinDrive(
     // write, glitch included; the net's own publication comes back through
     // the same channel and is not a reason to resolve again.
     const offPad = host.onPadChange?.(pin, () => recomputeBoardPin(host, pin, created)) ?? (() => {});
+    // An engine without the pad channel says the guest let go of a pin on
+    // the direction and pull channels only; a pad-reporting one says it
+    // above, and resolving on both would publish every release twice.
+    const offConfig =
+      host.onPinConfigChange?.(pin, () => {
+        if (!host.peekPad?.(pin)) recomputeBoardPin(host, pin, created);
+      }) ?? (() => {});
     const offLevel = host.claimLevel
       ? host.claimLevel(pin, (proposed, source) => proposeBoardPin(host, pin, created, proposed, source))
       : (host.onPinChange?.(pin, (_p, state) => {
@@ -310,6 +423,7 @@ export function setBoardPinDrive(
         }) ?? (() => {}));
     created.unwatch = () => {
       offPad();
+      offConfig();
       offLevel();
     };
     net = created;
@@ -318,6 +432,27 @@ export function setBoardPinDrive(
   net.drivers.set(driverId, drive);
   net.sinks.set(driverId, sink);
   recomputeBoardPin(host, pin, net);
+}
+
+/**
+ * A module's own resistor on a board pin (the part's declared pull, see the
+ * header): 'up' or 'down' puts it on the net as a PULL-strength driver, null
+ * takes it off. `driverId` is the part's, `${componentId}::<pad>~pull` for a
+ * chip, so clearBusDriversForChip takes it with the rest of the part. `sink`
+ * is the part host's door into the guest's input register, as for a chip's
+ * own drive: the level the pull gives a released line has to reach the
+ * sketch's digitalRead, not only the parts watching the pin.
+ */
+export function setBoardPinPull(
+  host: BoardPinHost,
+  pin: number,
+  driverId: string,
+  pull: 'up' | 'down' | null,
+  sink: BoardPinSink,
+): void {
+  const drive: Drive =
+    pull === null ? HIGHZ_DRIVE : { value: pull === 'up' ? 1 : 0, strength: Strength.PULL };
+  setBoardPinDrive(host, pin, driverId, drive, sink);
 }
 
 function dropBoardNet(host: BoardPinHost, pin: number, net: BoardNet): void {

@@ -15,7 +15,7 @@ import { setChipPinDrive } from './chipPinDrives';
 import { isSyntheticChipPin, isSyntheticNetPin } from './syntheticPins';
 import { requestElectricalResolve } from '../spice/electricalResolveHook';
 import { chipBusEnabled } from './chipNets';
-import { setBusDrive, setBoardPinDrive, clearBusDriversForChip } from './busNets';
+import { setBusDrive, setBoardPinDrive, setBoardPinPull, clearBusDriversForChip } from './busNets';
 import { modeToDrive, Strength, HIGHZ_DRIVE } from './busLogic';
 import { padNet, padVolts } from './padVolts';
 
@@ -218,6 +218,17 @@ export interface ChipInstanceOptions {
   drivesWires?: () => boolean;
   /** Logical chip pin name → real Arduino pin number (resolved from wires). */
   wires?: Map<string, number>;
+  /**
+   * The resistors the MODULE carries on its lines, by chip pin name (a key of
+   * `wires`): the 10k pull-ups of a Grove 4-Digit Display on CLK and DIO, a
+   * DS18B20 module's 4.7k on DQ. Each is a weak driver of the board pin that
+   * pin is wired to, on it from before chip_setup until dispose, whatever the
+   * chip does with its own pin: it loses to any strong drive and beats the
+   * MCU's internal pull the other way (busNets, setBoardPinPull). This is
+   * the PCB's resistor, not the die's: a chip's own VX_INPUT_PULLUP stays
+   * off board pins (see _boardDrive). A pad wired to no board pin ignores it.
+   */
+  pulls?: Record<string, 'up' | 'down'> | null;
   /** User-editable attributes — keyed by name. */
   attrs?: Map<string, number>;
   /** String attribute values (vx_attr_register_string), from chip.json. */
@@ -265,6 +276,7 @@ export class ChipInstance {
   private remoteModel: string | undefined;
   private drivesWires: (() => boolean) | null;
   private wires: Map<string, number>;
+  private pulls: Record<string, 'up' | 'down'>;
   private attrs: Map<string, number>;
   private strAttrs: Map<string, string>;
   private display: { width: number; height: number } | null;
@@ -350,6 +362,7 @@ export class ChipInstance {
     this.busPads = opts.busPads ?? {};
     this.remoteModel = opts.remoteModel ?? undefined;
     this.wires = opts.wires ?? new Map();
+    this.pulls = opts.pulls ?? {};
     this.attrs = opts.attrs ?? new Map();
     this.strAttrs = opts.strAttrs ?? new Map();
     this.display = opts.display ?? null;
@@ -418,6 +431,9 @@ export class ChipInstance {
     if (!this.exports?.chip_setup) {
       throw new Error('Chip WASM does not export chip_setup');
     }
+    // The module's resistors are on the board before the chip runs a line of
+    // setup, as they are on a powered PCB.
+    this._applyModulePulls();
     this.inSetup = true;
     try {
       this.exports.chip_setup();
@@ -785,13 +801,32 @@ export class ChipInstance {
       this.pinManager,
       p.arduinoPin,
       `${this.componentId}::${name}`,
-      // An input's pull is not put on a board pin. The parts on that pin
-      // inject their levels with no strength (a button, a chip select a
-      // test drives), and a pull that counted would beat every one of
-      // them; the worker's runtime models no chip pull either.
+      // A chip input's own pull (VX_INPUT_PULLUP) is not put on a board
+      // pin: chips use it loosely, for a chip select or an IRQ that should
+      // idle high in their own reads, and the worker's runtime models no
+      // chip pull either. The resistor a MODULE carries on a line is
+      // declared by the part instead (ChipInstanceOptions.pulls), and that
+      // one is on the net.
       drive.strength === Strength.PULL ? HIGHZ_DRIVE : drive,
       (level) => this._onDigitalWrite?.(name, level),
     );
+  }
+
+  /** Put the module's declared resistors (ChipInstanceOptions.pulls) on the
+   *  board pins their pads are wired to. */
+  private _applyModulePulls(): void {
+    for (const [name, pull] of Object.entries(this.pulls)) {
+      if (pull !== 'up' && pull !== 'down') continue;
+      const pin = this.wires.get(name);
+      if (pin == null || pin < 0 || isSyntheticChipPin(pin)) continue;
+      setBoardPinPull(
+        this.pinManager,
+        pin,
+        `${this.componentId}::${name}~pull`,
+        pull,
+        (level) => this._onDigitalWrite?.(name, level),
+      );
+    }
   }
 
   /**

@@ -23,6 +23,7 @@
 - [A UART endpoint that answers: the Grove AT modems](#a-uart-endpoint-that-answers-the-grove-at-modems)
 - [A board built-in](#a-board-built-in)
 - [A custom chip](#a-custom-chip)
+- [A module with pull-up resistors](#a-module-with-pull-up-resistors)
 - [The tests a part must ship](#the-tests-a-part-must-ship)
 - [Checklist](#checklist)
 
@@ -510,6 +511,38 @@ gets everything above for free, in the tab, in a QEMU worker and on the Pi.
 
 ---
 
+## A module with pull-up resistors
+
+If the module's schematic has a resistor from a data line to VCC (or GND),
+declare it; the simulator does not guess. The Grove 4-Digit Display has
+2 x 10k on CLK and DIO, and without them avishorp's `TM1637Display`, which
+sends a 1 by releasing the line with `pinMode(INPUT)`, leaves the display
+dark. Where to say it:
+
+| The part is | Declaration |
+|---|---|
+| a custom chip (`chip.json`) | `"pulls": { "CLK": "up", "DIO": "up" }`, by pin name |
+| a host that creates a `ChipInstance` | `pulls: { CLK: 'up', DIO: 'up' }` in the options, by chip pin (a key of `wires`) |
+| a Grove chip module (velxio-prod) | `sim: { kind: 'chip', ..., pulls: { CLK: 'up', DIO: 'up' } }`, by pad |
+| any other part with the PinManager at hand | `setBoardPinPull(pm, pin, '<componentId>::<pad>~pull', 'up', sink)`, and `null` on cleanup; `sink` puts the level into the guest (the simulator's `setPinState`) |
+
+The rule the net applies is in board-buses.md, "Pull resistors on a line":
+any strong drive beats the pull with no warning, the pull beats the MCU's
+internal pull the other way, and the pulled level reaches both the sketch
+and the parts on the pin. Do not declare one for SDA and SCL: the I2C fabric
+already models the bus pull-up, on hardware and software I2C alike. Do not
+declare one to fix a line your own model drives: a 1-Wire model that owns
+its line answers a read slot with its own rise.
+
+Tests: drive the library's exact pin sequence with `pinMode(INPUT)`
+releases and no pull on the pad (never an injected HIGH standing in for the
+resistor), on a pad-reporting host and on an ESP32-shaped one (direction and
+pull channels, a level only when the latch moves), and keep a negative
+control with the declaration removed. The Grove display's
+`grove/__tests__/tm1637.test.ts` is the template.
+
+---
+
 ## The tests a part must ship
 
 Three kinds, and each one has to **fail when the part is broken**. A test
@@ -626,6 +659,7 @@ The full suite is the closing agent's, with `--maxWorkers=3`, reading the
 - [ ] A sink returns `null` and says `writeOnly: true`; a responder implements `peekMiso`, resets its frame in `deselect`, and ships a portable model (`remoteModel`, `loadBusChip`, `build.sh`, `manifest.json`).
 - [ ] Live inputs go through `remoteAttrs` and `handle.attrsChanged()`; storage through blobs and `remoteBlobWrite`.
 - [ ] `boardReset` clears protocol state and keeps data.
+- [ ] Every pull resistor on the module's schematic that sits on a line the sketch can release is declared (`pulls`), and none is invented.
 - [ ] Nothing is paced on `Date.now()` or `performance.now()`.
 - [ ] Three tests: the real-firmware row with its fixture, the negative control, the unwired case.
 - [ ] No `simulator.spi`, `setSPIHandler`, `addI2CDevice`, `classifyPin`, `feedUart` or `serialWrite`: none of them exist on a bus part any more.

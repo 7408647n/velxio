@@ -28,6 +28,7 @@ velxio-prod checkout under `project/board-buses-2026-09/` (`DESIGN.md`,
   - [Removal by identity](#removal-by-identity)
   - [Arbitration, as the wire does it](#arbitration-as-the-wire-does-it)
   - [Software buses](#software-buses)
+  - [Pull resistors on a line](#pull-resistors-on-a-line)
   - [Lifecycle](#lifecycle)
   - [Diagnostics](#diagnostics)
 - [The engine contract](#the-engine-contract)
@@ -238,6 +239,79 @@ The same model of a microSD, a MAX6675 or a custom chip therefore works with
 this rests on, tested for every engine: **a pad routed to a peripheral never
 produces GPIO edges**, so the hardware and the software path can never both
 deliver the same frame.
+
+### Pull resistors on a line
+
+A module carries resistors on its data lines: the Grove 4-Digit Display has
+2 x 10k from CLK and DIO to VCC, a DS18B20 module 4.7k on DQ, every I2C
+breakout 4.7k or 10k on SDA and SCL. An open-drain driver releases a line
+with `pinMode(INPUT)` and reads HIGH only through them: avishorp's
+`TM1637Display` sends every 1 bit that way, SoftwareWire does with
+`pullups = false`, OneWire always does. Until 2026-09-28 nothing put that
+resistor on the wire, so a released line kept the LOW the MCU last drove, in
+the guest and on the level channel, and the Grove display stayed dark with
+avishorp's library on every board (finding `module-pullup-not-modelled`).
+
+The resistor is a driver of the board pin's net (`customChips/busNets.ts`,
+`setBoardPinPull`), of PULL strength, on the net for as long as the part is
+on the canvas. The net resolves in tiers, as the wire does:
+
+| On the line | The level | Why |
+|---|---|---|
+| any strong drive: the MCU's output, a chip pulling low, a part's injection (a button, a line model, the SPICE connector) | the strong drive's; two opposite strong drives are contention (`[chipbus] contention` warning) | a 10k loses to any push-pull stage; no warning for a pull under a drive |
+| no strong drive, one or more module pulls | the modules' | the smaller resistor sets the divider: 4.7k-10k beats the MCU's internal 20k-100k, so a module pull-up wins over `INPUT_PULLDOWN` |
+| a module pull-up and a module pull-down, nothing driving | kept where it was, and said once (`[chipbus] ... pull-up and a pull-down from two modules`) | a divider of equal resistors sits mid-rail, which is no logic level |
+| no strong drive, no module pull | the pad's own pull (`INPUT_PULLUP`), else the level it had | as before |
+
+What follows from it:
+
+- The pulled level reaches the guest's input register through the part
+  host's digital-write door (the same sink a chip's own drive uses), and the
+  level channel, so the sketch's `digitalRead` and every part watching the
+  pin agree.
+- A part's injection is a drive: it beats a pull, the module's included. The
+  latch of an input pad (the AVR's PORT bit under `INPUT_PULLUP`) is not; it
+  reaches the net as the source `'pull'` (`PinManager.LevelSource`) and the
+  resolution answers it.
+- A release is heard on the channel the engine reports it on: the pad
+  channel on the AVR, RP2040, RP2350 and XIAO ARM engines, the direction and
+  pull channels (`PinManager.onPinConfigChange`) on the ESP32 bridges, whose
+  outputs the resolution treats as strong drives. `setBoardType` and
+  `initSimulator` now wire `onPinDir` as `addBoard` always did.
+- An engine that reports neither pads nor directions (the Pi and STM32
+  bridges) cannot say when the guest lets go of a pin it drove. There a
+  module pull sets the level of a pin the guest has never driven, and
+  nothing else.
+- An MCU drive that moves only the direction register (the AVR's
+  `pinMode(OUTPUT)` over a latch already at 0) is put on the level channel by
+  the net when the channel disagrees: the engine reports it on the pad
+  channel only, and on a pulled line the parts would otherwise never see the
+  line go LOW.
+- A board reset does not cut the module's supply: `hardResetPinStates` fires
+  the config listeners and the pulled level goes back on the wire.
+- A chip's own `VX_INPUT_PULLUP` is still not put on a board pin: chips use
+  it for their own reads of a select or an IRQ, and the worker models none.
+  The PCB's resistor is declared by the part: `ChipInstanceOptions.pulls` by
+  chip pin, `"pulls": { "DIO": "up" }` in a custom chip's `chip.json`, and
+  `ChipSim.pulls` by pad on a Grove module in velxio-prod.
+- A **software I2C bus** carries its members' pull-ups itself
+  (`softI2c.ts`): on a board whose pins come with the PinManager
+  (`BoardPins.pinHost`) it puts a pull-up on SDA and SCL and the target's
+  low as a strong driver of SDA. An I2C part declares no pull of its own.
+  Hardware I2C is served by the controller port and never reads a line.
+- A 1-Wire model that owns its line (the DS18B20 of velxio-prod, a DHT line
+  model) already answers a released read slot with a timed rise, so it needs
+  no declared pull.
+
+Remote hosts. The QEMU ESP32 and STM32 workers have no pad model: QEMU's pin
+injection carries a level and no float state, so a chip's release keeps the
+chip's last level there (the ABI parity table says so) and a module pull
+does not reach the guest either. The tab's net still resolves the level
+channel, but the guest's register is the worker's. Closing it means a pad
+model in `esp32_worker.py` and `stm32_worker.py` (track `gpio_dir` per pad;
+when a pad goes input and no chip holds it, inject the pull's level) and the
+part's pulls in the chip record. The Raspberry Pi runs its tab-hosted chips
+through this same net, with the no-direction rule above.
 
 ### Lifecycle
 
@@ -880,12 +954,14 @@ reopened.
 | `buses/softSpi.ts`, `softI2c.ts`, `softUart.ts`, `uartFrame.ts` | the software buses and the UART frame maths |
 | `buses/pinFunctions.ts`, `boardPinTables/` | the static routing tables |
 | `buses/storeResolver.ts`, `boardPins.ts` | the store's net resolver and the PinManager adapter |
+| `customChips/busNets.ts` | a board pin as a net with drivers: chips, the MCU's pad, module pulls (`setBoardPinPull`) |
 | `buses/remotePort.ts`, `remoteI2c.ts`, `remoteUart.ts`, `remoteLane.ts` | the ports of a board whose CPU is in a worker |
 | `buses/busChips.ts`, `models/` | portable model artifacts; `models/microsd.c` with `build.sh` and `manifest.json` (source sha, checked by the suites) |
 | `buses/conformance/` | the three kits |
 | `backend/app/services/wasm_chip_runtime.py`, `i2c_bus_table.py`, `uart_bus_table.py`, `esp32_worker.py` | the worker side |
 | `pro/backend/app/pro_boards/stm32_worker.py`, `pi_bus_relay.py`, `pi_spi_responders.py` | the STM32 and Pi hosts (velxio-prod) |
 | `buses/__tests__/` | layer 1: arbitration tables, order permutations, decoders, cross-board I2C and UART |
-| `frontend/src/__tests__/board-buses/` | conformance suites, F0 reproduction rows (`board-buses-repro-*`), the F4 to F7 suites, fixtures |
+| `frontend/src/__tests__/board-buses/` | conformance suites, F0 reproduction rows (`board-buses-repro-*`), the F4 to F7 suites, `board-buses-module-pulls.test.ts`, fixtures |
+| `buses/__tests__/soft-i2c-bus-pullups.test.ts` | SoftwareWire with its pull-ups off, on a real PinManager |
 | `test/backend/unit/test_board_buses_*.py`, `test_wasm_chip_*.py`, `test_microsd_wasm_model.py` | the worker, the runtime, the microSD golden table |
 | `project/board-buses-2026-09/harness/` (velxio-prod) | the in-app matrix, the perf bench, the fixture compiler, the cost and latency harnesses |

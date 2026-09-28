@@ -19,6 +19,7 @@ export function boardPinsFromPinManager(
       return p ? { drive: p.drive, pull: p.pull } : undefined;
     },
     onPadChange: (pin, cb) => pm.onPadChange(pin, () => cb()),
+    pinHost: pm,
     ...(driveInput ? { driveInput } : {}),
   };
 }
