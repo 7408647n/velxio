@@ -16,6 +16,7 @@
  */
 
 import type { BusKind } from './pinFunctions';
+import type { BoardPinHost } from '../customChips/busNets';
 
 // ── Pins ────────────────────────────────────────────────────────────────────
 
@@ -545,6 +546,15 @@ export interface BoardPins {
   onPadChange?(pin: number, cb: () => void): () => void;
   /** Drive a pin as an INPUT to the MCU (a device answering on MISO/SDA/RX). */
   driveInput?(pin: number, level: boolean): void;
+  /**
+   * The board's PinManager as a board-pin net sees it (customChips/busNets),
+   * for a bus that is a line with drivers and pull resistors on it rather
+   * than a stream of bytes: the software I2C bus puts its members' pull-ups
+   * and the target's open-drain low there, so a line the master releases with
+   * pinMode(INPUT) reads HIGH in the guest. Absent on a test double; the bus
+   * then drives the input directly, as before.
+   */
+  pinHost?: BoardPinHost;
 }
 
 /** Everything an engine adapter hands the fabric for one board. */

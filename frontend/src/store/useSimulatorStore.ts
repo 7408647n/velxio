@@ -775,6 +775,9 @@ export class Esp32BridgeShim {
       onPinChange: (pin, cb) => this.pinManager.onPinChange(pin, cb),
       peekPinState: (pin) => this.pinManager.peekPinState(pin),
       driveInput: (pin, level) => this.setPinState(pin, level),
+      // The net a software I2C bus puts its pull-ups on (softI2c.ts): an
+      // ESP32 says it released a line on the direction channel only.
+      pinHost: this.pinManager,
     };
     const bridge = this.bridge as unknown as {
       getBusBinding?: (
@@ -3503,6 +3506,14 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
         bridge.onGpioRouting = makeGpioRoutingHandler(boardId);
         bridge.onGpioRoutingClear = makeGpioRoutingClearHandler(boardId);
         bridge.onPinPull = makePinPullHandler(boardId);
+        // The direction the guest programmed, as addBoard's bridge reports
+        // it: without it a pad is an output only once it toggles, and a
+        // pinMode(INPUT) release reaches nothing that holds the line (a
+        // module's pull-up, busNets).
+        bridge.onPinDir = (gpioPin, dir) => {
+          pinManagerMap.get(boardId)?.setPinDirection(gpioPin, dir);
+          if (dir === 1) bridge.releasePinEvent(gpioPin);
+        };
         bridge.onWs2812Update = makeWs2812Handler(boardId);
         esp32BridgeMap.set(boardId, bridge);
         const shim = new Esp32BridgeShim(bridge, pm);
@@ -3638,6 +3649,14 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
         bridge.onGpioRouting = makeGpioRoutingHandler(boardId);
         bridge.onGpioRoutingClear = makeGpioRoutingClearHandler(boardId);
         bridge.onPinPull = makePinPullHandler(boardId);
+        // The direction the guest programmed, as addBoard's bridge reports
+        // it: without it a pad is an output only once it toggles, and a
+        // pinMode(INPUT) release reaches nothing that holds the line (a
+        // module's pull-up, busNets).
+        bridge.onPinDir = (gpioPin, dir) => {
+          pinManagerMap.get(boardId)?.setPinDirection(gpioPin, dir);
+          if (dir === 1) bridge.releasePinEvent(gpioPin);
+        };
         bridge.onWs2812Update = makeWs2812Handler(boardId);
         esp32BridgeMap.set(boardId, bridge);
         const shim = new Esp32BridgeShim(bridge, pm);

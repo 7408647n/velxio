@@ -97,7 +97,10 @@ it is the level the wire carries: what the MCU drives, or what another part
 on the same pin puts there (a button, a tilt switch, a second chip), not the
 mode the pin was registered with. A pin nothing has driven yet, or one the
 diagram wires to nothing, returns `0`; no host models a chip's own pull on a
-board pin.
+board pin. A resistor the module carries is declared in `chip.json` instead
+(`"pulls": { "DIO": "up" }`), and a released line then reads the pulled
+level in the browser engines (see board-buses.md, "Pull resistors on a
+line").
 
 ### `vx_pin_write`
 
@@ -173,8 +176,9 @@ line (an open-drain protocol, a bus the chip only sometimes drives) is done:
 - `VX_INPUT`, `VX_INPUT_PULLUP` and `VX_INPUT_PULLDOWN` release the line:
   the chip leaves the wire and whatever else holds it decides the level, the
   pad's pull (a `pinMode(INPUT_PULLUP)` in the sketch restores HIGH) or
-  another chip; a floating pad keeps the level it had. The chip's own pull
-  is not put on a board pin. On the QEMU boards the worker has no pad model,
+  another chip, or a pull the module declares in `chip.json` (`"pulls"`); a
+  floating pad keeps the level it had. The chip's own pull is not put on a
+  board pin. On the QEMU boards the worker has no pad model,
   so a released pin keeps the last level the chip drove.
 
 ### `vx_pin_watch`

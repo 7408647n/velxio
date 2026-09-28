@@ -22,7 +22,15 @@ import { PadBus } from './line/padBus';
 
 export type PinState = boolean;
 /** See PinManager.claimLevel. */
-export type LevelResolver = (proposed: boolean, source: 'mcu' | 'external') => boolean | undefined;
+/**
+ * The door a proposed level came through: 'mcu' is a level the engine reports
+ * on a pad it drives, 'external' is another part's injection (a button, a
+ * line model, a bus target, the SPICE connector), and 'pull' is the latch of a
+ * pad the guest configured as an input, which on the AVR is its pull-up and
+ * not a drive of anything.
+ */
+export type LevelSource = 'mcu' | 'external' | 'pull';
+export type LevelResolver = (proposed: boolean, source: LevelSource) => boolean | undefined;
 export type PinChangeCallback = (pin: number, state: PinState) => void;
 export type AnalogCallback = (pin: number, voltage: number) => void;
 // timeMs (optional) is the precise simulated time of the duty-cycle change
@@ -50,6 +58,8 @@ export class PinManager {
   // The direction the guest programmed per pad (1 output, 0 input), for the
   // boards that report it. See setPinDirection.
   private pinDirections: Map<number, 0 | 1> = new Map();
+  // Per-pin listeners on the direction and pull channels (see onPinConfigChange).
+  private configListeners: Map<number, Set<() => void>> = new Map();
 
   // ── Pad drive state (the line contract, simulation/line) ─────────────────
   //
@@ -200,7 +210,7 @@ export class PinManager {
         const isInput = ddrMask !== undefined && (ddrMask & mask) === 0;
         const resolver = isInput ? this.levelResolvers.get(arduinoPin) : undefined;
         if (resolver) {
-          const resolved = resolver(newState, 'external');
+          const resolved = resolver(newState, 'pull');
           if (resolved === undefined || this.pinStates.get(arduinoPin) === resolved) continue;
           this.pinStates.set(arduinoPin, resolved);
           const callbacks = this.listeners.get(arduinoPin);
@@ -328,6 +338,7 @@ export class PinManager {
       // calling pinMode(INPUT) in the middle of a run.
       requestElectricalResolve();
     }
+    this.fireConfig(pin);
   }
 
   /** The direction the guest declared for a pad, or undefined when this board
@@ -353,7 +364,34 @@ export class PinManager {
     const prev = this.pinPulls.get(pin) ?? 0;
     if (pull === 0) this.pinPulls.delete(pin);
     else this.pinPulls.set(pin, pull);
-    if (prev !== pull) this.onPullChange?.(pin, pull);
+    if (prev !== pull) {
+      this.onPullChange?.(pin, pull);
+      this.fireConfig(pin);
+    }
+  }
+
+  /**
+   * Subscribe to changes of one pin's direction or internal pull, the two
+   * channels an engine without the pad channel (the ESP32 bridges) reports a
+   * release on. pinMode(pin, INPUT) moves no level there, so a board-pin net
+   * that holds the pin (a module's pull-up, busNets) hears the release here
+   * or not at all. Returns the unsubscribe.
+   */
+  onPinConfigChange(pin: number, cb: () => void): () => void {
+    let set = this.configListeners.get(pin);
+    if (!set) {
+      set = new Set();
+      this.configListeners.set(pin, set);
+    }
+    set.add(cb);
+    return () => {
+      this.configListeners.get(pin)?.delete(cb);
+    };
+  }
+
+  private fireConfig(pin: number): void {
+    const set = this.configListeners.get(pin);
+    if (set) for (const cb of [...set]) cb();
   }
 
   /** Internal pull config for a pin: 0 = none, 1 = pull-up, 2 = pull-down. */
@@ -421,6 +459,10 @@ export class PinManager {
         callbacks.forEach((cb) => (cb.length >= 3 ? cb(pin, 0, undefined) : cb(pin, 0)));
       }
     }
+    // Every pad is released with no pull now, and a net holding a pin (a
+    // module's pull-up, busNets) puts its level back on the wire: a reset
+    // button does not cut the module's supply, so its pulled lines stay HIGH.
+    for (const pin of [...this.configListeners.keys()]) this.fireConfig(pin);
   }
 
   // ── PWM duty cycle API ───────────────────────────────────────────────────

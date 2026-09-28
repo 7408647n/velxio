@@ -15,7 +15,7 @@ import type { ChipFramebufferFrame } from '../Esp32Bridge';
 import { chipVirtualPin } from '../customChips/chipVirtualPin';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
 import { useElectricalStore } from '../../store/useElectricalStore';
-import { normalizeChipPinNames } from '../customChips/chipJson';
+import { normalizeChipPinNames, normalizeChipPulls } from '../customChips/chipJson';
 import { clearChipDrives } from '../customChips/chipPinDrives';
 import { isSyntheticChipPin } from '../customChips/syntheticPins';
 import { resolveChipNetMembers } from '../customChips/chipNets';
@@ -116,11 +116,15 @@ PartSimulationRegistry.register('custom-chip', {
 
     let pins: string[] = [];
     let display: { width: number; height: number } | null = null;
+    let pulls: Record<string, 'up' | 'down'> = {};
     try {
       // An empty chipJson (agent-placed chip before programming) is not an
       // error — treat it like a pinless chip rather than throwing on ''.
       const obj = chipJsonStr.trim() ? JSON.parse(chipJsonStr) : {};
       pins = normalizeChipPinNames(obj.pins);
+      // The module's own resistors on its lines (a TM1637 board's 10k
+      // pull-ups): weak drivers of the board pins those pads reach.
+      pulls = normalizeChipPulls(obj.pulls);
       if (
         obj.display &&
         typeof obj.display.width === 'number' &&
@@ -425,6 +429,7 @@ PartSimulationRegistry.register('custom-chip', {
           // are wired to when it calls vx_i2c_attach, on whichever controller
           // that is (Wire1, the XIAO RP2040's I2C1) or on none.
           wires,
+          pulls,
           attrs,
           strAttrs,
           display,
