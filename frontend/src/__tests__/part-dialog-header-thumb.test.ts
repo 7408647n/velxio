@@ -159,9 +159,13 @@ describe('the dialog header', () => {
 
   it('BMP280: its drawn art, whole: the 64px drawing scales into the 40px box', () => {
     open(meta('bmp280'));
-    const svg = header().querySelector('.pid-thumb svg')!;
-    expect(svg).not.toBeNull();
-    expect(svg.getAttribute('viewBox')).toBe('0 0 64 64');
+    const img = header().querySelector<HTMLImageElement>('.pid-thumb img')!;
+    expect(img).not.toBeNull();
+    // An image, not inline markup: script in a thumbnail can never run.
+    expect(header().querySelector('.pid-thumb svg')).toBeNull();
+    const src = img.getAttribute('src')!;
+    expect(src.startsWith('data:image/svg+xml')).toBe(true);
+    expect(decodeURIComponent(src.slice(src.indexOf(',') + 1))).toContain('viewBox="0 0 64 64"');
     expect(header().querySelector('.pid-thumb--live')).toBeNull();
   });
 

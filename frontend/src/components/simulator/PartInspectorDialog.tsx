@@ -497,7 +497,12 @@ export const PartInspectorDialog: React.FC<PartInspectorDialogProps> = ({
 
   // The art scaled to the header's 40px box (scalableSvgThumbnail adds the
   // viewBox the catalogue's 64px drawings leave out, which cropped them).
-  const svgThumb = scalableSvgThumbnail(componentMetadata.thumbnail);
+  // Drawn as an image, never as inline markup: an SVG inside <img> cannot run
+  // script or reach the page, so a thumbnail from any source is inert.
+  const svgThumbMarkup = scalableSvgThumbnail(componentMetadata.thumbnail);
+  const svgThumb = svgThumbMarkup
+    ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgThumbMarkup)}`
+    : null;
 
   // Same http(s)-only guard the picker card applies — docs are a surface the
   // pro overlay can write to, so the validation is load-bearing.
@@ -547,7 +552,9 @@ export const PartInspectorDialog: React.FC<PartInspectorDialogProps> = ({
       {/* Header: art + name + badges + brand, like the picker card. */}
       <div className="pid-header">
         {svgThumb ? (
-          <div className="pid-thumb" dangerouslySetInnerHTML={{ __html: svgThumb }} />
+          <div className="pid-thumb">
+            <img src={svgThumb} alt="" draggable={false} />
+          </div>
         ) : (
           <div className="pid-thumb pid-thumb--live" ref={thumbHostRef} aria-hidden="true" />
         )}
@@ -588,7 +595,9 @@ export const PartInspectorDialog: React.FC<PartInspectorDialogProps> = ({
             />
             {previewFailed && !svgThumb && <div className="pid-preview-missing">—</div>}
             {previewFailed && svgThumb && (
-              <div className="pid-preview-fallback" dangerouslySetInnerHTML={{ __html: svgThumb }} />
+              <div className="pid-preview-fallback">
+                <img src={svgThumb} alt="" draggable={false} />
+              </div>
             )}
 
             {/* Pin markers + labels, at their true positions. */}
