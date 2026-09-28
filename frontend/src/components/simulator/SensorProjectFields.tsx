@@ -12,11 +12,14 @@
  *
  * A linear slider gets a range next to its number; a log slider (illumination)
  * gets the number alone, since its range input would move a log-axis position
- * rather than the value the project stores.
+ * rather than the value the project stores. A slider that is really a switch
+ * ("Magnet present") gets a checkbox, and one that is a choice among named
+ * cases ("Event: strike / disturber / noise") a select with those names; the
+ * value stored is the same number the slider would store.
  */
 
 import React, { useEffect, useState } from 'react';
-import type { SensorProjectField } from '../../simulation/sensorControlConfig';
+import { nearestOption, type SensorProjectField } from '../../simulation/sensorControlConfig';
 
 interface SensorProjectFieldsProps {
   title: string;
@@ -85,6 +88,50 @@ const SensorProjectFieldRow: React.FC<{
 
   const label = field.unit ? `${field.label} (${field.unit})` : field.label;
   const inputId = `pid-sensor-${field.key}`;
+  const store = (v: number): number | string => (asText ? String(v) : v);
+
+  if (field.input.kind === 'toggle') {
+    return (
+      <div className="pid-row pid-sensor-row" data-sensor-field={field.key}>
+        <label className="pid-row-label" htmlFor={inputId}>
+          {label}
+        </label>
+        <input
+          id={inputId}
+          type="checkbox"
+          className="pid-sensor-check"
+          checked={field.value >= 0.5}
+          onChange={(e) => onChange(field, store(e.target.checked ? 1 : 0))}
+        />
+      </div>
+    );
+  }
+
+  if (field.input.kind === 'choice') {
+    const current = nearestOption(field.input.options, field.value);
+    return (
+      <div className="pid-row pid-sensor-row" data-sensor-field={field.key}>
+        <label className="pid-row-label" htmlFor={inputId}>
+          {label}
+        </label>
+        <select
+          id={inputId}
+          className="pid-select pid-sensor-select"
+          value={current ? String(current.value) : ''}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            if (Number.isFinite(v)) onChange(field, store(v));
+          }}
+        >
+          {field.input.options.map((o) => (
+            <option key={o.value} value={String(o.value)}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  }
 
   return (
     <div className="pid-row pid-sensor-row" data-sensor-field={field.key}>

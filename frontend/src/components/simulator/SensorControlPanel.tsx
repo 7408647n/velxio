@@ -8,7 +8,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { type SensorControl, type SliderControl, LOG_SLIDER_STEPS, logSliderToValue, logValueToSlider, getSensorControlForComponent, projectSensorValues } from '../../simulation/sensorControlConfig';
+import { type SensorControl, type SliderControl, LOG_SLIDER_STEPS, logSliderToValue, logValueToSlider, getSensorControlForComponent, projectSensorValues, sliderInput, nearestOption } from '../../simulation/sensorControlConfig';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
 import {
   dispatchSensorUpdate,
@@ -124,6 +124,50 @@ export const SensorControlPanel: React.FC<SensorControlPanelProps> = ({
     // Slider
     const sc = ctrl as SliderControl;
     const val = (values[sc.key] as number) ?? sc.defaultValue;
+
+    // A switch or a choice among named cases: the same control the property
+    // dialog shows for it, dispatching the same number the slider would.
+    const input = sliderInput(sc);
+    if (input.kind === 'toggle') {
+      const id = `sensor-ctl-${componentId}-${sc.key}`;
+      return (
+        <div key={sc.key} className="sensor-control-row">
+          <label className="sensor-control-label-wide" htmlFor={id}>
+            {sc.label}
+          </label>
+          <input
+            id={id}
+            type="checkbox"
+            className="sensor-check"
+            checked={Number(val) >= 0.5}
+            onChange={(e) => handleSlider(sc.key, e.target.checked ? '1' : '0')}
+          />
+        </div>
+      );
+    }
+    if (input.kind === 'choice') {
+      const id = `sensor-ctl-${componentId}-${sc.key}`;
+      const current = nearestOption(input.options, Number(val));
+      return (
+        <div key={sc.key} className="sensor-control-row">
+          <label className="sensor-control-label-wide" htmlFor={id}>
+            {sc.label}
+          </label>
+          <select
+            id={id}
+            className="sensor-select"
+            value={current ? String(current.value) : ''}
+            onChange={(e) => handleSlider(sc.key, e.target.value)}
+          >
+            {input.options.map((o) => (
+              <option key={o.value} value={String(o.value)}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      );
+    }
     const displayVal = sc.formatValue ? sc.formatValue(val) : String(val);
     const isAxisKey = AXIS_KEYS.has(sc.key);
     // Log-scale sliders (illumination): the range input runs in POSITION

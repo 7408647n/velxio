@@ -510,6 +510,17 @@
   text-align: right;
 }
 
+.pid-sensor-check {
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--accent, #0071e3);
+}
+
+.pid-sensor-select {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
 .pid-defaults {
   margin-top: 8px;
   border-top: 1px dashed var(--wb-7);
