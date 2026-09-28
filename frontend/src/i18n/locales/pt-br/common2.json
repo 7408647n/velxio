@@ -417,7 +417,9 @@
       "datasheetTab": "Ficha técnica",
       "examplesTitle": "Projetos de exemplo",
       "productPage": "Página do produto",
-      "datasheetPage": "Specifications"
+      "datasheetPage": "Specifications",
+      "sensorValues": "Valores do sensor",
+      "sensorValuesHint": "Os valores com que o sensor começa a simulação e aos quais o Reset o devolve. Mover o controle deslizante durante a simulação não os altera."
     },
     "flash": {
       "title": "Gravar {{board}}",

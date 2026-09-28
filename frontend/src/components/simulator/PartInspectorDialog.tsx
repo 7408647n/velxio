@@ -33,7 +33,13 @@ import {
 import { stripBrandPrefix } from '../../utils/exampleToBuildNetlistInput';
 import { SdCardPanel } from './SdCardPanel';
 import type { UploadedSdFile } from '../../utils/sdCardFiles';
-import { useSimulatorStore } from '../../store/useSimulatorStore';
+import {
+  useSimulatorStore,
+  projectComponentProperties,
+  commitSensorProjectValue,
+} from '../../store/useSimulatorStore';
+import { sensorProjectFields } from '../../simulation/sensorControlConfig';
+import { SensorProjectFields } from './SensorProjectFields';
 import {
   isKeyBindable,
   isModifierKey,
@@ -132,7 +138,8 @@ interface PartInspectorDialogProps {
   /** The simulation is running: the part can be inspected (pins, datasheet,
       the SD card's live contents) but not edited. Rotate/Delete are hidden
       and the property editors are disabled; the canvas already withholds
-      onPinSelect so pins are labels, not wire starts. */
+      onPinSelect so pins are labels, not wire starts. A sensor's project
+      values stay editable: the running part takes them at once. */
   readOnly?: boolean;
 }
 
@@ -471,9 +478,27 @@ export const PartInspectorDialog: React.FC<PartInspectorDialogProps> = ({
   // pro overlay can write to, so the validation is load-bearing.
   const buyHref = safeHref(doc?.buy);
 
-  const editableProps = componentMetadata.properties.filter((p: any) => isEditable(p));
+  // A sensor's project values (the sliders of its panel), from the control
+  // definition itself. They replace any metadata entry for the same property
+  // (the DS3231's plain number box, the IR remote's text), which had no range
+  // or unit. Read from the project's properties: a live value a running part
+  // mirrored in is not a project value.
+  const sensorFields = sensorProjectFields({
+    id: componentId,
+    metadataId: componentMetadata.id,
+    properties: projectComponentProperties(componentId) ?? componentProperties,
+  });
+  const sensorProps = new Set(sensorFields.map((f) => f.property));
+  const textSensorProps = new Set(
+    componentMetadata.properties
+      .filter((p: any) => sensorProps.has(p.name) && p.type === 'string')
+      .map((p: any) => p.name as string),
+  );
+  const editableProps = componentMetadata.properties.filter(
+    (p: any) => isEditable(p) && !sensorProps.has(p.name),
+  );
   const readOnlyProps = componentMetadata.properties.filter(
-    (p: any) => !isEditable(p) && !HIDDEN_PROPS.has(p.name),
+    (p: any) => !isEditable(p) && !HIDDEN_PROPS.has(p.name) && !sensorProps.has(p.name),
   );
 
   const pinTitle = (name: string, description?: string) => {
@@ -676,6 +701,20 @@ export const PartInspectorDialog: React.FC<PartInspectorDialogProps> = ({
                   </div>
                 );
               })}
+
+              {/* Sensor project values. Editable while running too: an
+                  edit here is a project edit, and the running part gets it at
+                  once (commitSensorProjectValue). */}
+              <SensorProjectFields
+                title={t('editor.inspector.sensorValues')}
+                hint={t('editor.inspector.sensorValuesHint')}
+                fields={sensorFields}
+                textProperties={textSensorProps}
+                onChange={(field, stored) => {
+                  onPropertyChange?.(componentId, field.property, stored);
+                  commitSensorProjectValue(componentId, field.key);
+                }}
+              />
 
               {/* Custom chip attribute defaults — declared in chip.json's
                   `attributes`, read by the chip via vx_attr_read. These are

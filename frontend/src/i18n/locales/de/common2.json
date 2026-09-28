@@ -417,7 +417,9 @@
       "datasheetTab": "Datenblatt",
       "examplesTitle": "Beispielprojekte",
       "productPage": "Produktseite",
-      "datasheetPage": "Specifications"
+      "datasheetPage": "Specifications",
+      "sensorValues": "Sensorwerte",
+      "sensorValuesHint": "Mit diesen Werten startet der Sensor in der Simulation, und Reset setzt ihn darauf zurück. Den Regler während der Simulation zu bewegen ändert sie nicht."
     },
     "flash": {
       "title": "{{board}} flashen",

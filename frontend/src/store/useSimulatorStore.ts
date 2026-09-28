@@ -103,6 +103,7 @@ import {
   sdSpiFabricDevice,
 } from '../simulation/parts/sdSpiCard';
 import {
+  getSensorUpdate,
   isReplayingProjectValues,
   replayProjectSensorValues,
 } from '../simulation/SensorUpdateRegistry';
@@ -4720,6 +4721,74 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
     },
   };
 });
+
+// ── Sensor project value edited in the property dialog ─────────────────────
+/**
+ * A component's properties as the PROJECT has them: a live value a running
+ * sensor mirrored into properties (the NTC's temperature, for the SPICE
+ * netlist) is shown as the project value it replaced. What the property dialog
+ * displays, so a slider dragged during the run never reads as a project edit.
+ */
+export function projectComponentProperties(componentId: string): Record<string, unknown> | undefined {
+  const comp = useSimulatorStore.getState().components.find((c) => c.id === componentId);
+  return comp ? withoutLiveSensorValues(comp) : undefined;
+}
+
+/**
+ * The property dialog just wrote a sensor's PROJECT value (the caller did the
+ * updateComponent, with its undo record). That value is the project value from
+ * now on, even when it equals the live one the panel had put there, so Reset
+ * brings the part back to exactly it. While the part is attached it also gets
+ * the value at once, as a project value and not a live move: the running
+ * firmware reads it, and the part's mirror of it is not taken for a live
+ * write. The open sensor panel remounts on the new value.
+ *
+ * Only `controlKey` is delivered: other controls keep whatever the panel is
+ * driving them with. A part that is not attached reads the value from its
+ * element when it attaches.
+ */
+export function commitSensorProjectValue(componentId: string, controlKey: string): void {
+  const st = useSimulatorStore.getState();
+  const comp = st.components.find((c) => c.id === componentId);
+  const def = comp ? getSensorControlForComponent(comp) : undefined;
+  if (!comp || !def) return;
+  const ctrl = def.controls.find((c) => c.type === 'slider' && c.key === controlKey);
+  if (!ctrl || ctrl.type !== 'slider') return;
+  liveSensorProperties.get(componentId)?.delete(ctrl.propertyKey ?? ctrl.key);
+  if (!getSensorUpdate(componentId)) return;
+  const value = projectSensorValues(comp, def)[controlKey];
+  if (value === undefined) return;
+  replayProjectSensorValues(componentId, { [controlKey]: value });
+  useSimulatorStore.setState((s) => ({ sensorResetNonce: s.sensorResetNonce + 1 }));
+}
+
+/**
+ * A sensor part just attached: hand it the values the PROJECT sets for it,
+ * so it starts from them whether or not its attach reads them off the element
+ * (most parts do; a part that keeps its own starting value would otherwise
+ * ignore a value set in the property dialog until the panel opened or Reset
+ * replayed it). Only the controls the project sets are delivered: one the
+ * project leaves unset keeps the part's own start, as before, and the panel's
+ * cache is not touched, so its first open still replays the full project set.
+ * A replay, so nothing the part mirrors back is taken for a live edit. Custom chips are
+ * left alone: they read properties.attrs themselves, once their module loads.
+ */
+export function replayProjectSensorValuesOnAttach(componentId: string): void {
+  if (!getSensorUpdate(componentId)) return;
+  const comp = useSimulatorStore.getState().components.find((c) => c.id === componentId);
+  if (!comp || comp.metadataId === 'custom-chip') return;
+  const def = getSensorControlForComponent(comp);
+  if (!def) return;
+  const all = projectSensorValues(comp, def);
+  const set: Record<string, number | boolean> = {};
+  for (const ctrl of def.controls) {
+    if (ctrl.type !== 'slider') continue;
+    const raw = comp.properties?.[ctrl.propertyKey ?? ctrl.key];
+    if (raw === undefined || raw === null || raw === '') continue;
+    if (all[ctrl.key] !== undefined) set[ctrl.key] = all[ctrl.key];
+  }
+  if (Object.keys(set).length > 0) replayProjectSensorValues(componentId, set, { cache: false });
+}
 
 // ── Helper: get the active board instance (convenience for consumers) ─────
 export function getActiveBoard(): BoardInstance | null {

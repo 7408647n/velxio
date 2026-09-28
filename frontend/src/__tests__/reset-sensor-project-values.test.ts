@@ -35,7 +35,13 @@ vi.stubGlobal('window', win);
 vi.stubGlobal('requestAnimationFrame', () => 0);
 vi.stubGlobal('cancelAnimationFrame', () => {});
 
-import { useSimulatorStore, getBoardSimulator } from '../store/useSimulatorStore';
+import {
+  useSimulatorStore,
+  getBoardSimulator,
+  commitSensorProjectValue,
+  projectComponentProperties,
+  replayProjectSensorValuesOnAttach,
+} from '../store/useSimulatorStore';
 import type { AVRSimulator } from '../simulation/AVRSimulator';
 import { PartSimulationRegistry } from '../simulation/parts/PartSimulationRegistry';
 import '../simulation/parts';
@@ -51,6 +57,8 @@ import {
   SENSOR_CONTROLS,
   projectSensorValues,
   registerInstanceSensorControlResolver,
+  registerSensorControls,
+  sensorProjectFields,
   type SensorControlDef,
 } from '../simulation/sensorControlConfig';
 
@@ -157,6 +165,8 @@ class Bench {
     const logic = PartSimulationRegistry.get(p.metadataId)!;
     const getPin = (name: string) => traceDetailed(useSimulatorStore.getState(), p.id, name, 0).arduinoPin;
     p.cleanup = logic.attachEvents!(p.el as never, this.sim as never, getPin, p.id) ?? undefined;
+    // DynamicComponent, right after attachEvents.
+    replayProjectSensorValuesOnAttach(p.id);
   }
 
   private detach(p: Mounted): void {
@@ -298,6 +308,173 @@ describe('Reset keeps a BMP280 at the temperature the project gave it', () => {
     b.run();
     expect(b.reading()).toBe('T=12.0');
     expect(b.props('bmp')).toEqual({ temperature: '12' });
+  });
+});
+
+// ── The property dialog's field, on real firmware ────────────────────────────
+
+/**
+ * What the property dialog does when its sensor field is edited: the field is
+ * the one sensorProjectFields lists for the part (read from the project's
+ * properties), the write is SimulatorCanvas's onPropertyChange
+ * (updateComponent), then commitSensorProjectValue.
+ */
+function dialogEdit(id: string, key: string, value: number): void {
+  const st = useSimulatorStore.getState();
+  const comp = st.components.find((c) => c.id === id)!;
+  const field = sensorProjectFields({ ...comp, properties: projectComponentProperties(id) })
+    .find((f) => f.key === key);
+  if (!field) throw new Error(`the dialog has no ${key} field for ${comp.metadataId}`);
+  st.updateComponent(id, { properties: { ...comp.properties, [field.property]: value } });
+  commitSensorProjectValue(id, key);
+}
+
+/** What the dialog's field shows. */
+function dialogValue(id: string, key: string): number | undefined {
+  const comp = useSimulatorStore.getState().components.find((c) => c.id === id)!;
+  return sensorProjectFields({ ...comp, properties: projectComponentProperties(id) })
+    .find((f) => f.key === key)?.value;
+}
+
+describe('the BMP280 temperature set in the property dialog, on real firmware', () => {
+  it('set while stopped: the first run reads it', () => {
+    const b = bench();
+    bmp280(b, {});
+    dialogEdit('bmp', 'temperature', 35);
+    expect(b.props('bmp')).toEqual({ temperature: 35 });
+    b.load();
+    b.run();
+    expect(b.reading()).toBe('T=35.0');
+  });
+
+  it('set while running: the sketch reads it at once, and Reset keeps it', () => {
+    const b = bench();
+    bmp280(b, { temperature: '35' });
+    b.load();
+    b.run();
+    expect(b.reading()).toBe('T=35.0');
+
+    dialogEdit('bmp', 'temperature', 18);
+    expect(b.reading()).toBe('T=18.0');
+
+    b.reset();
+    b.run();
+    expect(b.reading()).toBe('T=18.0');
+    expect(b.props('bmp')).toEqual({ temperature: 18 });
+  });
+
+  it('Reset after a live slider move returns to the dialog value', () => {
+    const b = bench();
+    bmp280(b, {});
+    b.load();
+    b.run();
+    dialogEdit('bmp', 'temperature', 30);
+    expect(b.reading()).toBe('T=30.0');
+
+    dispatchSensorUpdate('bmp', { temperature: 50 });
+    expect(b.reading()).toBe('T=50.0');
+    expect(dialogValue('bmp', 'temperature')).toBe(30);
+
+    b.reset();
+    b.run();
+    expect(b.reading()).toBe('T=30.0');
+    expect(b.props('bmp')).toEqual({ temperature: 30 });
+  });
+
+  it('the open panel follows the dialog: its cache holds the new value', () => {
+    const b = bench();
+    bmp280(b, {});
+    b.load();
+    b.run();
+    dispatchSensorUpdate('bmp', { temperature: 50, pressure: 900 });
+    const nonce = useSimulatorStore.getState().sensorResetNonce;
+    dialogEdit('bmp', 'temperature', 12);
+    // The panel remounts (nonce) and hydrates from this cache: the new
+    // temperature, and the pressure the slider is still driving.
+    expect(useSimulatorStore.getState().sensorResetNonce).toBe(nonce + 1);
+    expect(getLastSensorValues('bmp')).toMatchObject({ temperature: 12, pressure: 900 });
+  });
+});
+
+// A BMP280 whose attach does NOT read the project off its element (it starts
+// on its own 25 C whatever the element says): the value set in the dialog
+// still reaches the firmware on the first run, because the canvas replays the
+// project's values to every sensor part it attaches.
+PartSimulationRegistry.register('test-bmp280-own-start', {
+  attachEvents: (_el, sim, getPin, id, resolver) =>
+    PartSimulationRegistry.get('bmp280')!.attachEvents!(
+      new EventTarget() as never,
+      sim,
+      getPin,
+      id,
+      resolver,
+    ),
+});
+registerSensorControls({ 'test-bmp280-own-start': SENSOR_CONTROLS.bmp280 });
+
+describe('a part that keeps its own start still starts on the dialog value', () => {
+  it('set while stopped: the first run reads it', () => {
+    const b = bench();
+    b.wire('bmp', 'VCC', '5V');
+    b.wire('bmp', 'GND', 'GND.1');
+    b.wire('bmp', 'SDA', 'A4');
+    b.wire('bmp', 'SCL', 'A5');
+    b.mount({ id: 'bmp', metadataId: 'test-bmp280-own-start', properties: {} });
+    dialogEdit('bmp', 'temperature', 35);
+    b.load();
+    b.run();
+    expect(b.reading()).toBe('T=35.0');
+  });
+
+  it('the attach replay leaves the panel cache empty (its first open replays the full project set)', () => {
+    const b = bench();
+    bmp280(b, { temperature: '35' });
+    b.load();
+    b.run();
+    expect(b.reading()).toBe('T=35.0');
+    expect(getLastSensorValues('bmp')).toBeUndefined();
+  });
+
+  it('a control the project leaves unset keeps the part start, as before', () => {
+    const b = bench();
+    bmp280(b, {});
+    b.load();
+    b.run();
+    expect(b.reading()).toBe('T=25.0');
+  });
+});
+
+describe('the NTC temperature set in the property dialog', () => {
+  it('while running, after a live move mirrored into properties: the dialog shows the project value, an edit injects at once and survives Reset', () => {
+    const b = bench();
+    ntc(b, { temperature: 40 });
+    b.load();
+    b.run();
+    dispatchSensorUpdate('ntc', { temperature: 80 });
+    expect(b.props('ntc').temperature).toBe(80);
+    expect(dialogValue('ntc', 'temperature')).toBe(40);
+
+    dialogEdit('ntc', 'temperature', 60);
+    expect(b.adcVolts(0)).toBeCloseTo(ntcVolts(60), 6);
+
+    b.reset();
+    b.run();
+    expect(b.adcVolts(0)).toBeCloseTo(ntcVolts(60), 6);
+    expect(b.props('ntc')).toEqual({ temperature: 60 });
+  });
+
+  it('typing in the dialog the same value the slider left there makes it the project value', () => {
+    const b = bench();
+    ntc(b, { temperature: 40 });
+    b.load();
+    b.run();
+    dispatchSensorUpdate('ntc', { temperature: 80 });
+    dialogEdit('ntc', 'temperature', 80);
+
+    b.reset();
+    b.run();
+    expect(b.adcVolts(0)).toBeCloseTo(ntcVolts(80), 6);
+    expect(b.props('ntc')).toEqual({ temperature: 80 });
   });
 });
 

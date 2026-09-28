@@ -417,7 +417,9 @@
       "datasheetTab": "Scheda tecnica",
       "examplesTitle": "Progetti di esempio",
       "productPage": "Pagina prodotto",
-      "datasheetPage": "Specifications"
+      "datasheetPage": "Specifications",
+      "sensorValues": "Valori del sensore",
+      "sensorValuesHint": "I valori con cui il sensore parte nella simulazione e a cui Reset lo riporta. Muovere il suo cursore durante la simulazione non li modifica."
     },
     "flash": {
       "title": "Flash {{board}}",

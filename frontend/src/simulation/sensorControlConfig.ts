@@ -615,6 +615,69 @@ export function projectSensorValues(
   return values;
 }
 
+/**
+ * One PROJECT value of a sensor, as the property dialog edits it: a slider of
+ * the sensor's panel, read from the same property the part and
+ * projectSensorValues read (propertyKey, else key), with the slider's range,
+ * step, unit and default. Derived from the control definition on purpose, so
+ * the dialog and the panel cannot drift apart and every sensor with a panel,
+ * catalogue or overlay-registered, gets its fields without per-part metadata.
+ */
+export interface SensorProjectField {
+  /** Control key: what the panel dispatches and the part's update reads. */
+  key: string;
+  /** Component property that stores the project value. */
+  property: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  unit: string;
+  defaultValue: number;
+  /** The project value: the stored property, or the panel default. */
+  value: number;
+  /** The panel slider is logarithmic: the dialog edits the value itself,
+   *  never a position on the log axis. */
+  log: boolean;
+  formatValue?: (v: number) => string;
+}
+
+/**
+ * The fields the property dialog shows for a sensor's project values. Buttons
+ * (Simulate motion, Send) are actions, not values, and are left out. A custom
+ * chip gets none: its attributes already have their own editor, fed from
+ * chip.json and stored under properties.attrs.
+ */
+export function sensorProjectFields(component: {
+  id: string;
+  metadataId?: string;
+  properties?: Record<string, unknown>;
+}): SensorProjectField[] {
+  if (component.metadataId === 'custom-chip') return [];
+  const def = getSensorControlForComponent(component);
+  if (!def) return [];
+  const values = projectSensorValues(component, def);
+  const fields: SensorProjectField[] = [];
+  for (const ctrl of def.controls) {
+    if (ctrl.type !== 'slider') continue;
+    const value = values[ctrl.key];
+    fields.push({
+      key: ctrl.key,
+      property: ctrl.propertyKey ?? ctrl.key,
+      label: ctrl.label,
+      min: ctrl.min,
+      max: ctrl.max,
+      step: ctrl.step,
+      unit: ctrl.unit,
+      defaultValue: ctrl.defaultValue,
+      value: typeof value === 'number' ? value : ctrl.defaultValue,
+      log: ctrl.scale === 'log',
+      formatValue: ctrl.formatValue,
+    });
+  }
+  return fields;
+}
+
 export function registerSensorControls(defs: Record<string, SensorControlDef>): void {
   Object.assign(proSensorControls, defs);
 }

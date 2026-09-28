@@ -454,7 +454,9 @@
       "datasheetTab": "Datasheet",
       "examplesTitle": "Example projects",
       "productPage": "Product page",
-      "datasheetPage": "Specifications"
+      "datasheetPage": "Specifications",
+      "sensorValues": "Sensor values",
+      "sensorValuesHint": "Where the sensor starts when the simulation runs, and where Reset brings it back. Dragging its slider during a run does not change these."
     },
     "flash": {
       "title": "Flash {{board}}",
