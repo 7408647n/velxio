@@ -11,6 +11,7 @@
 import React, { useEffect, useState } from 'react';
 import { useIsCoarsePointer } from '../../utils/useTouchDevice';
 import { rotatePinLocal } from '../../utils/pinPositionCalculator';
+import { readPinInfo } from '../../utils/readPinInfo';
 
 /** Minimum visual pin size in *world* pixels at zoom 1 */
 const PIN_VISUAL = 12;
@@ -77,8 +78,9 @@ export const PinOverlay: React.FC<PinOverlayProps> = ({
     let timer: ReturnType<typeof setTimeout> | undefined;
     const tryRead = () => {
       const element = document.getElementById(componentId);
-      if (element && (element as any).pinInfo) {
-        setPins((element as any).pinInfo);
+      const info = readPinInfo<PinInfo>(element);
+      if (element && info) {
+        setPins(info);
         // Capture the wrapper's unrotated bounding box for the rotation
         // pivot. offsetWidth/Height stay constant regardless of CSS
         // transforms, so they reflect the LAYOUT box — exactly what
