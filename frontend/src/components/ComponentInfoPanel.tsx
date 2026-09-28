@@ -26,6 +26,7 @@ import remarkGfm from 'remark-gfm';
 import type { PropertyDescriptor } from '../types/component-metadata';
 import { loadDoc, productPageHref, productLinkKind, type ComponentDoc } from './componentDocs';
 import { trackProductPageClick } from '../utils/analytics';
+import { scalableSvgThumbnail } from '../utils/svgThumbnail';
 import './ComponentInfoPanel.css';
 
 export interface PanelData {
@@ -280,8 +281,8 @@ export const ComponentInfoPanel: React.FC<ComponentInfoPanelProps> = ({
     setPos({ left, top });
   }, [rect, doc]);
 
-  const svgThumb =
-    data.thumbnail && data.thumbnail.trim().startsWith('<svg') ? data.thumbnail : null;
+  // Scaled to the 40px box, not cropped (see scalableSvgThumbnail).
+  const svgThumb = scalableSvgThumbnail(data.thumbnail);
 
   const brand = doc?.brand;
 

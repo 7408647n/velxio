@@ -135,10 +135,13 @@ describe('components-metadata.json — file integrity', () => {
     expect(dups, 'duplicate IDs').toEqual([]);
   });
 
-  it('every thumbnail is an SVG string', () => {
+  it('every thumbnail is an SVG string, or empty for a part drawn by its live element', () => {
+    // Empty is the generator's "no art of its own": the picker card and the
+    // property dialog draw the live element instead (an id printed in a grey
+    // box used to stand in, and read as "ERATUR" in the dialog's header).
     const bad: string[] = [];
     for (const e of entries) {
-      if (typeof e.thumbnail !== 'string' || !e.thumbnail.trim().startsWith('<svg')) {
+      if (typeof e.thumbnail !== 'string' || (e.thumbnail !== '' && !e.thumbnail.trim().startsWith('<svg'))) {
         bad.push(e.id);
       }
     }

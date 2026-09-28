@@ -53,6 +53,24 @@
   max-height: 100%;
 }
 
+/* A part with no SVG art: the live element, scaled into the box by the
+   preview effect (paintThumb). Absolute so its natural-size layout box never
+   pushes the header around. */
+.pid-thumb--live {
+  position: relative;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pid-thumb--live .pid-thumb-element {
+  position: absolute;
+}
+
+.pid-thumb--live .pid-thumb-element svg {
+  max-width: none;
+  max-height: none;
+}
+
 .pid-title {
   display: flex;
   flex-direction: column;
