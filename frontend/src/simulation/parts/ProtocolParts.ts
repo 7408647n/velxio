@@ -1232,7 +1232,8 @@ PartSimulationRegistry.register('microsd-card', {
  *
  * Addresses:
  *   0x76 (SDO pin pulled LOW, default)
- *   0x77 (SDO pin pulled HIGH — set element.address = '0x77')
+ *   0x77 (SDO pin pulled HIGH — set element.address = '0x77', or
+ *         element.i2cAddress, which is the name a Grove brick sets)
  *
  * The element may expose `temperature` (°C) and `pressure` (hPa) properties
  * that are read on attach and forwarded to the virtual device.
@@ -1245,7 +1246,10 @@ PartSimulationRegistry.register('microsd-card', {
 PartSimulationRegistry.register('bmp280', {
   attachEvents: (element, simulator, _getPin, componentId) => {
     const el = element as any;
-    const addr = el.address === '0x77' || el.address === 0x77 ? 0x77 : 0x76;
+    // SDO selects one of two addresses, and the chip has no other. The Grove
+    // BMP280 sets `i2cAddress`: read as `address` only, the model sat at 0x76
+    // while Seeed's library asks 0x77 and waits for an answer with no timeout.
+    const addr = parseI2cAddress(el.i2cAddress ?? el.address, 0x76) === 0x77 ? 0x77 : 0x76;
     // An unset value starts where the panel and the property dialog say it
     // does (24 C, 1013.25 hPa), not at a literal of this part's own.
     const initTemp =

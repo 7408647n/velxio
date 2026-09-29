@@ -2043,6 +2043,73 @@ describe('mpu6050 — ESP32 path', () => {
   });
 });
 
+// ─── bmp280 — its address ─────────────────────────────────────────────────────
+
+describe('bmp280 — the address SDO selects', () => {
+  const CHIP_ID = 0xd0;
+  const attachBmp = (props: Record<string, unknown> = {}) =>
+    PartSimulationRegistry.get('bmp280')!.attachEvents!(
+      makeElement(props),
+      makeI2CSim() as any,
+      noPins,
+      'bmp',
+    );
+
+  it('answers at 0x76 when nothing says otherwise', () => {
+    const rig = i2cRig({ bmp: HW_I2C_PINS });
+    attachBmp();
+    expect([rig.ack(0x76), rig.ack(0x77)]).toEqual([true, false]);
+  });
+
+  it('answers at 0x77 when element.address says so', () => {
+    const rig = i2cRig({ bmp: HW_I2C_PINS });
+    attachBmp({ address: '0x77' });
+    expect([rig.ack(0x76), rig.ack(0x77)]).toEqual([false, true]);
+  });
+
+  it('answers at 0x77 when element.i2cAddress says so, which is what the Grove BMP280 sets', () => {
+    // Seeed_BMP280 has 0x77 compiled in and, after requestFrom, waits in
+    // while (!Wire.available()) for a byte that a NAK never brings: with the
+    // model at 0x76 the gallery example grove-bmp280-xiao-esp32c6 printed
+    // nothing after its boot banner.
+    const rig = i2cRig({ bmp: HW_I2C_PINS });
+    attachBmp({ i2cAddress: '0x77' });
+    expect([rig.ack(0x76), rig.ack(0x77)]).toEqual([false, true]);
+    expect(rig.readReg(0x77, CHIP_ID, 1)).toEqual([0x58]);
+  });
+
+  it('takes the address as a number or in decimal too', () => {
+    for (const i2cAddress of [0x77, '119', '0X77']) {
+      const rig = i2cRig({ bmp: HW_I2C_PINS });
+      const off = attachBmp({ i2cAddress });
+      expect([rig.ack(0x76), rig.ack(0x77)], String(i2cAddress)).toEqual([false, true]);
+      off();
+      rig.dispose();
+    }
+  });
+
+  it('stays at 0x76 for an address the chip does not have', () => {
+    const rig = i2cRig({ bmp: HW_I2C_PINS });
+    attachBmp({ i2cAddress: '0x3C' });
+    expect([rig.ack(0x3c), rig.ack(0x76), rig.ack(0x77)]).toEqual([false, true, false]);
+  });
+
+  it('the worker record of a QEMU board carries the same address', () => {
+    const sim = makeEsp32Sim();
+    PartSimulationRegistry.get('bmp280')!.attachEvents!(
+      makeElement({ i2cAddress: '0x77' }),
+      sim as any,
+      noPins,
+      'bmp-grove',
+    );
+    expect(sim.registerSensor).toHaveBeenCalledWith(
+      'bmp280',
+      i2cPartWorkerPin('bmp-grove'),
+      expect.objectContaining({ addr: 0x77 }),
+    );
+  });
+});
+
 // ─── bmp280 — ESP32 path ──────────────────────────────────────────────────────
 
 describe('bmp280 — ESP32 path', () => {
