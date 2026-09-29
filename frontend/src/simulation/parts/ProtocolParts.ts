@@ -509,11 +509,12 @@ export const MPU6050_RULES = {
   /** Every register powers on at 0x00 but these: asleep, and its id (section 3). */
   power_on: { 0x6b: 0x40, 0x75: 0x68 },
   /**
-   * Inclusive ranges a write leaves as they are: INT_STATUS, the sample block
-   * with the external sensor data behind it, FIFO_COUNT and WHO_AM_I
-   * (sections 4.16 to 4.20, 4.30 and 4.32).
+   * Inclusive ranges a write leaves as they are: I2C_MST_STATUS, INT_STATUS,
+   * the sample block with the external sensor data behind it, FIFO_COUNT
+   * and WHO_AM_I (sections 4.13, 4.16 to 4.20, 4.30 and 4.32).
    */
   read_only: [
+    [0x36, 0x36],
     [0x3a, 0x3a],
     [0x3b, 0x60],
     [0x72, 0x73],

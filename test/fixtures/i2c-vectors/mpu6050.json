@@ -5,7 +5,7 @@
   "address": "68",
   "rules": {
     "power_on": { "6B": "40", "75": "68" },
-    "read_only": [["3A", "3A"], ["3B", "60"], ["72", "73"], ["75", "75"]],
+    "read_only": [["36", "36"], ["3A", "3A"], ["3B", "60"], ["72", "73"], ["75", "75"]],
     "self_clearing": { "68": "FF", "6A": "0F", "6B": "80" },
     "accel_lsb_per_g": [16384, 8192, 4096, 2048],
     "gyro_lsb_per_dps": [131, 65.5, 32.8, 16.4],
@@ -45,9 +45,13 @@
     },
     {
       "name": "a write to a read-only register changes nothing, and the pointer still moves past it",
-      "spec": "RM sections 4.16 to 4.20 (INT_STATUS, sample block, external sensor data), 4.30 (FIFO_COUNT), 4.32 (WHO_AM_I): Type Read Only",
+      "spec": "RM sections 4.13 (I2C_MST_STATUS), 4.16 to 4.20 (INT_STATUS, sample block, external sensor data), 4.30 (FIFO_COUNT), 4.32 (WHO_AM_I): Type Read Only",
       "steps": [
         { "op": "write", "data": "6B 00" },
+        { "op": "write", "data": "36 FF" },
+        { "op": "read", "reg": "36", "n": 1, "expect": "00" },
+        { "op": "write", "data": "34 11 22 33 44" },
+        { "op": "read", "reg": "34", "n": 4, "expect": "11 22 00 44" },
         { "op": "write", "data": "3A FF" },
         { "op": "read", "reg": "3A", "n": 1, "expect": "00" },
         { "op": "write", "data": "3B AA*38 AB" },
