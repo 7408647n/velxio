@@ -26,6 +26,15 @@ const WS_BASE   = BACKEND.replace(/^https?:/, m => m === 'https:' ? 'wss:' : 'ws
 const SESSION   = `test-mpu6050-${Date.now()}`;
 const TIMEOUT_S = parseInt(process.argv.find(a => a.startsWith('--timeout='))?.slice(10) ?? '40');
 
+// The low byte of an I2C event, as the worker names it (esp32_worker.py,
+// _I2C_OP_NAME): QEMU's enum i2c_event, then the write and the read of
+// hw/i2c/picsimlab_i2c.c.
+const I2C_OP = {
+  0x00: 'START_RECV', 0x01: 'START_SEND', 0x02: 'START_ASYNC',
+  0x03: 'FINISH',     0x04: 'NACK',
+  0x05: 'WRITE',      0x06: 'READ',
+};
+
 // ─── MPU-6050 sketch (same as the example in examples.ts) ────────────────────
 const SKETCH = `// ESP32 — MPU-6050 Accelerometer & Gyroscope (I2C)
 // Requires: Adafruit MPU6050, Adafruit Unified Sensor libraries
