@@ -2935,6 +2935,9 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             elif sensor_type == 'mpu6050':
                 i2c_addr = int(s.get('addr', 0x68))
                 slave = _MPU6050Slave(i2c_addr)
+                # The record carries where the panel's sliders are, so the
+                # first read is already theirs and not the twin's own rest.
+                slave.update(**s)
                 _i2c_add(gpio, s, slave, i2c_addr)
                 sensor_data['i2c_addr'] = i2c_addr
                 sensor_data['slave'] = slave
@@ -3259,6 +3262,7 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                 elif sensor_type == 'mpu6050':
                     i2c_addr = int(cmd.get('addr', 0x68))
                     slave = _MPU6050Slave(i2c_addr)
+                    slave.update(**cmd)
                     _i2c_add(gpio, cmd, slave, i2c_addr)
                     sensor_data['i2c_addr'] = i2c_addr
                     sensor_data['slave'] = slave
@@ -3335,15 +3339,9 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                                 if _unlock_iothread:
                                     _unlock_iothread()
                     elif stype == 'mpu6050' and slave is not None:
-                        slave.update(
-                            accel_x=float(sensor.get('accelX', 0)),
-                            accel_y=float(sensor.get('accelY', 0)),
-                            accel_z=float(sensor.get('accelZ', 1)),
-                            gyro_x =float(sensor.get('gyroX',  0)),
-                            gyro_y =float(sensor.get('gyroY',  0)),
-                            gyro_z =float(sensor.get('gyroZ',  0)),
-                            temp   =float(sensor.get('temp',   25.0)),
-                        )
+                        # Only what this update names: a value it leaves out
+                        # stays where the record or an earlier update put it.
+                        slave.update(**cmd)
                     elif stype == 'bmp280' and slave is not None:
                         slave.update(
                             temperature_c =float(sensor.get('temperature', 25.0)),

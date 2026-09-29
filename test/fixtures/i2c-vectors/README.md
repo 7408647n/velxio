@@ -7,7 +7,7 @@ that pass the same file cannot drift apart again.
 
 | File | Chip | Replayed by |
 |---|---|---|
-| `mpu6050.json` | InvenSense MPU-6050 | `frontend/src/__tests__/protocol-parts.test.ts` |
+| `mpu6050.json` | InvenSense MPU-6050 | `frontend/src/__tests__/protocol-parts.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
 
 ## File
 
@@ -76,7 +76,8 @@ it), and may not depend on a STOP to begin a new read.
 
 A runner needs, per vector, a new model at `address` with `inputs` applied,
 and then a loop over `steps`. The TypeScript one is about forty lines
-(`replayVector` in `protocol-parts.test.ts`). For a QEMU device model the
+(`replayVector` in `protocol-parts.test.ts`), and so is the Python one
+(`replay_vector` in `test_i2c_slaves.py`). For a QEMU device model the
 events are `I2C_START_SEND` and `I2C_START_RECV` for `start`, `I2C_WRITE` for
 each byte of `send`, `I2C_READ` for each byte of `recv`, `I2C_FINISH` for
 `stop`.
