@@ -997,9 +997,10 @@ function pollUntilClear(bit: { read(): number }): number {
 }
 
 /**
- * Adafruit_MPU6050 2.2.9 on Adafruit BusIO 1.17.4 (the versions the gallery
- * locks): Adafruit_MPU6050.cpp begin(), _init(), reset(), _read(), and
- * Adafruit_BusIO_Register.cpp for the transactions.
+ * Adafruit_MPU6050 2.2.9 on Adafruit BusIO 1.17.4: Adafruit_MPU6050.cpp
+ * begin(), _init(), reset() and _read(), with Adafruit_I2CDevice.cpp and
+ * Adafruit_BusIO_Register.cpp for the transactions. The same library,
+ * compiled, is in mpu6050-real-firmware.test.ts.
  */
 function adafruitArduino(wire: DriverWire) {
   const accelRange = registerField(wire, 0x1c, 2, 3);

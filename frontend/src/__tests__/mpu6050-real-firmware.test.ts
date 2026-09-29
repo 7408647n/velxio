@@ -1,11 +1,11 @@
 /**
- * The MPU-6050 part under the driver most sketches use, compiled and running.
+ * The MPU-6050 part under firmware that was compiled, not imitated: real
+ * sketches on avr8js, the ATmega's TWI on the bus fabric, the part attached
+ * the way the canvas attaches it. What is proved here is what a user sees in
+ * the serial monitor.
  *
  * fixtures/avr-mpu6050-adafruit is the gallery example esp32-mpu6050 built for
- * an Arduino Uno with Adafruit_MPU6050 2.2.9: real firmware on avr8js, the
- * ATmega's TWI on the bus fabric, the part attached the way the canvas
- * attaches it. Nothing stands in for the driver, so what is proved here is
- * what a user sees in the serial monitor:
+ * an Arduino Uno with Adafruit_MPU6050 2.2.9, the driver most sketches use:
  *
  *   - begin() returns. Its reset() waits for DEVICE_RESET to clear with no
  *     timeout, and against a model that stored the bit the sketch printed
@@ -13,10 +13,13 @@
  *   - 1 g reads 9.81 m/s2 at the 8 g range the sketch selects, and 100 deg/s
  *     reads 1.745 rad/s at 500 deg/s. A model that encodes for the power-on
  *     ranges whatever the sketch selected prints 39.23 and 3.491.
+ *   - The driver trace of test/fixtures/i2c-vectors/mpu6050.json was read
+ *     from the library's source. Here the compiled library puts its own
+ *     traffic next to it.
  *
- * It also holds the driver trace of test/fixtures/i2c-vectors/mpu6050.json to
- * account: that trace was read from the library's source, and here the
- * compiled library puts its own traffic next to it.
+ * fixtures/avr-mpu6050-probe is the register probe the staging board matrix
+ * runs on every board (project i2c-model-fidelity-2026-09, harness/mk.py):
+ * what passes here is what that matrix expects of the tab model.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -31,12 +34,13 @@ import { busRegistry } from '../simulation/buses';
 import type { BusDiagnostic } from '../simulation/buses';
 import { bareBoard, wireI2cPins, clearBench } from './helpers/i2cBench';
 
-const HEX = readFileSync(
-  fileURLToPath(
-    new URL('./fixtures/avr-mpu6050-adafruit/avr-mpu6050-adafruit.ino.hex', import.meta.url),
-  ),
-  'utf-8',
-);
+const firmware = (name: string): string =>
+  readFileSync(
+    fileURLToPath(new URL(`./fixtures/${name}/${name}.ino.hex`, import.meta.url)),
+    'utf-8',
+  );
+const ADAFRUIT = firmware('avr-mpu6050-adafruit');
+const PROBE = firmware('avr-mpu6050-probe');
 
 interface VectorStep {
   op: string;
@@ -75,9 +79,9 @@ interface Bench {
 
 const listeners: Array<() => void> = [];
 
-function bench(): Bench {
+function bench(hex: string): Bench {
   const sim = new AVRSimulator(new PinManager(), 'uno');
-  sim.loadHex(HEX);
+  sim.loadHex(hex);
   let out = '';
   sim.onSerialData = (ch: string) => {
     out += ch;
@@ -166,7 +170,7 @@ afterEach(() => {
 
 describe('Adafruit_MPU6050 on an Arduino Uno, compiled', () => {
   it('begin() returns and the sketch reads 1 g as 9.81 m/s2 at the 8 g range', () => {
-    const b = bench();
+    const b = bench(ADAFRUIT);
     expect(b.lines(/^(READY|NOT FOUND)$/, 1)).toEqual(['READY']);
     expect(b.out().startsWith('BEGIN\r\nREADY\r\n')).toBe(true);
     expect(b.lines(/^AZ=/, 2)).toEqual(['AZ=9.81 GX=0.000 T=24.00', 'AZ=9.81 GX=0.000 T=24.00']);
@@ -175,7 +179,7 @@ describe('Adafruit_MPU6050 on an Arduino Uno, compiled', () => {
   }, 120_000);
 
   it('follows the panel: 100 deg/s reads 1.745 rad/s, and 12 g stays at the top of the 8 g range', () => {
-    const b = bench();
+    const b = bench(ADAFRUIT);
     b.lines(/^AZ=/, 1);
     dispatchSensorUpdate('imu', { gyroX: 100, accelZ: 2, temp: 31.5 });
     // The line being printed when the slider moved may still carry the old sample.
@@ -186,7 +190,7 @@ describe('Adafruit_MPU6050 on an Arduino Uno, compiled', () => {
   }, 120_000);
 
   it('puts on the wire what the driver trace of the shared vectors says', () => {
-    const b = bench();
+    const b = bench(ADAFRUIT);
     b.lines(/^AZ=/, 1);
     const golden = VECTORS.vectors.find((v) => v.driver === 'adafruit-mpu6050-arduino')!.steps;
     // Up to the first getEvent(); after it the vector moves a slider.
@@ -195,5 +199,23 @@ describe('Adafruit_MPU6050 on an Arduino Uno, compiled', () => {
       golden.findIndex((s) => s.op === 'inputs'),
     );
     expect(b.traffic.slice(0, untilTheSlider.length)).toEqual(untilTheSlider);
+  }, 120_000);
+});
+
+describe('the register probe of the staging board matrix, on an Arduino Uno', () => {
+  it('finds the chip asleep, its reset bits cleared by the first read, and 1 g at 4096 counts in the 8 g range', () => {
+    const b = bench(PROBE);
+    expect(b.lines(/^P\d |^PROBE_DONE$/, 8)).toEqual([
+      'P0 whoami=0x68',
+      'P1 pwr_at_boot=0x40',
+      'P2 after_reset pwr=0x40 polls=0',
+      'P3 sig_path_reset=0x0',
+      'P4 user_ctrl=0x0',
+      'P5 az_raw_at_8g=4096',
+      'P6 int_status=0x0',
+      'PROBE_DONE',
+    ]);
+    // It wakes the chip before it reads the sample block.
+    expect(b.notes).toEqual([]);
   }, 120_000);
 });
