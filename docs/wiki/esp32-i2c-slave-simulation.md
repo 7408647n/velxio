@@ -22,7 +22,9 @@
 > so the gallery sketch prints 9.81 m/s² and not 39.23) and is latched when a read begins. It is the
 > twin of `VirtualMPU6050` in the tab, and both replay the same bus vectors,
 > `test/fixtures/i2c-vectors/mpu6050.json`. The worker seeds it from the sensor record, so the
-> first read shows the panel's values (24 °C, not 25).
+> first read shows the panel's values (24 °C, not 25). The per-event log line and the `i2c_trace`
+> message of "Debugging Infrastructure" are off unless the backend runs with
+> `VELXIO_I2C_TRACE=1`: they cost about 0.8 ms on every register read.
 
 ---
 

@@ -259,7 +259,8 @@ function runSimulation(firmware_b64) {
         return;
       }
 
-      // ── I2C trace (Python slave handled the event — always emitted for debug) ─
+      // ── I2C trace (the worker's model answered the event). Only a backend
+      //    started with VELXIO_I2C_TRACE=1 emits it; the test does not need it. ─
       if (type === 'i2c_trace') {
         i2cTraceCount++;
         const { bus, addr, event, op, result, reg_ptr, wai_count } = data;
@@ -343,7 +344,7 @@ async function main() {
   console.log('\n' + '─'.repeat(60));
   console.log(' Starting simulation...');
   console.log('─'.repeat(60) + '\n');
-  info('NOTE: I2C trace events emitted by backend are shown below with [slave] prefix.');
+  info('NOTE: a backend started with VELXIO_I2C_TRACE=1 also shows its I2C trace, with [slave] prefix.');
   console.log();
 
   const result = await runSimulation(firmware_b64);

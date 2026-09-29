@@ -11,9 +11,13 @@ ctypes boundary, the guest played by calling the worker's own callbacks):
     are where the panel's sliders are, and a later update changes only what it
     names. The copy used to start from values of its own and to take the
     record's at the first slider move: the gallery sketch printed 25.0 C
-    beside a panel that said 24.
+    beside a panel that said 24;
+  - answering an I2C event logs nothing and emits nothing unless
+    VELXIO_I2C_TRACE is set, and with it set the trace is what it always was.
 """
 from __future__ import annotations
+
+import time
 
 import pytest
 
@@ -70,6 +74,25 @@ def read_sample(w) -> list[int]:
     return [v - 0x10000 if v & 0x8000 else v for v in words]
 
 
+def stderr_after(w, marker: str, timeout: float = 5.0) -> list[str]:
+    """The worker's log up to the line that holds `marker`. The log is one
+    pipe written in order, so whatever came before the marker is in."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        lines = list(w.stderr)
+        for i, line in enumerate(lines):
+            if marker in line:
+                return lines[:i]
+        time.sleep(0.02)
+    raise AssertionError(f'"{marker}" never reached the log:\n' + ''.join(w.stderr[-20:]))
+
+
+def event_lines(log: list[str]) -> list[str]:
+    """The lines the worker logs per I2C event, without its prefix."""
+    lines = [line.rstrip('\n').split('] ', 1)[-1] for line in log]
+    return [line for line in lines if line.startswith(('I2C #', 'I2C bus='))]
+
+
 class TestSeededFromTheRecord:
     def test_the_start_config_record_sets_the_first_read(self, worker):
         w = worker(sensors=[record(**PANEL)])
@@ -103,3 +126,58 @@ class TestSeededFromTheRecord:
         w = worker(sensors=[record(**PANEL)])
         assert w.read_reg(0, ADDR, PWR_MGMT_1) == (0, 0x40)
         assert read_sample(w) == [0] * 7
+
+
+class TestI2cTrace:
+    def _traffic(self, w) -> None:
+        write_reg(w, PWR_MGMT_1, 0x00)
+        assert w.read_reg(0, ADDR, PWR_MGMT_1) == (0, 0x00)
+
+    def test_silent_unless_asked(self, worker, monkeypatch):
+        monkeypatch.delenv('VELXIO_I2C_TRACE', raising=False)
+        w = worker(sensors=[record()])
+        self._traffic(w)
+        # Both are behind the traffic now: an event emitted after it, and a
+        # log line written after it.
+        w.flush()
+        w.send({'cmd': 'sensor_attach', 'sensor_type': 'trace-marker', 'pin': 77})
+        log = stderr_after(w, 'Sensor trace-marker attached')
+        assert w.events('i2c_trace') == []
+        assert event_lines(log) == []
+
+    def test_the_trace_is_what_it_was_when_asked_for(self, worker, monkeypatch):
+        monkeypatch.setenv('VELXIO_I2C_TRACE', '1')
+        w = worker(sensors=[record()])
+        self._traffic(w)
+        w.flush()
+        w.send({'cmd': 'sensor_attach', 'sensor_type': 'trace-marker', 'pin': 77})
+        log = stderr_after(w, 'Sensor trace-marker attached')
+
+        assert w.events('i2c_trace') == [
+            {'type': 'i2c_trace', 'bus': 0, 'addr': ADDR, 'event': ev, 'op': op,
+             'result': result, 'reg_ptr': ptr}
+            for ev, op, result, ptr in [
+                (I2C_START_SEND, 'START_SEND', 0, 0x00),
+                (I2C_WRITE | (PWR_MGMT_1 << 8), 'WRITE', 0, 0x6B),
+                (I2C_WRITE, 'WRITE', 0, 0x6C),
+                (I2C_FINISH, 'FINISH', 0, 0x6C),
+                (I2C_START_SEND, 'START_SEND', 0, 0x6C),
+                (I2C_WRITE | (PWR_MGMT_1 << 8), 'WRITE', 0, 0x6B),
+                (I2C_FINISH, 'FINISH', 0, 0x6B),
+                (I2C_START_RECV, 'START_RECV', 0, 0x6B),
+                (I2C_READ, 'READ', 0x00, 0x6C),
+                (I2C_FINISH, 'FINISH', 0, 0x6C),
+            ]
+        ]
+        assert event_lines(log) == [
+            'I2C #001 bus=0 addr=0x68 START_SEND → reg_ptr=0x00',
+            'I2C #002 bus=0 addr=0x68 WRITE byte=0x6b → reg_ptr=0x6b',
+            'I2C #003 bus=0 addr=0x68 WRITE byte=0x00 → reg_ptr=0x6c',
+            'I2C #004 bus=0 addr=0x68 FINISH ',
+            'I2C #005 bus=0 addr=0x68 START_SEND → reg_ptr=0x6c',
+            'I2C #006 bus=0 addr=0x68 WRITE byte=0x6b → reg_ptr=0x6b',
+            'I2C #007 bus=0 addr=0x68 FINISH ',
+            'I2C #008 bus=0 addr=0x68 START_RECV → reg_ptr=0x6b',
+            'I2C #009 bus=0 addr=0x68 READ → PWR_MGMT1=0x00',
+            'I2C #010 bus=0 addr=0x68 FINISH ',
+        ]

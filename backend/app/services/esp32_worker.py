@@ -33,6 +33,8 @@ stdout        : JSON event lines (one per line, flushed immediately)
                {"type": "rmt_event",    "channel": N, ...}
                {"type": "ws2812_update","channel": N, "pixels": [...]}
                {"type": "i2c_event",    "bus": N, "addr": N, "event": N, "response": N}
+               {"type": "i2c_trace",    "bus": N, "addr": N, "event": N, "op": "...",
+                                        "result": N, "reg_ptr": N}   # VELXIO_I2C_TRACE=1 only
                {"type": "spi_event",    "bus": N, "event": N}
                {"type": "bus_diag",     "code": "...", "bus": N, "owners": [...]}
                {"type": "error",        "message": "..."}
@@ -291,6 +293,20 @@ def _log(msg: str) -> None:
     """Write a debug message to stderr (invisible to parent's stdout reader)."""
     sys.stderr.write(f'[esp32_worker] {msg}\n')
     sys.stderr.flush()
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+# VELXIO_I2C_TRACE=1 in the backend's environment (the worker inherits it):
+# one stderr line and one `i2c_trace` event for every I2C event a model of
+# this worker answers. Off unless asked for, read once. Both are written from
+# the QEMU thread inside the guest's bus transaction, and the log line is a
+# flushed write: measured at about 0.8 ms on top of every register read, and
+# about 1,600 lines a second from a sketch that polls a sensor. Nothing in the
+# tab reads `i2c_trace`; it is there for whoever debugs a driver.
+I2C_TRACE = _env_flag('VELXIO_I2C_TRACE')
 
 
 def refuse_unmodelled_line_sensor(record: dict) -> bool:
@@ -1873,6 +1889,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
 
         if slave is not None:
             result  = _i2c_table.event(bus_id, addr, event, found)
+            if not I2C_TRACE:
+                return result
             reg_ptr = getattr(slave, 'reg_ptr', 0)
 
             # Build descriptive annotation
