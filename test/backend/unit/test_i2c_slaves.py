@@ -640,6 +640,26 @@ class TestMPU6050Slave(unittest.TestCase):
         self.assertEqual(int16(*block[4:6]), 4096)
         self.assertEqual(int16(*block[8:10]), 6550)
 
+    def test_just_under_positive_full_scale_stays_positive(self):
+        """32767.5 to 32768 counts round to 32768, one more than the register
+        holds: it reads 32767, as in the tab model, and not -32768. A value
+        from a project file or an API client can land there; no slider does."""
+        self.wake()
+        self.mpu.update(accelX=1.99998, accelY=-1.99998, accelZ=1.999985,
+                        gyroX=250.135, gyroY=-250.135, temp=132.9055)
+        block = i2c_read_seq(self.mpu, 0x3B, 14)
+        self.assertEqual([int16(*block[i:i + 2]) for i in range(0, 14, 2)],
+                         [32767, -32768, 32767, 32767, 32767, -32768, 0])
+
+    def test_a_value_far_off_the_scale_saturates(self):
+        """A finite input whose counts overflow a float is still an end of
+        the scale, not an error on QEMU's thread."""
+        self.wake()
+        self.mpu.update(accelX=1e305, accelY=-1e305, gyroX=1e307, temp=-1e306)
+        block = i2c_read_seq(self.mpu, 0x3B, 10)
+        self.assertEqual([int16(*block[i:i + 2]) for i in range(0, 10, 2)],
+                         [32767, -32768, 16384, -32768, 32767])
+
     def test_sequential_read_14_bytes(self):
         """getEvent() reads 14 bytes from 0x3B: three axes, temperature, three axes."""
         self.wake()
@@ -712,7 +732,7 @@ class TestMPU6050Slave(unittest.TestCase):
     def test_the_vectors_are_the_format_this_runner_reads(self):
         self.assertEqual(MPU_VECTORS['format'], 1)
         self.assertEqual(MPU_VECTORS['device'], 'mpu6050')
-        self.assertGreaterEqual(len(MPU_VECTORS['vectors']), 18)
+        self.assertGreaterEqual(len(MPU_VECTORS['vectors']), 19)
 
 
 def _vector_case(vector: dict, flavour: str):

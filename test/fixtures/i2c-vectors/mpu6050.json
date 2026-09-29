@@ -124,6 +124,17 @@
       ]
     },
     {
+      "name": "less than half a count under positive full scale reads 32767, not the negative end of the scale",
+      "spec": "RM sections 4.17 to 4.19: 16-bit 2's complement values; model rule: round, then saturate. 1.99998 g is 32767.67 counts at 16384 LSB per g, 250.135 deg/s is 32767.68 at 131 LSB per deg/s, 132.9055 C and -59.8455 C are 32767.67 counts each side of 36.53 C",
+      "steps": [
+        { "op": "write", "data": "6B 00" },
+        { "op": "inputs", "values": { "accelX": 1.99998, "accelY": -1.99998, "gyroX": 250.135, "gyroY": -250.135, "temp": 132.9055 } },
+        { "op": "read", "reg": "3B", "n": 14, "expect": "7F FF 80 00 40 00 7F FF 7F FF 80 00 00 00" },
+        { "op": "inputs", "values": { "temp": -59.8455 } },
+        { "op": "read", "reg": "41", "n": 2, "expect": "80 00" }
+      ]
+    },
+    {
       "name": "half a count rounds away from zero, the same on both sides of rest",
       "spec": "model rule: 1, -1 and 3 deg/s at 65.5 LSB per deg/s are 65.5, -65.5 and 196.5 counts",
       "steps": [

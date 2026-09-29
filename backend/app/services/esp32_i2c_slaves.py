@@ -106,15 +106,20 @@ def _mpu_counts(value: float) -> int:
     Half a count rounds away from zero, so a tilt one way and the same tilt
     the other way read the same size (round() sends 65.5 to 66 and 196.5 to
     196), and what does not fit stays at the end of the scale, as the
-    converter's output does.
+    converter's output does. Rounded first and held to the scale after: half
+    a count under positive full scale rounds to 32768, which is one more than
+    the register holds and would read as the negative end.
     """
     size = abs(value)
-    if size >= 32768:
-        return 32767 if value > 0 else -32768
-    counts = _math.floor(size)
-    if size - counts >= 0.5:
-        counts += 1
-    return counts if value >= 0 else -counts
+    if size < 32768:
+        counts = _math.floor(size)
+        if size - counts >= 0.5:
+            counts += 1
+    else:
+        # Infinity included, which floor() does not take: a finite input
+        # times a sensitivity can overflow.
+        counts = 32768
+    return min(counts, 32767) if value >= 0 else -counts
 
 
 class MPU6050Slave:
