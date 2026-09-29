@@ -214,6 +214,24 @@
       ]
     },
     {
+      "name": "a burst write gives every byte the rule of the register it lands on, and a burst read runs out of the sample block",
+      "spec": "RM sections 4.26 to 4.29, each register's own type and reset bits; section 4.19 for the read that leaves the block at 0x48. The sample is read only while PWR_MGMT_2 holds no STBY bit, so a model that gates the axes passes too. DEVICE_RESET is the last byte of its burst: the register map does not say what the chip does with bytes that follow it",
+      "steps": [
+        { "op": "write", "data": "67 11 07 22 4F 00 C0" },
+        { "op": "read", "reg": "67", "n": 6, "expect": "11 00 22 40 00 C0" },
+        { "op": "inputs", "values": { "accelX": 1, "gyroZ": 10 } },
+        { "op": "read", "reg": "47", "n": 4, "expect": "05 1E 00 00" },
+        { "op": "write", "data": "6A 60 40" },
+        { "op": "inputs", "values": { "gyroZ": 20 } },
+        { "op": "read", "reg": "6A", "n": 3, "expect": "60 40 C0" },
+        { "op": "read", "reg": "47", "n": 4, "expect": "05 1E 00 00" },
+        { "op": "write", "data": "6B 00 07" },
+        { "op": "read", "reg": "6B", "n": 2, "expect": "00 07" },
+        { "op": "write", "data": "69 33 40 80" },
+        { "op": "read", "reg": "67", "n": 6, "expect": "00 00 00 00 40 00" }
+      ]
+    },
+    {
       "name": "driver: Adafruit_MPU6050 2.2.9 begin(), the gallery setup (8 g, 500 deg/s, 21 Hz), getEvent() at rest and at 100 deg/s",
       "spec": "Adafruit_MPU6050.cpp begin(), _init(), reset(), _read(); Adafruit BusIO 1.17.4 Adafruit_I2CDevice::detected(), Adafruit_BusIO_Register::read()/write(), Adafruit_BusIO_RegisterBits::write()",
       "driver": "adafruit-mpu6050-arduino",
