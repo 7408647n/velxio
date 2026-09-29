@@ -416,18 +416,19 @@ _WIFI_MAC_RANGES = ((0x3ff73000, 0x3ff74000), (0x60033000, 0x60034000))
 
 def wifi_nic_arg(machine: str, wifi_enabled: bool,
                  hostfwd_port: int = 0) -> str | None:
-    """The `-nic` value for this machine, or None if it models no radio.
+    """The `-nic` value for this machine, or None if it gets no radio.
 
-    The radio is attached whether or not the sketch appears to use it, because
-    a real ESP32 has one either way. It used to be conditional on wifi_enabled,
-    which made a source-scanning GUESS load-bearing: the fork only instantiates
-    the MAC when a NIC is present (`qemu_find_nic_info(TYPE_ESP32_WIFI)` in
-    hw/xtensa/esp32.c), so a sketch the scanner misread as WiFi-less ran on a
-    machine with nothing mapped at DR_REG_WIFI_BASE. The firmware's first
-    register touch then took an unmapped-peripheral fault — `Guru Meditation
-    Error (LoadStorePIFAddrError)`, EXCVADDR 0x60033c00 — which reads as a
-    Velxio crash and says nothing about WiFi. That is issue #260, and one bad
-    guess was all it took.
+    On the classic ESP32 the radio is attached whether or not the sketch
+    appears to use it, because a real ESP32 has one either way. It used to be
+    conditional on wifi_enabled, which made a source-scanning GUESS
+    load-bearing: the fork only instantiates the MAC when a NIC is present
+    (`qemu_find_nic_info(TYPE_ESP32_WIFI)` in hw/xtensa/esp32.c), so a sketch
+    the scanner misread as WiFi-less ran on a machine with nothing mapped at
+    DR_REG_WIFI_BASE. The firmware's first register touch then took an
+    unmapped-peripheral fault — `Guru Meditation Error
+    (LoadStorePIFAddrError)`, EXCVADDR 0x60033c00 — which reads as a Velxio
+    crash and says nothing about WiFi. That is issue #260, and one bad guess
+    was all it took.
 
     Measured before making it unconditional, on a sketch that never touches
     WiFi: boot time, guest-clock-vs-real-time and container CPU all unchanged
@@ -436,8 +437,23 @@ def wifi_nic_arg(machine: str, wifi_enabled: bool,
 
     `wifi_enabled` still gates the host forward, which exposes the GUEST's
     server to the host and so belongs to a sketch that actually serves.
+
+    The ESP32-C3 is the exception, and gets its radio only when the sketch
+    uses WiFi. The C3 machine of the fork does not survive the NIC: with an
+    esp32c3_wifi NIC present, esp32c3_init_openeth cold-resets the eFuse
+    device before the machine has realized it (hw/riscv/esp32c3_picsimlab.c),
+    the reset reloads the eFuse mirror, and the mirror is only allocated in
+    realize (hw/nvram/esp_efuse.c). The worker died half a second after
+    launch with `esp_efuse_reload_from_blk: Assertion 's->mirror' failed`, on
+    every C3 run since the radio became unconditional, and the tab stayed at
+    "booting". So on this machine the guess is load-bearing again, the other
+    way round: a sketch the scanner reads as WiFi-less boots, and one that
+    uses WiFi still meets the assertion until the fork realizes the eFuse
+    first or the run brings an eFuse drive of its own.
     """
     if 'c3' in machine:
+        if not wifi_enabled:
+            return None
         model = 'esp32c3_wifi'
     elif machine in _WIFI_MACHINES:
         model = 'esp32_wifi'
@@ -832,7 +848,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
              '(issue #260), so a pulse-timing driver will time out on it')
 
     # ── WiFi NIC (slirp user-mode networking) ──────────────────────────────
-    # Always present on machines that model a radio — see wifi_nic_arg().
+    # Always present on the classic ESP32, on the C3 only for a sketch that
+    # uses WiFi — see wifi_nic_arg().
     nic_arg = wifi_nic_arg(machine, wifi_enabled, wifi_hostfwd_port)
     if nic_arg:
         args_list.extend([b'-nic', nic_arg.encode()])
