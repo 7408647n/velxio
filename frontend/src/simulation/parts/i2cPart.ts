@@ -50,6 +50,7 @@ export function i2cTargetOf(device: I2CDevice): I2cTarget & { dumpRegisters?: ()
   const target: I2cTarget & {
     dumpRegisters?: () => Uint8Array;
     volatileReads?: readonly number[];
+    pointerStays?: readonly number[];
   } = {
     start: (_address, read) => {
       if (open && !read) device.stop?.();
@@ -83,6 +84,7 @@ export function i2cTargetOf(device: I2CDevice): I2cTarget & { dumpRegisters?: ()
     target.dumpRegisters = () => device.dumpRegisters!();
     // And the registers of it the copy cannot answer for.
     if (device.volatileReads?.length) target.volatileReads = device.volatileReads;
+    if (device.pointerStays?.length) target.pointerStays = device.pointerStays;
   }
   return target;
 }

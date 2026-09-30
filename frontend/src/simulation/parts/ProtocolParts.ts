@@ -920,6 +920,8 @@ export class VirtualMPU6050 implements I2CDevice {
     MPU_FIFO_COUNT_L,
     MPU_FIFO_R_W,
   ];
+  /** The ports the pointer stays on: MEM_R_W and FIFO_R_W (MPU_POINTER_STAYS). */
+  readonly pointerStays: readonly number[] = [MPU_MEM_R_W, MPU_FIFO_R_W];
 
   private readonly regs = new Uint8Array(256);
   private readonly inputs: Mpu6050Inputs = {

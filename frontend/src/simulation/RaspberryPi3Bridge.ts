@@ -72,6 +72,10 @@ export interface PiBusTopology {
    * (I2cTarget.volatileReads). The backend asks this tab for every read that
    * touches one instead of answering from its copy. Absent = none; a backend
    * from before the field answers them from its copy, as it always did.
+   *
+   * `pointer_stays`: with `regs`, the registers the chip's pointer does not
+   * move past (I2cTarget.pointerStays); the backend's pointer stays there
+   * too. Absent = none.
    */
   i2c: Array<{
     bus: number;
@@ -80,6 +84,7 @@ export interface PiBusTopology {
     ask_writes?: true;
     seq?: number;
     volatile_reads?: number[];
+    pointer_stays?: number[];
   }>;
   /**
    * `responders` are the SPI devices with a portable model (the bus map an

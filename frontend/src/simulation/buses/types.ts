@@ -377,6 +377,11 @@ export interface I2cTarget {
    * Raspberry Pi relay) asks this tab for every read that touches one.
    */
   readonly volatileReads?: readonly number[];
+  /**
+   * The registers the chip's pointer does not move past
+   * (I2CDevice.pointerStays), for a host that keeps a pointer of its own.
+   */
+  readonly pointerStays?: readonly number[];
 }
 
 /**

@@ -676,6 +676,9 @@ export class PiBridgeShim {
         if (first && t.volatile_reads) {
           first.volatile_reads = [...new Set([...(first.volatile_reads ?? []), ...t.volatile_reads])];
         }
+        if (first && t.pointer_stays) {
+          first.pointer_stays = [...new Set([...(first.pointer_stays ?? []), ...t.pointer_stays])];
+        }
         continue;
       }
       seen.add(key);
@@ -712,7 +715,14 @@ export class PiBridgeShim {
           regs !== null && m.target.volatileReads?.length
             ? { volatile_reads: [...m.target.volatileReads] }
             : {};
-        for (const addr of m.addresses) out.push({ bus: port.unit, addr, regs, ...ask, ...volatile });
+        // And the ports its pointer stays on, so the relay's pointer does too.
+        const stays =
+          regs !== null && m.target.pointerStays?.length
+            ? { pointer_stays: [...m.target.pointerStays] }
+            : {};
+        for (const addr of m.addresses) {
+          out.push({ bus: port.unit, addr, regs, ...ask, ...volatile, ...stays });
+        }
       }
     }
     out.sort((a, b) => a.bus - b.bus || a.addr - b.addr);

@@ -76,6 +76,12 @@ export interface I2CDevice {
    * every read that touches one of them.
    */
   readonly volatileReads?: readonly number[];
+  /**
+   * Optional, with dumpRegisters: the registers the device's pointer does
+   * not move past, a FIFO or memory port read and written byte after byte
+   * at one address. A host answering from a copy keeps its own pointer there.
+   */
+  readonly pointerStays?: readonly number[];
 }
 
 /**

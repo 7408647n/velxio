@@ -93,9 +93,25 @@ describe('Raspberry Pi: the map names the registers a copy cannot answer for', (
       expect(rtc).toEqual({ bus: 1, addr: 0x57, regs: '00'.repeat(256) });
       expect(imu.regs).toHaveLength(512);
       expect(imu.volatile_reads).toEqual([0x3a, 0x6f, 0x72, 0x73, 0x74]);
+      expect(imu.pointer_stays).toEqual([0x6f, 0x74]);
+      expect(rtc).not.toHaveProperty('pointer_stays');
     } finally {
       f.done();
     }
+  });
+
+  it('the ports the MPU-6050 names are the ones its pointer stays on', () => {
+    const imu = new VirtualMPU6050(0x68);
+    expect(imu.pointerStays).toEqual([0x6f, 0x74]);
+    // Three bytes read at MEM_R_W move MEM_START_ADDR three times: the
+    // pointer stayed on the port instead of running on to 0x70 and 0x71.
+    imu.writeByte(0x6f);
+    imu.readByte();
+    imu.readByte();
+    imu.readByte();
+    imu.stop();
+    imu.writeByte(0x6e);
+    expect(imu.readByte()).toBe(3);
   });
 
   it('a chip the relay does not mirror names none: all its reads are asked anyway', () => {
