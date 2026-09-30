@@ -1,0 +1,438 @@
+{
+  "_comment": "Bus vectors for the DS3231 real-time clock, shared by the tab model (frontend/src/simulation/I2CBusManager.ts, vitest) and the backend twin (backend/app/services/esp32_i2c_slaves.py, pytest). The format is in README.md next to this file. Register facts are from the datasheet, 19-5170 rev 10; driver traces name the source they were read from. The host's clock starts every vector at 12:34:56.250 of Wednesday 30 September 2026, and the firmware was built on 29 September 2026 at 23:39:41.",
+  "format": 1,
+  "device": "ds3231",
+  "address": "68",
+  "rules": {
+    "power_on": { "0E": "1C", "0F": "88" },
+    "write_mask": {
+      "00": "7F", "01": "7F", "02": "7F", "03": "07", "04": "3F", "05": "9F", "06": "FF",
+      "07": "FF", "08": "FF", "09": "FF", "0A": "FF", "0B": "FF", "0C": "FF", "0D": "FF",
+      "0E": "DF", "0F": "08", "10": "FF"
+    },
+    "self_clearing": { "0E": "20" },
+    "write_zero_to_clear": { "0F": "83" },
+    "read_only": [["11", "12"]],
+    "last_register": "12",
+    "temp_lsb_per_c": 4
+  },
+  "inputs": { "temperature": 25 },
+  "clock": "2026-09-30T12:34:56.250",
+  "build_times": [["Sep 29 2026", "23:39:41"]],
+  "vectors": [
+    {
+      "name": "power-on: the host's time with Monday as day 1, CONTROL 0x1C, STATUS 0x88 with OSF set, 25.00 C",
+      "spec": "Datasheet, Control Register (0Eh) and Status Register (0Fh), POR rows; OSF is set the first time power is applied. The host's time is the model's. Monday = 1: RTClib dowToDS3231",
+      "steps": [
+        { "op": "read", "reg": "00", "n": 19, "expect": "56 34 12 03 30 09 26 00*7 1C 88 00 19 00" }
+      ]
+    },
+    {
+      "name": "the address pointer wraps from 0x12 to 0x00, in a read and in a write",
+      "spec": "Datasheet, Address Map: when the address pointer reaches the end of the register space (12h), it wraps around to location 00h",
+      "steps": [
+        { "op": "read", "reg": "11", "n": 5, "expect": "19 00 56 34 12" },
+        { "op": "write", "data": "10 7F AA BB 33" },
+        { "op": "read", "reg": "10", "n": 4, "expect": "7F 19 00 33" }
+      ]
+    },
+    {
+      "name": "the pointer stays where a transfer left it, across the STOP",
+      "spec": "Datasheet, I2C Serial Data Bus, data read: the register pointer keeps the last address",
+      "steps": [
+        { "op": "write", "data": "0E" },
+        { "op": "get", "n": 2, "expect": "1C 88" },
+        { "op": "get", "n": 2, "expect": "00 19" }
+      ]
+    },
+    {
+      "name": "the time is latched at START and again when the pointer rolls over to 0x00",
+      "spec": "Datasheet, Clock and Calendar: the user buffers are synchronized to the internal registers on any START and when the register pointer rolls over to zero",
+      "steps": [
+        { "op": "clock", "set": "2026-09-30T12:59:59.900" },
+        { "op": "start", "rw": "w" },
+        { "op": "send", "data": "00" },
+        { "op": "start", "rw": "r" },
+        { "op": "recv", "n": 1, "expect": "59" },
+        { "op": "clock", "advance_ms": 200 },
+        { "op": "recv", "n": 6, "expect": "59 12 03 30 09 26" },
+        { "op": "recv", "n": 12, "expect": "00*7 1C 88 00 19 00" },
+        { "op": "recv", "n": 3, "expect": "00 00 13" },
+        { "op": "stop" }
+      ]
+    },
+    {
+      "name": "a time the sketch sets is kept, and the clock counts from the moment the seconds were written",
+      "spec": "Datasheet, Clock and Calendar: the countdown chain is reset whenever the seconds register is written. Decision D7: a date of the sketch's own is kept",
+      "steps": [
+        { "op": "write", "data": "00 58 59 23 04 31 12 25" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "58 59 23 04 31 12 25" },
+        { "op": "clock", "advance_ms": 1999 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "59 59 23 04 31 12 25" },
+        { "op": "clock", "advance_ms": 1 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 05 01 01 26" },
+        { "op": "dump", "at": "00", "expect": "00 00 00 05 01 01 26 00*7 1C 88 00 19 00 00" }
+      ]
+    },
+    {
+      "name": "bit 7 of the seconds does not exist: the DS3231 has no clock halt",
+      "spec": "Datasheet, Figure 1: bit 7 of register 00h is 0. Control Register: powered by VCC the oscillator is always on",
+      "steps": [
+        { "op": "write", "data": "00 D6" },
+        { "op": "read", "reg": "00", "n": 1, "expect": "56" },
+        { "op": "clock", "advance_ms": 2000 },
+        { "op": "read", "reg": "00", "n": 3, "expect": "58 34 12" },
+        { "op": "write", "data": "0E 9C" },
+        { "op": "clock", "advance_ms": 2000 },
+        { "op": "read", "reg": "00", "n": 3, "expect": "00 35 12" }
+      ]
+    },
+    {
+      "name": "the century bit is kept as written and turns over when the year goes from 99 to 00",
+      "spec": "Datasheet, Clock and Calendar: the century bit (bit 7 of the month register) is toggled when the years register overflows from 99 to 00",
+      "steps": [
+        { "op": "write", "data": "00 59 59 23 04 31 12 99" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 05 01 81 00" },
+        { "op": "write", "data": "00 59 59 23 04 31 92 99" },
+        { "op": "read", "reg": "05", "n": 1, "expect": "92" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 05 01 01 00" }
+      ]
+    },
+    {
+      "name": "12-hour mode: the hours count in the form they were written in",
+      "spec": "Datasheet, Clock and Calendar: bit 6 of the hours register selects the 12-hour mode; in it bit 5 is the AM/PM bit, high being PM",
+      "steps": [
+        { "op": "write", "data": "00 58 59 71 03 30 09 26" },
+        { "op": "clock", "advance_ms": 2000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 52 04 01 10 26" }
+      ]
+    },
+    {
+      "name": "CONTROL keeps what is written but CONV, which is over by the next read, and BSY reads 0",
+      "spec": "Datasheet, Control Register: CONV. The conversion takes no time in the model (decision D5). Makuna Rtc RtcDS3231::ForceTemperatureCompensationUpdate polls CONV until it reads 0",
+      "steps": [
+        { "op": "write", "data": "0E 3C" },
+        { "op": "read", "reg": "0E", "n": 2, "expect": "1C 88" },
+        { "op": "write", "data": "0E 05" },
+        { "op": "read", "reg": "0E", "n": 1, "expect": "05" },
+        { "op": "write", "data": "0E FF" },
+        { "op": "read", "reg": "0E", "n": 1, "expect": "DF" },
+        { "op": "write", "data": "10 85" },
+        { "op": "read", "reg": "10", "n": 1, "expect": "85" }
+      ]
+    },
+    {
+      "name": "OSF is set at power-on, a write of 0 clears it, and a write of 1 does not set it; EN32kHz reads back",
+      "spec": "Datasheet, Status Register: OSF remains at logic 1 until written to logic 0. Bits 6 to 4 read 0. RTClib RTC_DS3231::lostPower is register 0x0F >> 7, enable32K and disable32K write bit 3",
+      "steps": [
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "write", "data": "0F 08" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
+        { "op": "write", "data": "0F FF" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
+        { "op": "write", "data": "0F 00" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "00" }
+      ]
+    },
+    {
+      "name": "the alarm registers keep what is written",
+      "spec": "Datasheet, Figure 1: alarm 1 at 07h to 0Ah, alarm 2 at 0Bh to 0Dh. RTClib getAlarm1, getAlarm2, getAlarm1Mode",
+      "steps": [
+        { "op": "write", "data": "07 B0 C5 92 D7 85 A3 C1" },
+        { "op": "read", "reg": "07", "n": 7, "expect": "B0 C5 92 D7 85 A3 C1" }
+      ]
+    },
+    {
+      "name": "alarm 1 on hours, minutes and seconds: A1F is set at the second that matches, stays, and is cleared by writing it to 0",
+      "spec": "Datasheet, Alarms and Table 2; Status Register: A1F is cleared when written to logic 0. RTClib 2.1.4 setAlarm1(12:35:00 of the 30th, DS3231_A1_Hour), alarmFired(1), clearAlarm(1)",
+      "driver": "rtclib-ds3231-alarm1",
+      "steps": [
+        { "op": "write", "data": "0E" },
+        { "op": "get", "n": 1, "expect": "1C" },
+        { "op": "write", "data": "07 00 35 12 B0" },
+        { "op": "write", "data": "0E 1D" },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 3749 },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 1 },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "89" },
+        { "op": "clock", "advance_ms": 60000 },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "89" },
+        { "op": "write", "data": "0F 88" },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 86339000 },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "89" }
+      ]
+    },
+    {
+      "name": "the flags are set whether or not the interrupt is enabled, and writing a flag to 1 leaves it as it is",
+      "spec": "Datasheet, Control Register: the corresponding alarm flag is always set regardless of the state of the INTCN bit. Status Register: attempting to write to logic 1 leaves the value unchanged",
+      "steps": [
+        { "op": "write", "data": "0E 00" },
+        { "op": "write", "data": "07 00 35 12 B0" },
+        { "op": "write", "data": "0F 8B" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 4000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "89" },
+        { "op": "write", "data": "0F 8A" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" }
+      ]
+    },
+    {
+      "name": "alarm 1 once per second, when the seconds match, and when minutes and seconds match",
+      "spec": "Datasheet, Table 2, alarm 1 mask bits 1111, 1110 and 1100",
+      "steps": [
+        { "op": "write", "data": "07 80 80 80 80" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 750 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "89" },
+        { "op": "write", "data": "07 05 80 80 80" },
+        { "op": "write", "data": "0F 88" },
+        { "op": "clock", "advance_ms": 7000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "89" },
+        { "op": "write", "data": "07 05 36 80 80" },
+        { "op": "write", "data": "0F 88" },
+        { "op": "clock", "advance_ms": 59000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "89" }
+      ]
+    },
+    {
+      "name": "a second that matched while nobody read the chip has set the flag",
+      "spec": "Datasheet, Alarms: the match is tested on the once-per-second update of the time and date registers",
+      "steps": [
+        { "op": "write", "data": "07 30 40 12 80" },
+        { "op": "clock", "advance_ms": 3600000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "89" }
+      ]
+    },
+    {
+      "name": "alarm 2 matches at second 00: once per minute, on the minute, and on hours and minutes",
+      "spec": "Datasheet, Table 2, alarm 2 mask bits 111, 110 and 100. RTClib setAlarm2",
+      "steps": [
+        { "op": "write", "data": "0B 80 80 80" },
+        { "op": "clock", "advance_ms": 3000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "8A" },
+        { "op": "write", "data": "0B 37 80 80" },
+        { "op": "write", "data": "0F 88" },
+        { "op": "clock", "advance_ms": 60000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 60000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "8A" },
+        { "op": "write", "data": "0B 40 13 80" },
+        { "op": "write", "data": "0F 88" },
+        { "op": "clock", "advance_ms": 3600000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 180000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "8A" }
+      ]
+    },
+    {
+      "name": "an alarm on the date matches that day of the month and no other",
+      "spec": "Datasheet, Table 2: DY/DT 0, mask bits 0000, alarm when date, hours, minutes and seconds match",
+      "steps": [
+        { "op": "write", "data": "07 00 35 12 29" },
+        { "op": "write", "data": "0B 35 12 01" },
+        { "op": "clock", "advance_ms": 60000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "write", "data": "07 00 36 12 30" },
+        { "op": "clock", "advance_ms": 60000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "89" },
+        { "op": "clock", "advance_ms": 86400000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "8B" }
+      ]
+    },
+    {
+      "name": "an alarm on the day of week compares the number the clock counts, which is the one the sketch wrote",
+      "spec": "Datasheet, Table 2: DY/DT 1, alarm when day, hours, minutes and seconds match. RTClib setAlarm1(..., DS3231_A1_Day) writes dowToDS3231(dayOfTheWeek()) with bit 6 set",
+      "steps": [
+        { "op": "write", "data": "07 00 35 12 44" },
+        { "op": "clock", "advance_ms": 60000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 86400000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "89" },
+        { "op": "write", "data": "0F 88" },
+        { "op": "write", "data": "00 58 59 23 01 27 09 26" },
+        { "op": "write", "data": "07 00 00 00 42" },
+        { "op": "clock", "advance_ms": 2000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 02 28 09 26" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "89" }
+      ]
+    },
+    {
+      "name": "an alarm in 12-hour form matches a clock in 12-hour mode, and not one in 24-hour mode",
+      "spec": "Datasheet, Figure 1: the alarm hours registers have the 12/24 and AM/PM bits of the hours register, and the alarm is a match of the registers",
+      "steps": [
+        { "op": "write", "data": "07 00 35 72 80" },
+        { "op": "clock", "advance_ms": 60000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "write", "data": "00 58 34 72 03 30 09 26" },
+        { "op": "clock", "advance_ms": 2000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "89" }
+      ]
+    },
+    {
+      "name": "setting the time does not count through the seconds in between: no alarm is owed for them",
+      "spec": "Datasheet, Alarms: the match is tested on the once-per-second update. A write is not an update",
+      "steps": [
+        { "op": "write", "data": "07 00 00 13 80" },
+        { "op": "write", "data": "00 00 30 14 03 30 09 26" },
+        { "op": "clock", "advance_ms": 5000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "write", "data": "00 59 59 12 03 30 09 26" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "89" }
+      ]
+    },
+    {
+      "name": "the temperature is two's complement in quarter degrees, from the panel",
+      "spec": "Datasheet, Temperature Registers (11h-12h): a 10-bit code with a resolution of 0.25 C in two's complement; the upper 8 bits at 11h, the lower 2 bits in the top of 12h. 00011001 01b = +25.25 C",
+      "steps": [
+        { "op": "read", "reg": "11", "n": 2, "expect": "19 00" },
+        { "op": "inputs", "values": { "temperature": 25.25 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "19 40" },
+        { "op": "inputs", "values": { "temperature": 0 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "00 00" },
+        { "op": "inputs", "values": { "temperature": -0.25 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "FF C0" },
+        { "op": "inputs", "values": { "temperature": -2.25 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "FD C0" },
+        { "op": "inputs", "values": { "temperature": -5.25 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "FA C0" },
+        { "op": "inputs", "values": { "temperature": -10.75 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "F5 40" },
+        { "op": "inputs", "values": { "temperature": -40 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "D8 00" },
+        { "op": "inputs", "values": { "temperature": 85 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "55 00" },
+        { "op": "inputs", "values": { "temperature": 24.874 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "18 C0" },
+        { "op": "inputs", "values": { "temperature": 24.875 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "19 00" },
+        { "op": "inputs", "values": { "temperature": -24.875 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "E7 00" },
+        { "op": "inputs", "values": { "temperature": 500 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "7F C0" },
+        { "op": "inputs", "values": { "temperature": -500 } },
+        { "op": "read", "reg": "11", "n": 2, "expect": "80 00" },
+        { "op": "dump", "at": "11", "expect": "80 00" }
+      ]
+    },
+    {
+      "name": "the temperature registers are read-only, and a slider that moves in the middle of a read does not split it",
+      "spec": "Datasheet, Temperature Registers: the temperature registers are read-only. The two bytes are one conversion. A host that copies the registers meanwhile gets the new one and leaves the read as it was",
+      "steps": [
+        { "op": "write", "data": "11 AA BB" },
+        { "op": "read", "reg": "11", "n": 2, "expect": "19 00" },
+        { "op": "inputs", "values": { "temperature": 24.75 } },
+        { "op": "start", "rw": "w" },
+        { "op": "send", "data": "11" },
+        { "op": "start", "rw": "r" },
+        { "op": "recv", "n": 1, "expect": "18" },
+        { "op": "inputs", "values": { "temperature": -1 } },
+        { "op": "dump", "at": "11", "expect": "FF 00" },
+        { "op": "recv", "n": 1, "expect": "C0" },
+        { "op": "stop" },
+        { "op": "read", "reg": "11", "n": 2, "expect": "FF 00" }
+      ]
+    },
+    {
+      "name": "the build time of the firmware, written in one burst, leaves the clock on the host's time",
+      "spec": "Decision D7. RTClib 2.1.4 RTC_DS3231::adjust(DateTime(F(__DATE__), F(__TIME__))) after lostPower(): pointer 0, seconds, minutes, hours, day of week with Monday as 1, date, month, year; then STATUS is read and written back with OSF cleared. 29 September 2026 is a Tuesday",
+      "driver": "rtclib-ds3231-adjust-build-time",
+      "steps": [
+        { "op": "write", "data": "" },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "write", "data": "00 41 39 23 02 29 09 26" },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "write", "data": "0F 08" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "56 34 12 03 30 09 26" },
+        { "op": "clock", "advance_ms": 750 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "57 34 12 03 30 09 26" },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "08" }
+      ]
+    },
+    {
+      "name": "the jump from the build time to the host's time sets no alarm",
+      "spec": "Decision D7: the clock was set when the firmware was built and has run since; the alarms are for what it counts from now on",
+      "steps": [
+        { "op": "write", "data": "07 00 00 06 80" },
+        { "op": "write", "data": "00 41 39 23 02 29 09 26" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "88" }
+      ]
+    },
+    {
+      "name": "one second away from the build time is a date of the sketch's own, and is kept",
+      "spec": "Decision D7: the match is on the written date and time, to the second",
+      "steps": [
+        { "op": "write", "data": "00 40 39 23 02 29 09 26" },
+        { "op": "clock", "advance_ms": 20000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 40 23 02 29 09 26" }
+      ]
+    },
+    {
+      "name": "with no build time known, the time the firmware wrote at build time is kept like any other",
+      "spec": "Decision D7: if no compile time can be established for a build, a written time is kept, which is what the chip does",
+      "build_times": [],
+      "steps": [
+        { "op": "write", "data": "00 41 39 23 02 29 09 26" },
+        { "op": "clock", "advance_ms": 19000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 40 23 02 29 09 26" }
+      ]
+    },
+    {
+      "name": "RTClib RTC_DS3231: adjust() to a date of the sketch's own, now(), getTemperature(), and an alarm 2 on the minute",
+      "spec": "RTClib 2.1.4 RTC_DS3231.cpp with Adafruit BusIO 1.17.4. adjust(DateTime(2024, 2, 29, 23, 59, 30)), a Thursday: day of week 4. setAlarm2(DS3231_A2_Minute) at minute 00 after writeSqwPinMode left INTCN set; disableAlarm and clearAlarm before, as the library's example does",
+      "driver": "rtclib-ds3231",
+      "steps": [
+        { "op": "write", "data": "" },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "write", "data": "00 30 59 23 04 29 02 24" },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "write", "data": "0F 08" },
+        { "op": "write", "data": "0E" },
+        { "op": "get", "n": 1, "expect": "1C" },
+        { "op": "write", "data": "0E 1C" },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "08" },
+        { "op": "write", "data": "0F 08" },
+        { "op": "write", "data": "0E" },
+        { "op": "get", "n": 1, "expect": "1C" },
+        { "op": "write", "data": "0B 00 A3 A9" },
+        { "op": "write", "data": "0E 1E" },
+        { "op": "clock", "advance_ms": 29000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "59 59 23 04 29 02 24" },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "08" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 05 01 03 24" },
+        { "op": "write", "data": "0F" },
+        { "op": "get", "n": 1, "expect": "0A" },
+        { "op": "read", "reg": "11", "n": 2, "expect": "19 00" }
+      ]
+    }
+  ]
+}

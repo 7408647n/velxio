@@ -289,7 +289,17 @@ const ROWS: Row[] = [
     maxFrames: 600,
   },
   {
+    id: 'i2c-rtc-read',
+    expect: [
+      `Time: ${HMS}  Date: ${two(NOW.getDate())}/${two(NOW.getMonth() + 1)}/20${two(NOW.getFullYear() % 100)}`,
+    ],
+    done: /(Time: |Could not read RTC).*\r\n/,
+    maxFrames: 400,
+  },
+  {
     id: 'pico-i2c-rtc-read',
+    // The day of week of a clock nobody set counts Monday as 1, and the
+    // sketch names the days in that order.
     expect: [
       `Time: ${HMS}  Date: Thu ${two(NOW.getDate())}/${two(NOW.getMonth() + 1)}/20${two(NOW.getFullYear() % 100)}`,
     ],

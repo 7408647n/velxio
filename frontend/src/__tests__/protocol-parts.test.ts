@@ -565,13 +565,11 @@ describe('ds1307 — I2C RTC', () => {
     expect(rig.ack(0x68)).toBe(true);
   });
 
-  it('returns valid BCD for seconds (register 0)', () => {
+  it('reads the time of the browser in BCD, with Monday as day 1', () => {
+    vi.setSystemTime(new Date(2026, 8, 30, 12, 34, 56, 250)); // a Wednesday
     const rig = i2cRig({ rtc: HW_I2C_PINS });
     PartSimulationRegistry.get('ds1307')!.attachEvents!(makeElement(), makeI2CSim() as any, noPins, 'rtc');
-    const [seconds] = rig.readReg(0x68, 0x00, 1)!;
-    // BCD: upper nibble = tens digit, lower nibble = units digit
-    expect((seconds >> 4) & 0xf).toBeLessThanOrEqual(5);
-    expect(seconds & 0xf).toBeLessThanOrEqual(9);
+    expect(rig.readReg(0x68, 0x00, 7)).toEqual([0x56, 0x34, 0x12, 0x03, 0x30, 0x09, 0x26]);
   });
 
   it('cleanup takes it off the bus', () => {
@@ -1976,6 +1974,18 @@ describe('ds1307 — ESP32 path', () => {
     expect(sim.addI2CTransactionListener).not.toHaveBeenCalled();
   });
 
+  it("the record carries the tab's clock, which the worker's copy shows", () => {
+    // The worker's own clock is the server's, in UTC.
+    vi.setSystemTime(new Date(2026, 8, 30, 12, 34, 56, 250));
+    const sim = makeEsp32Sim();
+    PartSimulationRegistry.get('ds1307')!.attachEvents!(makeElement(), sim as any, noPins, 'rtc-q4');
+    const [, , props] = sim.registerSensor.mock.calls[0];
+    expect(props).toMatchObject({
+      epochMs: new Date(2026, 8, 30, 12, 34, 56, 250).getTime(),
+      utcOffsetMin: -new Date(2026, 8, 30, 12, 34, 56, 250).getTimezoneOffset(),
+    });
+  });
+
   it('cleanup unregisters its own record', () => {
     const sim = makeEsp32Sim();
     const cleanup = PartSimulationRegistry.get('ds1307')!.attachEvents!(
@@ -2221,6 +2231,31 @@ describe('ds3231 — ESP32 path', () => {
     );
     const [, , props] = sim.registerSensor.mock.calls[0];
     expect(props.temperature).toBeCloseTo(28.5);
+  });
+
+  it("the record starts from the panel's temperature and carries the tab's clock", () => {
+    vi.setSystemTime(new Date(2026, 8, 30, 12, 34, 56, 250));
+    const sim = makeEsp32Sim();
+    PartSimulationRegistry.get('ds3231')!.attachEvents!(makeElement(), sim as any, noPins, 'ds-q4');
+    const [, , props] = sim.registerSensor.mock.calls[0];
+    expect(props).toMatchObject({
+      temperature: SENSOR_CONTROLS.ds3231.defaultValues.temperature,
+      epochMs: new Date(2026, 8, 30, 12, 34, 56, 250).getTime(),
+      utcOffsetMin: -new Date(2026, 8, 30, 12, 34, 56, 250).getTimezoneOffset(),
+    });
+  });
+
+  it('a temperature that is not a number leaves the last one in place', () => {
+    const rig = i2cRig({ 'ds-q5': HW_I2C_PINS });
+    PartSimulationRegistry.get('ds3231')!.attachEvents!(
+      makeElement({ temperature: 'warm' }),
+      makeI2CSim() as any,
+      noPins,
+      'ds-q5',
+    );
+    expect(rig.readReg(0x68, 0x11, 2)).toEqual([25, 0x00]);
+    dispatchSensorUpdate('ds-q5', { temperature: NaN });
+    expect(rig.readReg(0x68, 0x11, 2)).toEqual([25, 0x00]);
   });
 
   it('cleanup unregisters its own record', () => {

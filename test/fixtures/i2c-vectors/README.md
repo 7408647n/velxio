@@ -8,6 +8,8 @@ that pass the same file cannot drift apart again.
 | File | Chip | Replayed by |
 |---|---|---|
 | `mpu6050.json` | InvenSense MPU-6050 | `frontend/src/__tests__/protocol-parts.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
+| `ds1307.json` | DS1307 real-time clock | `frontend/src/__tests__/rtc-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
+| `ds3231.json` | DS3231 real-time clock | `frontend/src/__tests__/rtc-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
 
 ## File
 
@@ -34,6 +36,26 @@ that pass the same file cannot drift apart again.
   section or driver source). A vector with a `driver` field is the traffic of
   that driver, read from its source.
 
+A chip that keeps the time has two more fields, in the file and, where one
+vector needs its own, in the vector:
+
+```json
+{
+  "clock": "2026-09-30T12:34:56.250",
+  "build_times": [["Sep 29 2026", "23:39:41"]]
+}
+```
+
+- `clock`: where the host's clock is when the chip powers on, as the calendar
+  on the user's wall reads it. It has no time zone: a model counts wall time,
+  and the runner hands it a clock that only the vector moves. No vector
+  depends on when or where it runs.
+- `build_times`: the `__DATE__` and `__TIME__` pairs of the firmware that is
+  running, as the compiler writes the two strings. A model that is set to one
+  of them stays on the host's clock; see `RtcCounters` in
+  `frontend/src/simulation/I2CBusManager.ts`. An empty list is a firmware
+  whose image says nothing about when it was built.
+
 ## Numbers
 
 Every string is hexadecimal with no prefix (`"6B"`), every JSON number is
@@ -53,6 +75,8 @@ then 0x40. The empty string is no bytes.
 | `{ "op": "recv", "n": 6, "expect": "..." }` | bytes read inside the open transaction |
 | `{ "op": "stop" }` | STOP |
 | `{ "op": "inputs", "values": { "accelX": 0.5 } }` | not a bus event: the panel moves. Only the named inputs change |
+| `{ "op": "clock", "advance_ms": 1000 }` | not a bus event: the host's clock moves on by that many milliseconds |
+| `{ "op": "clock", "set": "2026-10-01T00:00:00.000" }` | not a bus event: the host's clock is put at that date and time |
 | `{ "op": "dump", "at": "3B", "expect": "..." }` | not a bus event: the register file as a host that mirrors it would copy it, compared from register `at`. A model with no dump skips the step |
 
 The chip acknowledges its address and every byte written to it. A runner
@@ -74,9 +98,11 @@ it), and may not depend on a STOP to begin a new read.
 
 ## Writing a runner
 
-A runner needs, per vector, a new model at `address` with `inputs` applied,
+A runner needs, per vector, a new model at `address` with `inputs` applied
+(and with the clock and the build times, for a chip that keeps the time),
 and then a loop over `steps`. The TypeScript one is about forty lines
-(`replayVector` in `protocol-parts.test.ts`), and so is the Python one
+(`replayVector` in `protocol-parts.test.ts`, and the one that moves a clock
+in `frontend/src/__tests__/helpers/i2cVectors.ts`), and so is the Python one
 (`replay_vector` in `test_i2c_slaves.py`). For a QEMU device model the
 events are `I2C_START_SEND` and `I2C_START_RECV` for `start`, `I2C_WRITE` for
 each byte of `send`, `I2C_READ` for each byte of `recv`, `I2C_FINISH` for

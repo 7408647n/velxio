@@ -119,6 +119,22 @@ export function i2cPartWorkerPin(componentId: string): number {
 }
 
 /**
+ * The tab's clock for a worker's copy of a part that keeps the time: the
+ * epoch as the browser counts it, and how far its time zone is from UTC, in
+ * minutes east. The worker's own clock is the server's, in the server's zone;
+ * with these in its record the copy shows the hour the tab's model shows.
+ *
+ * A record is filed when the part attaches and sent when the board runs,
+ * which can be much later, so the store stamps it again at Run
+ * (I2C_SENSOR_MAP, `hostClock`). What is left between the stamp and the
+ * worker reading it is the delivery, and the worker allows for that.
+ */
+export function hostClockRecord(): { epochMs: number; utcOffsetMin: number } {
+  const now = new Date();
+  return { epochMs: now.getTime(), utcOffsetMin: -now.getTimezoneOffset() };
+}
+
+/**
  * Whether the board runs its firmware in a backend worker, which answers every
  * I2C event from its own copy of each part. An in-browser engine answers from
  * the fabric, and a record there would only put a second responder on the

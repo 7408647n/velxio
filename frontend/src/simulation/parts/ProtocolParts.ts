@@ -4,7 +4,7 @@
  * Implements eight components that require specific communication stacks:
  *
  *  ssd1306      — I2C OLED display (0x3C). Full command/data decoder.
- *  ds1307       — I2C Real-Time Clock (0x68). Returns browser system time.
+ *  ds1307       — I2C Real-Time Clock (0x68). The host's time until the sketch sets one.
  *  mpu6050      — I2C 6-axis IMU (0x68/0x69). Full register map simulation.
  *  dht22        — Single-wire temp/humidity. Drives DATA pin after start signal.
  *  hx711        — 2-wire load cell amplifier. Clocks out 24-bit ADC value.
@@ -32,8 +32,9 @@ import {
 } from './sdSpiCard';
 import { requestLine, releaseLineGap } from '../line/requestLine';
 import { VirtualDS1307, VirtualBMP280, VirtualDS3231, VirtualPCF8574 } from '../I2CBusManager';
-import type { I2CDevice } from '../I2CBusManager';
-import { attachI2cPart } from './i2cPart';
+import type { I2CDevice, RtcDateTime } from '../I2CBusManager';
+import { buildTimesOfPrograms } from '../firmwareBuildTime';
+import { attachI2cPart, hostClockRecord } from './i2cPart';
 import { HD44780Decoder } from '../HD44780Decoder';
 import { registerSensorUpdate, unregisterSensorUpdate } from '../SensorUpdateRegistry';
 import { getSensorControl, sensorControlDefault } from '../sensorControlConfig';
@@ -481,16 +482,35 @@ PartSimulationRegistry.register('ssd1306-i2c-4pin', {
 // ─── DS1307 RTC ──────────────────────────────────────────────────────────────
 
 /**
- * DS1307 Real-Time Clock — uses the pre-built VirtualDS1307 from I2CBusManager.
- * Returns the browser's current system time in BCD format for registers 0–6.
+ * When the firmware on the canvas was compiled, for a clock that is set to
+ * `__DATE__` and `__TIME__` (RtcCounters in I2CBusManager.ts). Read from the
+ * images the store holds, every board's: a clock answers whichever board its
+ * wires reach, and a time that matches to the second says which.
+ */
+function firmwareBuildTimes(): RtcDateTime[] {
+  try {
+    const { boards, compiledHex } = useSimulatorStore.getState();
+    return buildTimesOfPrograms([
+      ...(boards ?? []).map((board) => board.compiledProgram),
+      // The single-board load paths (loadHex, loadBinary) leave it here only.
+      compiledHex,
+    ]);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * DS1307 Real-Time Clock: VirtualDS1307 from I2CBusManager. The browser's
+ * time, until the sketch sets one of its own.
  */
 PartSimulationRegistry.register('ds1307', {
   attachEvents: (_element, simulator, _getPin, componentId) => {
     const part = attachI2cPart({
       simulator,
       componentId,
-      device: new VirtualDS1307(),
-      worker: { type: 'ds1307' },
+      device: new VirtualDS1307({ buildTimes: firmwareBuildTimes }),
+      worker: { type: 'ds1307', props: hostClockRecord() },
     });
     return () => part.dispose();
   },
@@ -1288,33 +1308,35 @@ PartSimulationRegistry.register('bmp280', {
 // ─── DS3231 Real-Time Clock ───────────────────────────────────────────────────
 
 /**
- * DS3231 — I2C RTC with on-chip temperature sensor (address 0x68).
+ * DS3231: I2C clock with two alarms and an on-chip temperature sensor
+ * (address 0x68), VirtualDS3231 from I2CBusManager. The browser's time, until
+ * the sketch sets one of its own.
  *
- * Returns the browser's current system time as BCD in registers 0x00–0x06,
- * identical to DS1307 for the time registers. Additionally exposes:
- *   0x0E  Control register
- *   0x0F  Status register (OSF cleared)
- *   0x11  Temperature MSB (integer °C, signed)
- *   0x12  Temperature LSB (fractional, 0.25°C per bit in bits 7:6)
- *
- * Ambient temperature defaults to 25°C; override via `element.temperature`.
+ * The temperature is the panel's; it starts at `element.temperature`, or at
+ * the panel's default.
  */
 PartSimulationRegistry.register('ds3231', {
   attachEvents: (element, simulator, _getPin, componentId) => {
     const el = element as any;
-    const initTemp = el.temperature !== undefined ? parseFloat(el.temperature) : 25.0;
+    const fromElement = el.temperature !== undefined ? parseFloat(el.temperature) : NaN;
+    const initTemp = Number.isFinite(fromElement)
+      ? fromElement
+      : sensorControlDefault('ds3231', 'temperature', 25);
 
-    const dev = new VirtualDS3231();
+    const dev = new VirtualDS3231({ buildTimes: firmwareBuildTimes });
     dev.temperatureC = initTemp;
     const part = attachI2cPart({
       simulator,
       componentId,
       device: dev,
-      worker: { type: 'ds3231', props: { temperature: initTemp } },
+      // The worker's copy starts from the same temperature and the same
+      // clock, and not from defaults of its own.
+      worker: { type: 'ds3231', props: { temperature: initTemp, ...hostClockRecord() } },
     });
     registerSensorUpdate(componentId, (values) => {
       part.updateWorker(values);
-      if ('temperature' in values) dev.temperatureC = values.temperature as number;
+      const t = values.temperature;
+      if (typeof t === 'number' && Number.isFinite(t)) dev.temperatureC = t;
     });
     return () => {
       part.dispose();

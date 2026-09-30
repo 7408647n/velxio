@@ -1,0 +1,313 @@
+{
+  "_comment": "Bus vectors for the DS1307 real-time clock, shared by the tab model (frontend/src/simulation/I2CBusManager.ts, vitest) and the backend twin (backend/app/services/esp32_i2c_slaves.py, pytest). The format is in README.md next to this file. Register facts are from the datasheet, REV 3/15; driver traces name the source they were read from. The host's clock starts every vector at 12:34:56.250 of Wednesday 30 September 2026, and the firmware was built on 29 September 2026 at 23:39:41.",
+  "format": 1,
+  "device": "ds1307",
+  "address": "68",
+  "rules": {
+    "power_on": { "07": "03" },
+    "write_mask": { "00": "FF", "01": "7F", "02": "7F", "03": "07", "04": "3F", "05": "1F", "06": "FF", "07": "93" },
+    "last_register": "3F"
+  },
+  "inputs": {},
+  "clock": "2026-09-30T12:34:56.250",
+  "build_times": [["Sep 29 2026", "23:39:41"]],
+  "vectors": [
+    {
+      "name": "power-on: the clock runs on the host's time, Monday is day 1, CONTROL reads 0x03, the RAM reads 0x00",
+      "spec": "Datasheet, Control Register (RS1 and RS0 typically 1 at power-on). CH = 0 and the host's time are the model's: a part that was set and kept its battery. Monday = 1: RTClib dowToDS3231, Seeed DS1307.h MON",
+      "steps": [
+        { "op": "read", "reg": "00", "n": 8, "expect": "56 34 12 03 30 09 26 03" },
+        { "op": "read", "reg": "08", "n": 56, "expect": "00*56" }
+      ]
+    },
+    {
+      "name": "a clock nobody set follows the host, its date and its day of week included",
+      "spec": "Decision D7: the host clock stays. Datasheet, Clock and Calendar: the day-of-week register increments at midnight",
+      "steps": [
+        { "op": "clock", "advance_ms": 3749 },
+        { "op": "read", "reg": "00", "n": 3, "expect": "59 34 12" },
+        { "op": "clock", "advance_ms": 1 },
+        { "op": "read", "reg": "00", "n": 3, "expect": "00 35 12" },
+        { "op": "clock", "set": "2026-09-30T23:59:59.999" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "59 59 23 03 30 09 26" },
+        { "op": "clock", "advance_ms": 1 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 04 01 10 26" },
+        { "op": "clock", "set": "2026-10-04T08:00:00.000" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 08 07 04 10 26" },
+        { "op": "clock", "set": "2026-10-05T08:00:00.000" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 08 01 05 10 26" }
+      ]
+    },
+    {
+      "name": "the time is latched at START: a burst that a second ends in the middle of reads one instant",
+      "spec": "Datasheet, Clock and Calendar: the user buffers are synchronized to the internal registers on any I2C START; the time is read from these secondary registers while the clock continues to run",
+      "steps": [
+        { "op": "clock", "set": "2026-09-30T12:59:59.900" },
+        { "op": "start", "rw": "w" },
+        { "op": "send", "data": "00" },
+        { "op": "start", "rw": "r" },
+        { "op": "recv", "n": 1, "expect": "59" },
+        { "op": "clock", "advance_ms": 200 },
+        { "op": "dump", "at": "00", "expect": "00 00 13" },
+        { "op": "recv", "n": 6, "expect": "59 12 03 30 09 26" },
+        { "op": "stop" },
+        { "op": "read", "reg": "00", "n": 3, "expect": "00 00 13" }
+      ]
+    },
+    {
+      "name": "the address pointer wraps from 0x3F to 0x00, in a read and in a write",
+      "spec": "Datasheet, RTC and RAM Address Map: when the address pointer reaches 3Fh, the end of RAM space, it wraps around to location 00h",
+      "steps": [
+        { "op": "write", "data": "3E A1 B2" },
+        { "op": "read", "reg": "3E", "n": 5, "expect": "A1 B2 56 34 12" },
+        { "op": "write", "data": "3E 11 22 33" },
+        { "op": "read", "reg": "3E", "n": 3, "expect": "11 22 33" }
+      ]
+    },
+    {
+      "name": "the pointer stays where a transfer left it, across the STOP",
+      "spec": "Datasheet, I2C Data Bus, data read mode: the first address read is the last one stored in the register pointer. Seeed DS1307::getTime writes the pointer, stops, and then reads",
+      "steps": [
+        { "op": "write", "data": "08 DE AD BE EF" },
+        { "op": "write", "data": "09" },
+        { "op": "get", "n": 2, "expect": "AD BE" },
+        { "op": "get", "n": 1, "expect": "EF" }
+      ]
+    },
+    {
+      "name": "CONTROL and the 56 bytes of RAM keep what is written, and a bit that does not exist reads 0",
+      "spec": "Datasheet, Table 2 (0 = always reads back as 0) and Control Register. RTClib RTC_DS1307::writeSqwPinMode, readSqwPinMode (& 0x93), writenvram, readnvram",
+      "steps": [
+        { "op": "write", "data": "07 FF" },
+        { "op": "read", "reg": "07", "n": 1, "expect": "93" },
+        { "op": "write", "data": "07 10" },
+        { "op": "read", "reg": "07", "n": 1, "expect": "10" },
+        { "op": "write", "data": "08 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F 10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F 20 21 22 23 24 25 26 27 28 29 2A 2B 2C 2D 2E 2F 30 31 32 33 34 35 36 37 FF" },
+        { "op": "read", "reg": "08", "n": 56, "expect": "01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F 10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F 20 21 22 23 24 25 26 27 28 29 2A 2B 2C 2D 2E 2F 30 31 32 33 34 35 36 37 FF" },
+        { "op": "read", "reg": "07", "n": 1, "expect": "10" },
+        { "op": "write", "data": "03 FD" },
+        { "op": "read", "reg": "03", "n": 1, "expect": "05" }
+      ]
+    },
+    {
+      "name": "a time the sketch sets is kept, and the clock counts from the moment the seconds were written",
+      "spec": "Datasheet, Clock and Calendar: the divider chain is reset whenever the seconds register is written. Decision D7: a date of the sketch's own is kept",
+      "steps": [
+        { "op": "write", "data": "00 30 28 15 06 19 01 13" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "30 28 15 06 19 01 13" },
+        { "op": "clock", "advance_ms": 999 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "30 28 15 06 19 01 13" },
+        { "op": "clock", "advance_ms": 1 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "31 28 15 06 19 01 13" },
+        { "op": "clock", "advance_ms": 89000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 30 15 06 19 01 13" },
+        { "op": "dump", "at": "00", "expect": "00 30 15 06 19 01 13 03" }
+      ]
+    },
+    {
+      "name": "the date rolls over with the month, the year and the leap year, and the day of week with it, from the number the sketch wrote",
+      "spec": "Datasheet, General Description: the end of the month date is automatically adjusted for months with fewer than 31 days, including corrections for leap year. Clock and Calendar: the day-of-week values are user-defined but must be sequential",
+      "steps": [
+        { "op": "write", "data": "00 58 59 23 07 31 12 25" },
+        { "op": "clock", "advance_ms": 2000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 01 01 01 26" },
+        { "op": "write", "data": "00 59 59 23 04 28 02 24" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 05 29 02 24" },
+        { "op": "write", "data": "00 59 59 23 05 28 02 25" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 06 01 03 25" },
+        { "op": "write", "data": "00 59 59 23 01 30 04 26" },
+        { "op": "clock", "advance_ms": 1000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 02 01 05 26" },
+        { "op": "clock", "advance_ms": 172800000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 04 03 05 26" }
+      ]
+    },
+    {
+      "name": "a register written on its own changes that field and leaves the others counting",
+      "spec": "Datasheet, Clock and Calendar: the time and calendar are set or initialized by writing the appropriate register bytes",
+      "steps": [
+        { "op": "write", "data": "02 07" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "56 34 07 03 30 09 26" },
+        { "op": "clock", "advance_ms": 4000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 35 07 03 30 09 26" },
+        { "op": "write", "data": "04 31" },
+        { "op": "write", "data": "05 12" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 35 07 03 31 12 26" }
+      ]
+    },
+    {
+      "name": "the day of week on its own is a number the sketch gives the day: the time stays the host's",
+      "spec": "Datasheet, Clock and Calendar: values that correspond to the day of week are user-defined. DS1307RTC and TimeLib count Sunday as 1",
+      "steps": [
+        { "op": "write", "data": "03 04" },
+        { "op": "clock", "advance_ms": 60000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "56 35 12 04 30 09 26" },
+        { "op": "clock", "set": "2026-10-01T00:00:01.000" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "01 00 00 05 01 10 26" }
+      ]
+    },
+    {
+      "name": "CH stops the clock where it is and reads back, and clearing it starts the clock from there",
+      "spec": "Datasheet, Clock and Calendar: bit 7 of register 0 is the clock halt (CH) bit; when set to 1 the oscillator is disabled. RTClib RTC_DS1307::isrunning is !(register 0 >> 7)",
+      "steps": [
+        { "op": "read", "reg": "00", "n": 1, "expect": "56" },
+        { "op": "write", "data": "00 D6" },
+        { "op": "clock", "advance_ms": 5000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "D6 34 12 03 30 09 26" },
+        { "op": "clock", "advance_ms": 86400000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "D6 34 12 03 30 09 26" },
+        { "op": "write", "data": "00 56" },
+        { "op": "read", "reg": "00", "n": 1, "expect": "56" },
+        { "op": "clock", "advance_ms": 2000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "58 34 12 03 30 09 26" }
+      ]
+    },
+    {
+      "name": "a time written while the clock is halted is held, and counts once CH is cleared",
+      "spec": "Datasheet, Clock and Calendar: CH. The seconds are written with CH set, then again without",
+      "steps": [
+        { "op": "write", "data": "00 80 30 12 02 06 01 26" },
+        { "op": "clock", "advance_ms": 10000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "80 30 12 02 06 01 26" },
+        { "op": "write", "data": "00 00" },
+        { "op": "clock", "advance_ms": 61000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "01 31 12 02 06 01 26" }
+      ]
+    },
+    {
+      "name": "12-hour mode: the hours count 12, 1 to 11 with AM and PM, in the form they were written in",
+      "spec": "Datasheet, Clock and Calendar: bit 6 of the hours register selects the 12-hour mode; in it bit 5 is the AM/PM bit, high being PM",
+      "steps": [
+        { "op": "write", "data": "00 58 59 51 03 30 09 26" },
+        { "op": "read", "reg": "00", "n": 3, "expect": "58 59 51" },
+        { "op": "clock", "advance_ms": 2000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 72 03 30 09 26" },
+        { "op": "clock", "advance_ms": 3600000 },
+        { "op": "read", "reg": "00", "n": 3, "expect": "00 00 61" },
+        { "op": "clock", "advance_ms": 39600000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 52 04 01 10 26" }
+      ]
+    },
+    {
+      "name": "the build time of the firmware, written in one burst, leaves the clock on the host's time",
+      "spec": "Decision D7. RTClib 2.1.4 RTC_DS1307::adjust(DateTime(F(__DATE__), F(__TIME__))): pointer 0, seconds, minutes, hours, 0, date, month, year. The day of week is what was written, a day later",
+      "steps": [
+        { "op": "write", "data": "00 41 39 23 00 29 09 26" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "56 34 12 01 30 09 26" },
+        { "op": "clock", "advance_ms": 750 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "57 34 12 01 30 09 26" },
+        { "op": "clock", "set": "2026-10-02T09:00:00.000" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 00 09 03 02 10 26" }
+      ]
+    },
+    {
+      "name": "one second away from the build time is a date of the sketch's own, and is kept",
+      "spec": "Decision D7: the match is on the written date and time, to the second",
+      "steps": [
+        { "op": "write", "data": "00 42 39 23 00 29 09 26" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "42 39 23 00 29 09 26" },
+        { "op": "clock", "advance_ms": 18000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "00 40 23 00 29 09 26" },
+        { "op": "write", "data": "00 41 39 23 00 29 09 25" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "41 39 23 00 29 09 25" }
+      ]
+    },
+    {
+      "name": "the build time written one register at a time is the build time once the last one is in",
+      "spec": "Decision D7: the rule looks at what the six registers hold when a write phase ends, not at how many bytes the phase had",
+      "steps": [
+        { "op": "write", "data": "06 26" },
+        { "op": "write", "data": "05 09" },
+        { "op": "write", "data": "04 29" },
+        { "op": "write", "data": "03 02" },
+        { "op": "write", "data": "02 23" },
+        { "op": "write", "data": "01 39" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "56 39 23 02 29 09 26" },
+        { "op": "write", "data": "00 41" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "56 34 12 03 30 09 26" }
+      ]
+    },
+    {
+      "name": "a date of the sketch's own and then the build time: the clock is back on the host's time",
+      "spec": "Decision D7",
+      "steps": [
+        { "op": "write", "data": "00 00 00 00 01 01 01 00" },
+        { "op": "clock", "advance_ms": 5000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "05 00 00 01 01 01 00" },
+        { "op": "write", "data": "00 41 39 23 02 29 09 26" },
+        { "op": "read", "reg": "00", "n": 7, "expect": "01 35 12 03 30 09 26" }
+      ]
+    },
+    {
+      "name": "with no build time known, the time the firmware wrote at build time is kept like any other",
+      "spec": "Decision D7: if no compile time can be established for a build, a written time is kept, which is what the chip does",
+      "build_times": [],
+      "steps": [
+        { "op": "write", "data": "00 41 39 23 00 29 09 26" },
+        { "op": "clock", "advance_ms": 2000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "43 39 23 00 29 09 26" }
+      ]
+    },
+    {
+      "name": "an image with more than one build time: each of them is the build time",
+      "spec": "Decision D7. An ESP32 image carries the time of its bootloader and of its application descriptor next to the sketch's, and every date found goes with every time found",
+      "build_times": [["Sep 29 2026", "23:41:31"], ["Sep 29 2026", "23:41:51"], ["Sep 29 2026", "23:41:52"]],
+      "steps": [
+        { "op": "write", "data": "00 51 41 23 00 29 09 26" },
+        { "op": "read", "reg": "00", "n": 3, "expect": "56 34 12" },
+        { "op": "write", "data": "00 41 39 23 00 29 09 26" },
+        { "op": "read", "reg": "00", "n": 3, "expect": "41 39 23" }
+      ]
+    },
+    {
+      "name": "the registers a host copies are the time of that moment, CONTROL and the RAM",
+      "spec": "dumpRegisters() is what the Raspberry Pi relay mirrors",
+      "steps": [
+        { "op": "write", "data": "08 CA FE" },
+        { "op": "clock", "advance_ms": 4000 },
+        { "op": "dump", "at": "00", "expect": "00 35 12 03 30 09 26 03 CA FE 00" },
+        { "op": "dump", "at": "3F", "expect": "00 00" }
+      ]
+    },
+    {
+      "name": "RTClib RTC_DS1307: begin(), isrunning(), adjust() to a date of the sketch's own, now(), and the NVRAM",
+      "spec": "RTClib 2.1.4 RTC_DS1307.cpp with Adafruit BusIO 1.17.4 Adafruit_I2CDevice.cpp: begin() probes the address; read_register writes the pointer, stops, and reads; now() and readnvram() read after a repeated START; adjust() is one write of 8 bytes",
+      "driver": "rtclib-ds1307",
+      "steps": [
+        { "op": "write", "data": "" },
+        { "op": "write", "data": "00" },
+        { "op": "get", "n": 1, "expect": "56" },
+        { "op": "write", "data": "00 00 30 12 00 14 02 24" },
+        { "op": "clock", "advance_ms": 3000 },
+        { "op": "read", "reg": "00", "n": 7, "expect": "03 30 12 00 14 02 24" },
+        { "op": "write", "data": "08 2A" },
+        { "op": "read", "reg": "08", "n": 1, "expect": "2A" }
+      ]
+    },
+    {
+      "name": "Grove RTC DS1307: setTime(), stopClock(), startClock() and getTime(), with Monday as day 1",
+      "spec": "Seeed Grove - RTC DS1307 1.0.0, DS1307.cpp: setTime() is one write of 8 bytes, getTime() writes the pointer, stops, and reads 7 bytes, stopClock() and startClock() read the seconds and write them back with CH set or cleared. Example SetTimeAndDisplay: 19 January 2013, 15:28:30, SAT (6)",
+      "driver": "seeed-grove-rtc-ds1307",
+      "steps": [
+        { "op": "write", "data": "00 30 28 15 06 19 01 13" },
+        { "op": "clock", "advance_ms": 1500 },
+        { "op": "write", "data": "00" },
+        { "op": "get", "n": 7, "expect": "31 28 15 06 19 01 13" },
+        { "op": "write", "data": "00" },
+        { "op": "get", "n": 1, "expect": "31" },
+        { "op": "write", "data": "00 B1" },
+        { "op": "clock", "advance_ms": 30000 },
+        { "op": "write", "data": "00" },
+        { "op": "get", "n": 7, "expect": "B1 28 15 06 19 01 13" },
+        { "op": "write", "data": "00" },
+        { "op": "get", "n": 1, "expect": "B1" },
+        { "op": "write", "data": "00 31" },
+        { "op": "clock", "advance_ms": 29000 },
+        { "op": "write", "data": "00" },
+        { "op": "get", "n": 7, "expect": "00 29 15 06 19 01 13" }
+      ]
+    }
+  ]
+}
