@@ -414,6 +414,7 @@ class WasmChipRuntime:
         clock: Optional[Callable[[], int]] = None,
         pad_volts: dict[str, float | None] | None = None,
         pin_releaser: Optional[Callable[[int], None]] = None,
+        live_attrs: Optional[Callable[[str], "float | str | None"]] = None,
     ):
         """
         Args:
@@ -466,6 +467,12 @@ class WasmChipRuntime:
                         pad model (pad_model.py) then decides the pad: the
                         guest's output, another driver, or a module's pull.
                         Absent, a release changes nothing, as before.
+            live_attrs: (name) -> value - attributes the host answers at the
+                        moment the chip reads them, ahead of `attrs`: a float
+                        for vx_attr_read, a str for vx_attr_string_read, None
+                        to fall through. The browser runtime's `liveAttrs`:
+                        the wall clock a real-time clock counts and the build
+                        times it compares with (buses/models/ds3231.c).
         """
         self._engine = wasmtime.Engine()
         self._store = wasmtime.Store(self._engine)
@@ -492,6 +499,7 @@ class WasmChipRuntime:
         # attrs payload; split by type.
         self._str_attrs = {k: v for k, v in (attrs or {}).items()
                            if isinstance(v, str)}
+        self._live_attrs = live_attrs
         self._emit = emit or (lambda _payload: None)
         self._stdout_buf = ""
 
@@ -1162,6 +1170,10 @@ class WasmChipRuntime:
         def vx_attr_read(handle: int) -> float:
             if 0 <= handle < len(self._attr_handles):
                 a = self._attr_handles[handle]
+                if self._live_attrs is not None:
+                    live = self._live_attrs(a["name"])
+                    if isinstance(live, (int, float)) and not isinstance(live, bool):
+                        return float(live)
                 return float(self._attrs.get(a["name"], a["default"]))
             return 0.0
 
@@ -1283,7 +1295,9 @@ class WasmChipRuntime:
             if 0 <= handle < len(self._attr_handles):
                 a = self._attr_handles[handle]
                 if "string_default" in a:
-                    v = self._str_attrs.get(a["name"], a["string_default"])
+                    live = self._live_attrs(a["name"]) if self._live_attrs else None
+                    v = live if isinstance(live, str) else self._str_attrs.get(
+                        a["name"], a["string_default"])
                     return str(v).encode("utf-8")
             return b""
 
@@ -1534,6 +1548,25 @@ class WasmChipRuntime:
         result = self._call_indirect(dev.get(name, 0), dev["user_data"], *args)
         self._flush_stdout()
         return result
+
+    @_under_entry_lock
+    def call_export(self, name: str) -> int:
+        """Call a function the chip exports by name, with no arguments, and
+        return its i32 result (0 for none). For a host that asks a model for
+        more than the bus callbacks, such as the register file the Pi relay
+        mirrors (chip_dump_registers in buses/models/ds3231.c)."""
+        fn = self._exports.get(name)
+        if fn is None:
+            raise KeyError(f"chip WASM does not export {name}")
+        self._drop_mem_view()
+        result = fn(self._store)
+        self._drop_mem_view()
+        self._flush_stdout()
+        return int(result or 0)
+
+    def read_memory(self, ptr: int, length: int) -> bytes:
+        """`length` bytes of the chip's linear memory from `ptr`."""
+        return self._read_bytes(ptr, length)
 
     # ── Live attribute updates (sensor control panel sliders) ───────────────
     @_under_entry_lock

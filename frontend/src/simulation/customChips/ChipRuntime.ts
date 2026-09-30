@@ -234,6 +234,15 @@ export interface ChipInstanceOptions {
   /** String attribute values (vx_attr_register_string), from chip.json. */
   strAttrs?: Map<string, string>;
   /**
+   * Attributes the host answers at the moment the chip reads them, ahead of
+   * `attrs` and `strAttrs`: a number for vx_attr_read, a string for
+   * vx_attr_string_read, undefined to fall through to the maps. For a value
+   * that is the host's to know and costly or pointless to push on every
+   * change, such as the wall clock a real-time clock counts or the build
+   * times it scans the firmware for (buses/models/ds3231.c).
+   */
+  liveAttrs?: ((name: string) => number | string | undefined) | null;
+  /**
    * The clock of the board the chip is wired to (its EngineBinding's, the
    * one the software UART runs on): vx_sim_now_nanos reads it and the chip's
    * timers fire on its events, at their guest instant. Without one the chip
@@ -279,6 +288,7 @@ export class ChipInstance {
   private pulls: Record<string, 'up' | 'down'>;
   private attrs: Map<string, number>;
   private strAttrs: Map<string, string>;
+  private liveAttrs: ((name: string) => number | string | undefined) | null;
   private display: { width: number; height: number } | null;
   private componentId: string;
 
@@ -355,6 +365,21 @@ export class ChipInstance {
     return inst;
   }
 
+  /**
+   * The same, at once, from a module compiled beforehand. For a part that
+   * has to answer the bus from the moment it attaches, as a hand-written model
+   * does (buses/models/ds3231.c behind its flag): the compile is the slow
+   * half and happens once per page, the instance is a few kilobytes.
+   */
+  static createSync(opts: ChipInstanceOptions & { wasm: WebAssembly.Module }): ChipInstance {
+    const inst = new ChipInstance(opts);
+    const importObject = inst._importObject();
+    inst._checkImports(opts.wasm, importObject);
+    inst.instance = new WebAssembly.Instance(opts.wasm, importObject);
+    inst.exports = inst.instance.exports;
+    return inst;
+  }
+
   constructor(opts: ChipInstanceOptions) {
     this.wasm = opts.wasm;
     this.pinManager = opts.pinManager;
@@ -365,6 +390,7 @@ export class ChipInstance {
     this.pulls = opts.pulls ?? {};
     this.attrs = opts.attrs ?? new Map();
     this.strAttrs = opts.strAttrs ?? new Map();
+    this.liveAttrs = opts.liveAttrs ?? null;
     this.display = opts.display ?? null;
     this._romBytes = opts.romBytes ?? new Uint8Array(0);
     // Copy: the chip owns its blob from here on, and the same copy rule holds
@@ -385,20 +411,24 @@ export class ChipInstance {
     this._velxioImports = this._buildVelxioImports();
   }
 
-  private async _instantiate(): Promise<void> {
+  private _importObject(): WebAssembly.Imports {
     // 4 pages (256 KB) initial: CPU-emulator chips like z80-cpu keep a 32 KB
     // ROM + 32 KB RAM buffer as static data, which alone needs >2 pages once
     // the WASM stack is added. Grows up to 16 pages on demand.
     this.memory = new WebAssembly.Memory({ initial: 4, maximum: 16 });
     this.wasi.setMemory(this.memory);
 
-    const importObject: WebAssembly.Imports = {
+    return {
       env: {
         memory: this.memory,
         ...this._velxioImports,
       },
       ...this.wasi.imports(),
     };
+  }
+
+  private async _instantiate(): Promise<void> {
+    const importObject = this._importObject();
 
     let module: WebAssembly.Module;
     if (this.wasm instanceof WebAssembly.Module) {
@@ -407,6 +437,12 @@ export class ChipInstance {
       module = await WebAssembly.compile(this.wasm as BufferSource);
     }
 
+    this._checkImports(module, importObject);
+    this.instance = await WebAssembly.instantiate(module, importObject);
+    this.exports = this.instance.exports;
+  }
+
+  private _checkImports(module: WebAssembly.Module, importObject: WebAssembly.Imports): void {
     // Sanity-check imports so we surface a helpful error if something's missing.
     const expected = WebAssembly.Module.imports(module);
     const missing: string[] = [];
@@ -422,9 +458,6 @@ export class ChipInstance {
           `Extend WasiShim or ChipRuntime to provide them.`,
       );
     }
-
-    this.instance = await WebAssembly.instantiate(module, importObject);
-    this.exports = this.instance.exports;
   }
 
   start(): void {
@@ -1077,6 +1110,8 @@ export class ChipInstance {
   private _attr_read(handle: number): number {
     const a = this.attrHandles[handle];
     if (!a) return 0;
+    const live = this.liveAttrs?.(a.name);
+    if (typeof live === 'number') return live;
     return this.attrs.get(a.name) ?? a.default;
   }
 
@@ -1094,6 +1129,8 @@ export class ChipInstance {
   private _attr_string_value(handle: number): string {
     const a = this.attrHandles[handle];
     if (!a || a.stringDefault === undefined) return '';
+    const live = this.liveAttrs?.(a.name);
+    if (typeof live === 'string') return live;
     return this.strAttrs.get(a.name) ?? a.stringDefault;
   }
 
@@ -1423,6 +1460,24 @@ export class ChipInstance {
     for (const b of data) dev.writeByte(b & 0xff);
     dev.stop();
     return true;
+  }
+
+  /**
+   * The chip's side of the bus at one address, for a host that puts the chip
+   * on a bus of its own making instead of the fabric (a part that hosts a
+   * compiled model where it used to host a hand-written one): START, the
+   * bytes and STOP go straight to the callbacks, exactly as the fabric's
+   * target would deliver them. Null when the chip attached no such address.
+   */
+  i2cDevice(address: number): {
+    connect(address: number, isRead: boolean): boolean;
+    writeByte(value: number): boolean;
+    readByte(): number;
+    stop(): void;
+  } | null {
+    let dev: ChipI2cDevice | null = null;
+    for (const e of this.i2cDevices) if ((e.cfg.address & 0x7f) === (address & 0x7f)) dev = e.device;
+    return dev;
   }
 
   /** True if the chip declared at least one UART (post-chip_setup). */
