@@ -12,6 +12,28 @@ that pass the same file cannot drift apart again.
 | `ds3231.json` | DS3231 real-time clock | `frontend/src/__tests__/rtc-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
 | `bmp280.json` | Bosch BMP280 | `frontend/src/__tests__/bmp280-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
 
+## The parity gate
+
+Two tests fail when a copy of a chip can drift from the others:
+`frontend/src/__tests__/i2c-vector-parity.test.ts` for the tab models and
+`test/backend/unit/test_i2c_vector_parity.py` for the backend twins. Both run
+in the deploy gate. They fail when
+
+- a file here has no model on that side, or no test that replays every
+  vector of it in both bus flavours;
+- a model's exported rules table (`MPU6050_RULES`, `BMP280_RULES`,
+  `DS1307_RULES`, `DS3231_RULES`) is not the `rules` of its file;
+- the registers the tab model tells a mirroring host to ask for
+  (`volatileReads`) or to keep its pointer on (`pointerStays`) are not the
+  `volatile_reads` and `pointer_stays` of its file;
+- a class that answers the bus is added to
+  `backend/app/services/esp32_i2c_slaves.py` with no file here (the write
+  sink, which has no registers, is listed as such).
+
+A new chip therefore lands with its file, an entry in both gates, and a test
+per side that replays it. The pro BME280 file lives in the pro tree and is
+held by the pro tests.
+
 ## File
 
 ```json
@@ -30,6 +52,11 @@ that pass the same file cannot drift apart again.
   ranges, self-clearing masks, sensitivities). A model that exports the same
   table is tested against this copy, so the two agree on the facts and not only
   on the cases below.
+- `volatile_reads` and `pointer_stays` in `rules` (MPU-6050): inclusive
+  register ranges a copy of the registers cannot answer for, and the ones
+  the pointer does not move past. The tab model tells a host that mirrors its
+  registers (the Raspberry Pi relay) about them through its map entry; a
+  file without them says the chip has none.
 - `ad0_values` (MPU-6050): how each model reads the part's `ad0` property
   and the worker record's, as `[value, "69" or "68", or null when the AD0
   net decides]`.

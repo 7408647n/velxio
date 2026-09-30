@@ -675,6 +675,29 @@ export const MPU6050_RULES = {
    */
   clear_on_read: { 0x3a: 0xff },
   /**
+   * Inclusive ranges the register pointer does not move past: FIFO_R_W reads
+   * and writes the FIFO one byte per access (4.31), and MEM_R_W moves the DMP
+   * memory address instead, so a DMP upload bursts into the memory and not
+   * over FIFO_COUNT and WHO_AM_I behind it. A host that keeps a pointer of its
+   * own (the Raspberry Pi relay) keeps it there too (I2CDevice.pointerStays).
+   */
+  pointer_stays: [
+    [0x6f, 0x6f],
+    [0x74, 0x74],
+  ],
+  /**
+   * Inclusive ranges a copy of the registers cannot answer for, so a host
+   * that mirrors them (the Raspberry Pi relay) asks the model for every read
+   * that touches one (I2CDevice.volatileReads): INT_STATUS, which a read
+   * clears and every sample sets; MEM_R_W, which moves the memory address;
+   * FIFO_COUNT, which grows with time; FIFO_R_W, which pops a byte per read.
+   */
+  volatile_reads: [
+    [0x3a, 0x3a],
+    [0x6f, 0x6f],
+    [0x72, 0x74],
+  ],
+  /**
    * The gyroscope output rate the sample rate is divided from, in Hz: 8 kHz
    * with the low-pass filter off (DLPF_CFG 0 or 7), 1 kHz with it on.
    * Sample rate = rate / (1 + SMPLRT_DIV) (4.2, 4.3).
@@ -830,15 +853,14 @@ const MPU_SELF_CLEARING = new Uint8Array(256);
 for (const [reg, mask] of Object.entries(MPU6050_RULES.self_clearing)) {
   MPU_SELF_CLEARING[Number(reg)] = mask;
 }
-/**
- * Registers the pointer stays on after each byte: FIFO_R_W reads and writes
- * the FIFO, one byte per access (4.31).
- */
+/** The registers of inclusive ranges of the rules table, in order. */
+const mpuRegistersOf = (ranges: readonly (readonly [number, number])[]): number[] =>
+  ranges.flatMap(([first, last]) =>
+    Array.from({ length: last - first + 1 }, (_, i) => first + i),
+  );
+/** Registers the pointer stays on after each byte (MPU6050_RULES.pointer_stays). */
 const MPU_POINTER_STAYS = new Uint8Array(256);
-MPU_POINTER_STAYS[MPU_FIFO_R_W] = 1;
-// MEM_R_W moves the memory address instead, so a DMP upload bursts into the
-// memory and not over FIFO_COUNT and WHO_AM_I behind it.
-MPU_POINTER_STAYS[MPU_MEM_R_W] = 1;
+for (const reg of mpuRegistersOf(MPU6050_RULES.pointer_stays)) MPU_POINTER_STAYS[reg] = 1;
 const MPU_CLEAR_ON_READ = new Uint8Array(256);
 for (const [reg, mask] of Object.entries(MPU6050_RULES.clear_on_read)) {
   MPU_CLEAR_ON_READ[Number(reg)] = mask;
@@ -908,20 +930,10 @@ export class VirtualMPU6050 implements I2CDevice {
    * host that drives the pin reads intPad() and intWakeNs() again.
    */
   onIntChange: (() => void) | null = null;
-  /**
-   * What a copy of dumpRegisters() cannot answer: INT_STATUS, which a read
-   * clears and every sample sets; MEM_R_W, which moves the memory address;
-   * FIFO_COUNT, which grows with time; FIFO_R_W, which pops a byte per read.
-   */
-  readonly volatileReads: readonly number[] = [
-    MPU_INT_STATUS,
-    MPU_MEM_R_W,
-    MPU_FIFO_COUNT_H,
-    MPU_FIFO_COUNT_L,
-    MPU_FIFO_R_W,
-  ];
-  /** The ports the pointer stays on: MEM_R_W and FIFO_R_W (MPU_POINTER_STAYS). */
-  readonly pointerStays: readonly number[] = [MPU_MEM_R_W, MPU_FIFO_R_W];
+  /** What a copy of dumpRegisters() cannot answer (MPU6050_RULES.volatile_reads). */
+  readonly volatileReads: readonly number[] = mpuRegistersOf(MPU6050_RULES.volatile_reads);
+  /** The ports the pointer stays on: MEM_R_W and FIFO_R_W (MPU6050_RULES.pointer_stays). */
+  readonly pointerStays: readonly number[] = mpuRegistersOf(MPU6050_RULES.pointer_stays);
 
   private readonly regs = new Uint8Array(256);
   private readonly inputs: Mpu6050Inputs = {

@@ -16,6 +16,8 @@
     "temp_offset_c": 36.53,
     "variants": { "mpu9250": { "power_on": { "6B": "01" }, "who_am_i": 113, "temp_lsb_per_c": 333.87, "temp_offset_c": 21, "accel_offs_reg": [119, 122, 125], "fifo_size": 512 } },
     "clear_on_read": { "3A": "FF" },
+    "pointer_stays": [["6F", "6F"], ["74", "74"]],
+    "volatile_reads": [["3A", "3A"], ["6F", "6F"], ["72", "74"]],
     "gyro_rate_hz": { "dlpf_off": 8000, "dlpf_on": 1000 },
     "cycle_rate_hz": [1.25, 5, 20, 40],
     "int_pulse_us": 50,

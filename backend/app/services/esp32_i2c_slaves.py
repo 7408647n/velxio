@@ -106,6 +106,19 @@ MPU6050_RULES = {
     # the register is read" (4.16). With INT_RD_CLEAR set in INT_PIN_CFG, a
     # read of any register clears them (4.14).
     'clear_on_read': {0x3A: 0xFF},
+    # Inclusive ranges the register pointer does not move past: FIFO_R_W
+    # reads and writes the FIFO one byte per access (4.31), and MEM_R_W moves
+    # the DMP memory address instead, so a DMP upload bursts into the memory
+    # and not over FIFO_COUNT and WHO_AM_I behind it.
+    'pointer_stays': ((0x6F, 0x6F), (0x74, 0x74)),
+    # Inclusive ranges a copy of the registers cannot answer for, so a host
+    # that mirrors them (the Raspberry Pi relay, which gets them from the tab
+    # model's map entry) asks for every read that touches one: INT_STATUS,
+    # which a read clears and every sample sets; MEM_R_W, which moves the
+    # memory address; FIFO_COUNT, which grows with time; FIFO_R_W, which pops
+    # a byte per read. This twin answers every read itself and only keeps
+    # the entry so its table is the tab's.
+    'volatile_reads': ((0x3A, 0x3A), (0x6F, 0x6F), (0x72, 0x74)),
     # The gyroscope output rate the sample rate is divided from, in Hz: 8 kHz
     # with the low-pass filter off (DLPF_CFG 0 or 7), 1 kHz with it on.
     # Sample rate = rate / (1 + SMPLRT_DIV) (4.2, 4.3).
@@ -204,13 +217,10 @@ for _first, _last in MPU6050_RULES['read_only']:
 _MPU_SELF_CLEARING = bytearray(256)
 for _reg, _mask in MPU6050_RULES['self_clearing'].items():
     _MPU_SELF_CLEARING[_reg] = _mask
-# Registers the pointer stays on after each byte: FIFO_R_W reads and writes
-# the FIFO, one byte per access (4.31).
+# Registers the pointer stays on after each byte (MPU6050_RULES['pointer_stays']).
 _MPU_POINTER_STAYS = bytearray(256)
-_MPU_POINTER_STAYS[_MPU_FIFO_R_W] = 1
-# MEM_R_W moves the memory address instead, so a DMP upload bursts into the
-# memory and not over FIFO_COUNT and WHO_AM_I behind it.
-_MPU_POINTER_STAYS[_MPU_MEM_R_W] = 1
+for _first, _last in MPU6050_RULES['pointer_stays']:
+    _MPU_POINTER_STAYS[_first:_last + 1] = b'\x01' * (_last - _first + 1)
 _MPU_CLEAR_ON_READ = bytearray(256)
 for _reg, _mask in MPU6050_RULES['clear_on_read'].items():
     _MPU_CLEAR_ON_READ[_reg] = _mask
