@@ -403,6 +403,8 @@ describe('ssd1306 — I2C device', () => {
 
   it('decodes horizontal addressing: write data bytes into the element', () => {
     const rig = i2cRig({ oled: OLED_I2C_PINS });
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb));
     const imageData = { width: 128, height: 64, data: new Uint8ClampedArray(128 * 64 * 4) };
     const el = makeElement({ imageData, redraw: vi.fn() });
     PartSimulationRegistry.get('ssd1306')!.attachEvents!(el, makeI2CSim() as any, noPins, 'oled');
@@ -410,6 +412,8 @@ describe('ssd1306 — I2C device', () => {
     expect(rig.write(0x3c, [0x00, 0x21, 0x00, 0x7f, 0x22, 0x00, 0x07])).not.toContain(false);
     // Data stream: column 0 of page 0 = 0xAB (bits 0, 1, 3, 5, 7 lit).
     rig.write(0x3c, [0x40, 0xab]);
+    // The panel paints on the next animation frame.
+    for (const cb of frames.splice(0, frames.length)) cb(0);
     const px = (y: number) => (el as unknown as { imageData: ImageData }).imageData.data[y * 128 * 4];
     expect([0, 1, 2, 3].map((y) => px(y) > 0)).toEqual([true, true, false, true]);
   });

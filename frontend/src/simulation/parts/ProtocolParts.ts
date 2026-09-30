@@ -244,6 +244,16 @@ class SSD1306Core {
  *
  * Handles the I2C control byte (0x00 = command stream, 0x40 = data stream)
  * and delegates command/data writes to the shared core.
+ *
+ * The glass is repainted at most once per animation frame, as the SPI path
+ * does. A driver sends one frame as many transactions: Adafruit_SSD1306
+ * display() splits the 1 KiB buffer into WIRE_MAX chunks (32 bytes on AVR,
+ * about 36 STOPs; Adafruit_SSD1306.cpp display()), U8g2 into 24-byte ones
+ * (u8x8_cad_ssd13xx_fast_i2c). Painting on every STOP converted the whole
+ * 128x64 panel that many times per frame, on the thread the in-tab engines
+ * run on, and only the last of those pictures was ever on screen. Every STOP
+ * still schedules a paint, so what the frame shows is the panel after the
+ * last transaction before it, exactly what the per-STOP paint left there.
  */
 class VirtualSSD1306 implements I2CDevice {
   address: number;
@@ -252,6 +262,8 @@ class VirtualSSD1306 implements I2CDevice {
   private ctrlByte = true;
   private isData = false;
   private readonly element: HTMLElement;
+  private dirty = false;
+  private rafId: number | null = null;
 
   constructor(address: number, element: HTMLElement) {
     this.address = address;
@@ -283,7 +295,37 @@ class VirtualSSD1306 implements I2CDevice {
 
   stop(): void {
     this.ctrlByte = true;
+    this.dirty = true;
+    if (this.rafId !== null) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      // No frame clock (a worker, a test without a DOM): paint now.
+      this.flush();
+      return;
+    }
+    this.rafId = requestAnimationFrame(() => {
+      this.rafId = null;
+      this.flush();
+    });
+  }
+
+  /** Paint the panel if a transaction ended since the last paint. */
+  flush(): void {
+    if (!this.dirty) return;
+    this.dirty = false;
     this.core.syncElement(this.element);
+  }
+
+  /**
+   * The part leaves the canvas or attaches again. What the last transaction
+   * wrote is painted now, not dropped with the pending frame: a sketch that
+   * stops right after its display() keeps its picture.
+   */
+  dispose(): void {
+    if (this.rafId !== null) {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    this.flush();
   }
 }
 
@@ -420,7 +462,10 @@ function attachSSD1306(
       },
     },
   });
-  return () => part.dispose();
+  return () => {
+    part.dispose();
+    device.dispose();
+  };
 }
 
 
@@ -1388,6 +1433,20 @@ function parseI2cAddress(raw: unknown, fallback: number): number {
 }
 
 /**
+ * What the pins of the LCD backpack's PCF8574 read when the expander releases
+ * them all. RS, RW, E and D4-D7 go to HD44780 inputs and float up on the
+ * expander's weak pull-up. (The HD44780 drives D4-D7 while RW and E are both
+ * high; that read of the controller is not modelled, and the pins read high.) P3 goes to the base of the
+ * backlight's NPN transistor, whose emitter is on ground, so the base-emitter
+ * junction holds a released P3 low. hd44780_I2Cexp reads exactly that to
+ * decide the backlight polarity (hd44780_I2Cexp.h autocfg8574(): "for active
+ * high backlights, the bl input pin will be low"); against a port that reads
+ * 0xFF it picked active low and turned the panel dark. Drivers that never
+ * read (LiquidCrystal_I2C, LiquidCrystal_PCF8574, LCD_I2C) see no change.
+ */
+const LCD_BACKPACK_PORT = 0xf7;
+
+/**
  * Build a part attach function for an LCD with an I2C backpack.  The
  * same logic applies to LCD1602 (16×2) and LCD2004 (20×4); only the
  * geometry differs.
@@ -1446,6 +1505,7 @@ function makeI2cLcdAttach(cols: number, rows: number) {
     };
 
     const pcf = new VirtualPCF8574(addr);
+    pcf.portState = LCD_BACKPACK_PORT;
     pcf.onWrite = (v: number) => decoder.feedPCF8574Byte(v);
 
     // On a QEMU board the worker's expander echoes each write phase, and the

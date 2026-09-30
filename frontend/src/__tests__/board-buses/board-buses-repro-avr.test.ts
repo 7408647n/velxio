@@ -826,6 +826,7 @@ describe('ATtiny85 + SSD1306 over the USI', () => {
     b.load(TINY_HEX);
     b.run();
     expect(bootTiny(b)).toEqual({ acked: true, nacked: false });
+    runFrames(); // the panel paints once per animation frame
     expect(histogram(oledGddram(oled))).toEqual({ '0x81': 1024 });
   });
 
@@ -838,6 +839,7 @@ describe('ATtiny85 + SSD1306 over the USI', () => {
     oled.imageData.data.fill(0); // only what the second boot draws counts
     b.run();
     expect(bootTiny(b)).toEqual({ acked: true, nacked: false });
+    runFrames(); // the panel paints once per animation frame
     expect(histogram(oledGddram(oled))).toEqual({ '0x81': 1024 });
   });
 });
