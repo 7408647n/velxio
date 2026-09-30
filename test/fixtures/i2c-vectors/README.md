@@ -34,6 +34,28 @@ A new chip therefore lands with its file, an entry in both gates, and a test
 per side that replays it. The pro BME280 file lives in the pro tree and is
 held by the pro tests.
 
+## Polled bits
+
+`lint-polled-bits.py` lists the register bits Arduino libraries wait on:
+`while (read(REG) & MASK)`, `do { } while (...)`, and Adafruit_BusIO
+`RegisterBits` read in a loop condition. A model has to let every one of
+them settle, or the sketch hangs as it did on the MPU-6050's DEVICE_RESET.
+
+```
+python3 test/fixtures/i2c-vectors/lint-polled-bits.py <library folder> [...]
+python3 test/fixtures/i2c-vectors/lint-polled-bits.py --markdown <library folder>
+```
+
+Each argument is a folder of Arduino libraries (the app container keeps them
+in `/var/velxio/libcache`). The output is one row per library, source line
+and register, with the mask when the loop names one. It is a lint: it reads
+source text, resolves the register names it can find in the same library,
+and prints what it cannot resolve as the name. A register read with no
+pointer (a command chip such as the AHT20 answering a bare read with its
+status byte) shows as `(status byte, no pointer)`.
+`test/backend/unit/test_polled_bits_lint.py` holds each loop shape it has to
+find and the loops it has to leave alone.
+
 ## File
 
 ```json
