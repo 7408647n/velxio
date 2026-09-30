@@ -12,7 +12,12 @@ backend's side:
   every vector of it in both bus flavours;
 - a twin's exported rules table is not the `rules` of its file;
 - a register-file model is added to esp32_i2c_slaves.py without a vector
-  file (the write sinks, which have no registers, are listed below).
+  file (the write sinks, which have no registers, are listed below);
+- a chip that the worker also runs as a compiled model
+  (app/services/wasm_i2c_models.py, buses/models/, P5) has no vector file,
+  test_wasm_i2c_models.py does not replay every vector of it in both bus
+  flavours on every path the worker can take to the model, or the model
+  powers on with other registers than its twin.
 
 frontend/src/__tests__/i2c-vector-parity.test.ts is the same gate for the
 tab models, and also holds the registers the tab tells the Raspberry Pi relay
@@ -144,6 +149,51 @@ class TestI2CVectorParity(unittest.TestCase):
                 continue
             self.assertTrue(cls in twins or name in NO_REGISTER_FILE,
                             f'{name} answers the bus but has no vector file in {VECTOR_DIR.name}')
+
+
+class TestCompiledModelParity(unittest.TestCase):
+    """The compiled models the worker builds from a part's record."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from app.services import wasm_i2c_models
+            from . import test_wasm_i2c_models as runner
+        except ImportError as exc:  # no wasmtime in this environment
+            raise unittest.SkipTest(f'the compiled models need wasmtime ({exc})')
+        cls.models, cls.runner = wasm_i2c_models, runner
+
+    def test_every_compiled_model_has_a_vector_file_and_a_twin(self):
+        for device in self.models.SLAVES:
+            self.assertIn(f'{device}.json', FILES, f'{device} has a vector file')
+            self.assertIn(device, TWINS, f'{device} has a twin to fall back on')
+            self.assertIn(device, self.runner.CHIPS, f'{device} is replayed')
+
+    def test_every_vector_is_replayed_in_both_flavours_on_every_path(self):
+        case = self.runner.TestWasmModelVectors
+        for device in self.models.SLAVES:
+            file = FILES[f'{device}.json']
+            for n in range(1, len(file['vectors']) + 1):
+                for flavour in FLAVOURS:
+                    for path in self.runner.PATHS:
+                        method = (f'test_{device}_vector_{n:02d}_{flavour.replace("-", "_")}'
+                                  f'_{path.replace("-", "_")}')
+                        self.assertTrue(callable(getattr(case, method, None)),
+                                        f'{device}: vector {n} ({flavour}, {path}) is not replayed')
+
+    def test_every_compiled_model_powers_on_as_its_twin(self):
+        clock = lambda: 1_000_000_000_000
+        for device, cls in self.models.SLAVES.items():
+            wasm = self.runner.WASM[device]
+            if device == 'bmp280':
+                model, twin = cls(wasm), BMP280Slave()
+                first = 0
+            else:
+                model = cls(wasm, clock=clock)
+                twin = TWINS[device][0]({}, clock=clock)
+                first = 7   # the time is the host's
+            self.assertEqual(bytes(model.dump_registers()[first:]),
+                             bytes(twin.dump_registers()[first:]), device)
 
 
 if __name__ == '__main__':

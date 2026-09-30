@@ -27,7 +27,7 @@ done
 
 out="$front/public/bus-chips"
 mkdir -p "$out"
-for name in microsd ds1307 ds3231; do
+for name in microsd ds1307 ds3231 bmp280; do
   "$clang" --target=wasm32-unknown-wasip1 -O2 -nostartfiles \
     -Wl,--import-memory -Wl,--export-table -Wl,--no-entry \
     -Wl,--export=chip_setup -Wl,--allow-undefined \
@@ -39,13 +39,22 @@ const { createHash } = require("node:crypto");
 const { existsSync, readFileSync, writeFileSync } = require("node:fs");
 const [here, ...names] = process.argv.slice(1);
 const h = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
-// A header of this folder a model includes (rtc.h) is part of its source:
-// its hash is kept beside the one of the model, so editing it without rebuilding is
-// caught the same way.
-const includes = (n) =>
-  [...readFileSync(`${here}/${n}.c`, "utf-8").matchAll(/^#include "([^"]+)"/gm)]
-    .map((m) => m[1])
-    .filter((f) => existsSync(`${here}/${f}`));
+// A header of this folder a model includes (rtc.h, and i2c_host.h through it)
+// is part of its source: its hash is kept beside the one of the model, so
+// editing it without rebuilding is caught the same way.
+const includes = (n) => {
+  const seen = new Set();
+  const walk = (file) => {
+    for (const m of readFileSync(`${here}/${file}`, "utf-8").matchAll(/^#include "([^"]+)"/gm)) {
+      if (!seen.has(m[1]) && existsSync(`${here}/${m[1]}`)) {
+        seen.add(m[1]);
+        walk(m[1]);
+      }
+    }
+  };
+  walk(`${n}.c`);
+  return [...seen].sort();
+};
 const out = {};
 for (const n of names) {
   out[n] = { sourceSha256: h(`${here}/${n}.c`) };
@@ -53,7 +62,7 @@ for (const n of names) {
   if (inc.length) out[n].includeSha256 = Object.fromEntries(inc.map((f) => [f, h(`${here}/${f}`)]));
 }
 writeFileSync(`${here}/manifest.json`, JSON.stringify(out, null, 2) + "\n");
-' "$here" microsd ds1307 ds3231
+' "$here" microsd ds1307 ds3231 bmp280
 
 # The I2C register models are also compiled into the bundle, as base64: a part
 # attaches synchronously and answers the first START, so its model cannot wait
@@ -71,5 +80,5 @@ const lines = [
   "",
 ];
 writeFileSync(`${here}/i2cModelBytes.generated.ts`, lines.join("\n"));
-' "$here" "$out" ds1307 ds3231
+' "$here" "$out" ds1307 ds3231 bmp280
 echo "built: $(ls "$out"/*.wasm | xargs -n1 basename | tr '\n' ' ')"

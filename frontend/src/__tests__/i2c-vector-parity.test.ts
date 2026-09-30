@@ -12,7 +12,11 @@
  *  - a model's exported rules table is not the `rules` of its file;
  *  - the registers the model tells a mirroring host to ask for
  *    (volatileReads) or to keep its pointer on (pointerStays) are not the
- *    `volatile_reads` and `pointer_stays` of its file.
+ *    `volatile_reads` and `pointer_stays` of its file;
+ *  - a chip that also runs as a compiled model (buses/models/, P5) has no
+ *    test that replays the file against that model in both flavours, or the
+ *    model powers on with registers the file's `power_on` does not say, or
+ *    tells a mirroring host something else than the hand-written copy.
  *
  * test/backend/unit/test_i2c_vector_parity.py is the same gate for the
  * backend twins.
@@ -31,6 +35,13 @@ import {
 } from '../simulation/I2CBusManager';
 import { MPU6050_RULES, VirtualMPU6050 } from '../simulation/parts/ProtocolParts';
 import { i2cTargetOf } from '../simulation/parts/i2cPart';
+import {
+  WasmBMP280,
+  WasmDS1307,
+  WasmDS3231,
+  wasmI2cModelEnabled,
+  wasmI2cModule,
+} from '../simulation/parts/wasmI2cModels';
 
 const VECTOR_DIR = fileURLToPath(new URL('../../../test/fixtures/i2c-vectors/', import.meta.url));
 const TEST_DIR = fileURLToPath(new URL('./', import.meta.url));
@@ -123,6 +134,24 @@ const TAB_MODELS: Record<string, TabModel> = {
   },
 };
 
+interface CompiledModel {
+  /** The model as the part builds it, from the module the bundle carries. */
+  make(module: WebAssembly.Module): I2CDevice;
+  /** The test that replays every vector of the file against it. */
+  replayedBy: string;
+}
+
+/**
+ * The chips that also run as one compiled model in the tab and the worker
+ * (buses/models/, project i2c-model-fidelity-2026-09, P5). A model the part
+ * runs by default has to be here.
+ */
+const COMPILED_MODELS: Record<string, CompiledModel> = {
+  bmp280: { make: (m) => new WasmBMP280(m, 0x76), replayedBy: 'bmp280-vectors-wasm.test.ts' },
+  ds1307: { make: (m) => new WasmDS1307(m, { clock: () => 0 }), replayedBy: 'rtc-vectors-wasm.test.ts' },
+  ds3231: { make: (m) => new WasmDS3231(m, { clock: () => 0 }), replayedBy: 'rtc-vectors-wasm.test.ts' },
+};
+
 interface VectorFile {
   device: string;
   rules: Record<string, unknown>;
@@ -141,6 +170,19 @@ function registersOf(ranges: unknown): number[] {
     const a = parseInt(first, 16);
     return Array.from({ length: parseInt(last, 16) - a + 1 }, (_, i) => a + i);
   });
+}
+
+/** The test loads this file and runs every vector of it in both bus flavours. */
+function expectReplays(testFile: string, device: string): void {
+  const source = readFileSync(TEST_DIR + testFile, 'utf8');
+  // The test loads this very file...
+  expect(source).toMatch(new RegExp(`(loadVectors\\(\\s*'${device}'|['/]${device}\\.json')`));
+  // ...and runs every vector of it in both of the ways a repeated START arrives.
+  expect(source).toMatch(/\.vectors\b/);
+  const bothFlavours =
+    /\bBUS_FLAVOURS\b/.test(source) ||
+    (source.includes("'repeated-start'") && source.includes("'stop-start'"));
+  expect(bothFlavours, 'replays in both bus flavours').toBe(true);
 }
 
 describe('i2c vector parity: the tab models', () => {
@@ -169,17 +211,7 @@ describe('i2c vector parity: the tab models', () => {
 
     describe(name, () => {
       it(`is replayed, every vector in both bus flavours, by ${model.replayedBy}`, () => {
-        const source = readFileSync(TEST_DIR + model.replayedBy, 'utf8');
-        // The test loads this very file...
-        expect(source).toMatch(
-          new RegExp(`(loadVectors\\(\\s*'${file.device}'|['/]${file.device}\\.json')`),
-        );
-        // ...and runs every vector of it in both of the ways a repeated START arrives.
-        expect(source).toMatch(/\.vectors\b/);
-        const bothFlavours =
-          /\bBUS_FLAVOURS\b/.test(source) ||
-          (source.includes("'repeated-start'") && source.includes("'stop-start'"));
-        expect(bothFlavours, 'replays in both bus flavours').toBe(true);
+        expectReplays(model.replayedBy, file.device);
       });
 
       it("holds the model's exported rules table to the file's", () => {
@@ -196,6 +228,55 @@ describe('i2c vector parity: the tab models', () => {
         };
         expect([...(target.volatileReads ?? [])]).toEqual(registersOf(file.rules.volatile_reads));
         expect([...(target.pointerStays ?? [])]).toEqual(registersOf(file.rules.pointer_stays));
+      });
+    });
+  }
+});
+
+describe('i2c vector parity: the compiled models', () => {
+  it('has an entry for every chip the parts run compiled by default', () => {
+    for (const [, file] of FILES) {
+      if (wasmI2cModelEnabled(file.device)) expect(COMPILED_MODELS).toHaveProperty([file.device]);
+    }
+    for (const device of Object.keys(COMPILED_MODELS)) {
+      expect(FILES.map(([, f]) => f.device), `${device} has a vector file`).toContain(device);
+    }
+  });
+
+  for (const [name, file] of FILES) {
+    const compiled = COMPILED_MODELS[file.device];
+    if (!compiled) continue;
+
+    describe(name, () => {
+      it(`is replayed against the compiled model, every vector in both flavours, by ${compiled.replayedBy}`, () => {
+        expectReplays(compiled.replayedBy, file.device);
+      });
+
+      it("powers on with the registers of the file's power_on", () => {
+        const module = wasmI2cModule(file.device);
+        expect(module, 'the bundle carries the model').toBeInstanceOf(WebAssembly.Module);
+        const dump = compiled.make(module!).dumpRegisters!();
+        const powerOn = file.rules.power_on as Record<string, string>;
+        for (const [reg, value] of Object.entries(powerOn)) {
+          const r = parseInt(reg, 16);
+          // The time of a clock chip is the host's, not a power-on value.
+          if (file.device.startsWith('ds') && r < 7) continue;
+          expect(hex(dump[r]), `register ${reg}`).toBe(value);
+        }
+      });
+
+      it('tells a host that mirrors its registers what the hand-written copy tells it', () => {
+        const model = compiled.make(wasmI2cModule(file.device)!);
+        const copy = TAB_MODELS[file.device].make();
+        const said = (dev: I2CDevice) => {
+          const t = i2cTargetOf(dev) as {
+            volatileReads?: readonly number[];
+            pointerStays?: readonly number[];
+            pointerWrapsAfter?: number;
+          };
+          return [[...(t.volatileReads ?? [])], [...(t.pointerStays ?? [])], t.pointerWrapsAfter];
+        };
+        expect(said(model)).toEqual(said(copy));
       });
     });
   }

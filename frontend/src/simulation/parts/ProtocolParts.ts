@@ -40,6 +40,7 @@ import type { GuestClock } from '../buses/types';
 import { buildTimesOfPrograms } from '../firmwareBuildTime';
 import { attachI2cPart, hostClockRecord, parseI2cAddress } from './i2cPart';
 import {
+  WasmBMP280,
   WasmDS1307,
   WasmDS3231,
   wasmI2cModelB64,
@@ -673,13 +674,15 @@ function firmwareBuildTimes(): RtcDateTime[] {
 }
 
 /**
- * The compiled model of a clock chip (buses/models/ds1307.c, ds3231.c) and
- * the bytes the worker's record carries so the worker runs the same one
- * (project i2c-model-fidelity-2026-09, P5). Null when the i2cwasm flag turns
- * it off or it cannot be built: then the part keeps its hand-written model
- * and the worker its Python twin.
+ * The compiled model of an I2C chip (buses/models/ds1307.c, ds3231.c,
+ * bmp280.c) and the bytes the worker's record carries so the worker runs the
+ * same one (project i2c-model-fidelity-2026-09, P5). Null when the i2cwasm
+ * flag turns it off or it cannot be built: then the part keeps its
+ * hand-written model and the worker its Python twin.
  */
-function compiledRtc(name: 'ds1307' | 'ds3231'): { module: WebAssembly.Module; b64: string } | null {
+function compiledModel(
+  name: 'ds1307' | 'ds3231' | 'bmp280',
+): { module: WebAssembly.Module; b64: string } | null {
   if (!wasmI2cModelEnabled(name)) return null;
   const module = wasmI2cModule(name);
   const b64 = wasmI2cModelB64(name);
@@ -693,7 +696,7 @@ function compiledRtc(name: 'ds1307' | 'ds3231'): { module: WebAssembly.Module; b
  */
 PartSimulationRegistry.register('ds1307', {
   attachEvents: (_element, simulator, _getPin, componentId) => {
-    const compiled = compiledRtc('ds1307');
+    const compiled = compiledModel('ds1307');
     const dev = compiled
       ? new WasmDS1307(compiled.module, { buildTimes: firmwareBuildTimes })
       : new VirtualDS1307({ buildTimes: firmwareBuildTimes });
@@ -2544,10 +2547,11 @@ PartSimulationRegistry.register('microsd-card', {
  * The element may expose `temperature` (°C) and `pressure` (hPa) properties
  * that are read on attach and forwarded to the virtual device.
  *
- * The virtual device uses the BMP280 datasheet calibration example to compute
- * raw ADC values for any desired temperature/pressure combination, so Arduino
- * sketches using Adafruit_BMP280 or Bosch's reference driver receive correct
- * compensated readings.
+ * The chip is buses/models/bmp280.c (VirtualBMP280 from I2CBusManager behind
+ * the i2cwasm flag). It uses the BMP280 datasheet calibration example to
+ * compute raw ADC values for any desired temperature/pressure combination, so
+ * Arduino sketches using Adafruit_BMP280 or Bosch's reference driver receive
+ * correct compensated readings.
  */
 PartSimulationRegistry.register('bmp280', {
   attachEvents: (element, simulator, _getPin, componentId) => {
@@ -2567,14 +2571,24 @@ PartSimulationRegistry.register('bmp280', {
         ? parseFloat(el.pressure)
         : sensorControlDefault('bmp280', 'pressure', 1013.25);
 
-    const dev = new VirtualBMP280(addr);
+    // The compiled model of the chip, and its bytes in the worker's record so
+    // the worker runs it too; VirtualBMP280 behind the i2cwasm flag.
+    const compiled = compiledModel('bmp280');
+    const dev = compiled ? new WasmBMP280(compiled.module, addr) : new VirtualBMP280(addr);
     dev.temperatureC = initTemp;
     dev.pressureHPa = initPressure;
     const part = attachI2cPart({
       simulator,
       componentId,
       device: dev,
-      worker: { type: 'bmp280', props: { temperature: initTemp, pressure: initPressure } },
+      worker: {
+        type: 'bmp280',
+        props: {
+          temperature: initTemp,
+          pressure: initPressure,
+          ...(compiled ? { wasmB64: compiled.b64 } : {}),
+        },
+      },
     });
     dev.onAsleepRead = () =>
       part.report(
@@ -2590,6 +2604,7 @@ PartSimulationRegistry.register('bmp280', {
 
     return () => {
       part.dispose();
+      if (dev instanceof WasmBMP280) dev.dispose();
       unregisterSensorUpdate(componentId);
     };
   },
@@ -2616,7 +2631,7 @@ PartSimulationRegistry.register('ds3231', {
 
     // The compiled model of the chip, and its bytes in the worker's record so
     // the worker runs it too; VirtualDS3231 behind the i2cwasm flag.
-    const compiled = compiledRtc('ds3231');
+    const compiled = compiledModel('ds3231');
     const dev = compiled
       ? new WasmDS3231(compiled.module, { buildTimes: firmwareBuildTimes })
       : new VirtualDS3231({ buildTimes: firmwareBuildTimes });

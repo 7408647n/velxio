@@ -119,6 +119,7 @@ try:
         I2CWriteSink as _I2CWriteSink,
         find_build_times as _find_build_times,
         rtc_slave as _rtc_slave,
+        bmp280_slave as _bmp280_slave,
     )
 except ImportError:
     # Fallback: direct import when running from backend/ directory as subprocess
@@ -137,6 +138,7 @@ except ImportError:
     _I2CWriteSink = _mod.I2CWriteSink  # type: ignore[assignment]
     _find_build_times = _mod.find_build_times  # type: ignore[assignment]
     _rtc_slave = _mod.rtc_slave  # type: ignore[assignment]
+    _bmp280_slave = _mod.bmp280_slave  # type: ignore[assignment]
 
 # The table those slaves answer from, by (controller, address) and removed by
 # identity (project board-buses-2026-09, F5). Same fallback dance.
@@ -3102,10 +3104,10 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                 sensor_data['slave'] = slave
             elif sensor_type == 'bmp280':
                 i2c_addr = int(s.get('addr', 0x76))
-                slave = _BMP280Slave(i2c_addr)
-                # As for the MPU-6050: the record carries where the panel's
-                # sliders are.
-                slave.update(**s)
+                # The part's compiled model when the record carries it
+                # (buses/models/bmp280.c), the twin otherwise. As for the
+                # MPU-6050: the record carries where the panel's sliders are.
+                slave = _bmp280_slave(s)
                 _i2c_add(gpio, s, slave, i2c_addr)
                 sensor_data['i2c_addr'] = i2c_addr
                 sensor_data['slave'] = slave
@@ -3444,11 +3446,10 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                     sensor_data['slave'] = slave
                 elif sensor_type == 'bmp280':
                     i2c_addr = int(cmd.get('addr', 0x76))
-                    slave = _BMP280Slave(i2c_addr)
                     # A part attached while the board runs starts from its
                     # record too. It started from the twin's own values and
                     # took the panel's at the first slider move.
-                    slave.update(**cmd)
+                    slave = _bmp280_slave(cmd)
                     _i2c_add(gpio, cmd, slave, i2c_addr)
                     sensor_data['i2c_addr'] = i2c_addr
                     sensor_data['slave'] = slave

@@ -67,18 +67,19 @@ interface Chip {
 
 const chip = (
   name: Chip['name'],
+  file: BusVectorFile,
   make: Chip['make'],
   wrapsAfter: number,
   rules: Chip['rules'],
 ): Chip => {
   const wasm = wasmOf(name);
   const module = new WebAssembly.Module(wasm);
-  return { name, file: loadVectors(name), wasm, module, make, wrapsAfter, rules };
+  return { name, file, wasm, module, make, wrapsAfter, rules };
 };
 
 const CHIPS: Chip[] = [
-  chip('ds1307', (m, o) => new WasmDS1307(m, o), 0x3f, DS1307_RULES),
-  chip('ds3231', (m, o) => new WasmDS3231(m, o), 0x12, DS3231_RULES),
+  chip('ds1307', loadVectors('ds1307'), (m, o) => new WasmDS1307(m, o), 0x3f, DS1307_RULES),
+  chip('ds3231', loadVectors('ds3231'), (m, o) => new WasmDS3231(m, o), 0x12, DS3231_RULES),
 ];
 
 function powerOn(c: Chip, vector: BusVector): { dev: Rtc; clock: VectorClock } {
@@ -129,7 +130,10 @@ for (const c of CHIPS) {
       const manifest = JSON.parse(readFileSync(models('manifest.json'), 'utf-8'));
       const sha = (p: string) => createHash('sha256').update(readFileSync(models(p))).digest('hex');
       expect(manifest[c.name].sourceSha256).toBe(sha(`${c.name}.c`));
-      expect(manifest[c.name].includeSha256).toEqual({ 'rtc.h': sha('rtc.h') });
+      expect(manifest[c.name].includeSha256).toEqual({
+        'i2c_host.h': sha('i2c_host.h'),
+        'rtc.h': sha('rtc.h'),
+      });
     });
 
     it('is the one the bundle carries', () => {
