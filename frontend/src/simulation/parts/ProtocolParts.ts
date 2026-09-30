@@ -653,10 +653,14 @@ export const MPU6050_RULES = {
    * and 0x06-0x0B are not in its map (RM-MPU-9250A-00 rev 1.4, sections 3
    * and 4.39); the factory trims are loaded there, as Kris Winer's
    * calibrateMPU9250() reads them back. Its FIFO holds 512 bytes (PS
-   * section 3.1, RM 4.17). Its AK8963 magnetometer is not modelled.
+   * section 3.1, RM 4.17). It powers on awake: PWR_MGMT_1 resets to 0x01,
+   * CLKSEL on the auto-selected clock and SLEEP clear (RM rev 1.4 section 3),
+   * where the MPU-6050 resets to 0x40; decision D1 follows each die's map.
+   * Its AK8963 magnetometer is not modelled.
    */
   variants: {
     mpu9250: {
+      power_on: { 0x6b: 0x01 },
       who_am_i: 0x71,
       temp_lsb_per_c: 333.87,
       temp_offset_c: 21,
@@ -963,6 +967,8 @@ export class VirtualMPU6050 implements I2CDevice {
 
   /** What the die changes of the MPU-6050's map (MPU6050_RULES.variants). */
   private readonly die: {
+    /** Power-on values of the die that differ from the MPU-6050's. */
+    power_on: Readonly<Record<number, number>>;
     who_am_i: number;
     temp_lsb_per_c: number;
     temp_offset_c: number;
@@ -975,6 +981,7 @@ export class VirtualMPU6050 implements I2CDevice {
     this.die =
       variant === 'mpu6050'
         ? {
+            power_on: {},
             who_am_i: MPU6050_RULES.power_on[0x75],
             temp_lsb_per_c: MPU6050_RULES.temp_lsb_per_c,
             temp_offset_c: MPU6050_RULES.temp_offset_c,
@@ -1302,6 +1309,7 @@ export class VirtualMPU6050 implements I2CDevice {
     // whose map has none at the MPU-6050's reads 0x00 there.
     for (const at of MPU6050_RULES.accel_offs_reg) this.regs.fill(0, at, at + 2);
     this.die.accel_offs_reg.forEach((at, axis) => this.regs.set(MPU_FACTORY_TRIM[axis], at));
+    for (const [reg, value] of Object.entries(this.die.power_on)) this.regs[Number(reg)] = value;
     this.regs[MPU_WHO_AM_I] = this.die.who_am_i;
     this.held.fill(0);
     this.fifoEmpty();

@@ -94,9 +94,12 @@ MPU6050_RULES = {
     # and 0x06-0x0B are not in its map (RM-MPU-9250A-00 rev 1.4, sections 3
     # and 4.39); the factory trims are loaded there, as Kris Winer's
     # calibrateMPU9250() reads them back. Its FIFO holds 512 bytes (PS
-    # section 3.1, RM 4.17). Its AK8963 magnetometer is not modelled.
+    # section 3.1, RM 4.17). It powers on awake: PWR_MGMT_1 resets to 0x01,
+    # CLKSEL on the auto-selected clock and SLEEP clear (RM rev 1.4 section
+    # 3), where the MPU-6050 resets to 0x40; decision D1 follows each die's
+    # map. Its AK8963 magnetometer is not modelled.
     'variants': {
-        'mpu9250': {'who_am_i': 0x71, 'temp_lsb_per_c': 333.87, 'temp_offset_c': 21,
+        'mpu9250': {'power_on': {0x6B: 0x01}, 'who_am_i': 0x71, 'temp_lsb_per_c': 333.87, 'temp_offset_c': 21,
                     'accel_offs_reg': (0x77, 0x7A, 0x7D), 'fifo_size': 512},
     },
     # Bits a read of the register takes with it: "each bit will clear after
@@ -333,6 +336,7 @@ class MPU6050Slave:
         self.addr       = addr
         # What the die changes of the MPU-6050's map.
         self._die = MPU6050_RULES['variants'].get(parse_variant(variant)) or {
+            'power_on': {},
             'who_am_i': MPU6050_RULES['power_on'][0x75],
             'temp_lsb_per_c': MPU6050_RULES['temp_lsb_per_c'],
             'temp_offset_c': MPU6050_RULES['temp_offset_c'],
@@ -685,6 +689,8 @@ class MPU6050Slave:
             self.regs[at:at + 2] = bytes(2)
         for at, trim in zip(self._die['accel_offs_reg'], _MPU_FACTORY_TRIM):
             self.regs[at:at + 2] = bytes(trim)
+        for reg, value in self._die['power_on'].items():
+            self.regs[reg] = value
         self.regs[0x75] = self._die['who_am_i']
         self._held = bytes(_MPU_SAMPLE_SIZE)
         self._fifo = bytearray()

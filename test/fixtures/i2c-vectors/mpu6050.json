@@ -14,7 +14,7 @@
     "accel_offs_reg": [6, 8, 10],
     "temp_lsb_per_c": 340,
     "temp_offset_c": 36.53,
-    "variants": { "mpu9250": { "who_am_i": 113, "temp_lsb_per_c": 333.87, "temp_offset_c": 21, "accel_offs_reg": [119, 122, 125], "fifo_size": 512 } },
+    "variants": { "mpu9250": { "power_on": { "6B": "01" }, "who_am_i": 113, "temp_lsb_per_c": 333.87, "temp_offset_c": 21, "accel_offs_reg": [119, 122, 125], "fifo_size": 512 } },
     "clear_on_read": { "3A": "FF" },
     "gyro_rate_hz": { "dlpf_off": 8000, "dlpf_on": 1000 },
     "cycle_rate_hz": [1.25, 5, 20, 40],
@@ -684,20 +684,21 @@
       ]
     },
     {
-      "name": "MPU-9250: WHO_AM_I reads 0x71 and the temperature is (T - 21) * 333.87, through a reset",
-      "spec": "RM-MPU-9250A-00 rev 1.6 sections 4.22 (TEMP_OUT) and 4.39 (WHO_AM_I 0x71); PS-MPU-9250A-01 section 3.4.2 (333.87 LSB per deg C, 21 deg C offset)",
+      "name": "MPU-9250: WHO_AM_I reads 0x71, PWR_MGMT_1 powers on and resets to 0x01 (awake, auto clock), the temperature is (T - 21) * 333.87",
+      "spec": "RM-MPU-9250A-00 rev 1.4 section 3 (reset value 0x00 but register 107, 0x01, and 117, 0x71); rev 1.6 sections 4.22 (TEMP_OUT) and 4.39 (WHO_AM_I 0x71); PS-MPU-9250A-01 section 3.4.2 (333.87 LSB per deg C, 21 deg C offset)",
       "variant": "mpu9250",
       "steps": [
         { "op": "read", "reg": "75", "n": 1, "expect": "71" },
-        { "op": "read", "reg": "6B", "n": 1, "expect": "40" },
-        { "op": "write", "data": "6B 00" },
+        { "op": "read", "reg": "6B", "n": 1, "expect": "01" },
         { "op": "read", "reg": "3F", "n": 4, "expect": "40 00 03 EA" },
         { "op": "inputs", "values": { "temp": -40 } },
         { "op": "read", "reg": "41", "n": 2, "expect": "B0 72" },
         { "op": "write", "data": "1C 18" },
         { "op": "read", "reg": "3F", "n": 2, "expect": "08 00" },
-        { "op": "write", "data": "6B 80" },
-        { "op": "read", "reg": "75", "n": 1, "expect": "71" }
+        { "op": "write", "data": "6B C0" },
+        { "op": "read", "reg": "6B", "n": 1, "expect": "01" },
+        { "op": "read", "reg": "75", "n": 1, "expect": "71" },
+        { "op": "read", "reg": "3F", "n": 2, "expect": "40 00" }
       ]
     },
     {

@@ -701,6 +701,12 @@ describe('mpu6050 — I2C IMU', () => {
     const heard: BusDiagnostic[] = [];
     const off = busRegistry.onDiagnostic((d) => heard.push(d));
     expect(rig.readReg(0x68, 0x75, 1)).toEqual([0x71]);
+    // The MPU-9250 powers on awake (PWR_MGMT_1 = 0x01): no note until the
+    // sketch puts it to sleep.
+    expect(rig.readReg(0x68, 0x6b, 1)).toEqual([0x01]);
+    rig.readReg(0x68, 0x3b, 2);
+    expect(heard).toEqual([]);
+    rig.write(0x68, [0x6b, 0x40]);
     rig.readReg(0x68, 0x3b, 2);
     off();
     expect(heard.map((d) => d.message.split(' ')[0])).toEqual(['MPU9250']);
