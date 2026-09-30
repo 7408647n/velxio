@@ -100,7 +100,7 @@ export interface I2cPartWorkerRecord {
   /**
    * The worker's copy only ACKs and echoes what the guest wrote, and the part
    * in the tab draws from those bytes (a display, an expander). Called with
-   * every write phase the worker echoes for this address.
+   * every write phase the worker echoes for this part.
    */
   echo?: (data: number[]) => void;
 }
@@ -154,8 +154,8 @@ export function attachI2cPart(opts: I2cPartOptions): I2cPartHandle {
     registerSensor?: (type: string, pin: number, props: Record<string, unknown>) => unknown;
     updateSensor?: (pin: number, props: Record<string, unknown>) => void;
     unregisterSensor?: (pin: number) => void;
-    addI2CTransactionListener?: (addr: number, fn: (data: number[]) => void) => void;
-    removeI2CTransactionListener?: (addr: number) => void;
+    addI2CTransactionListener?: (addr: number, fn: (data: number[]) => void, owner?: string) => void;
+    removeI2CTransactionListener?: (addr: number, owner?: string) => void;
   } | null;
   const owner = opts.componentId ?? '';
   const address = device.address & 0x7f;
@@ -182,7 +182,9 @@ export function attachI2cPart(opts: I2cPartOptions): I2cPartHandle {
     // `owner` is how the worker finds this record in the bus map the tab
     // sends, which says which controller the part's SDA is on.
     sim!.registerSensor!(worker.type, workerPin, { ...(worker.props ?? {}), addr: address, owner });
-    if (worker.echo) sim!.addI2CTransactionListener?.(address, worker.echo);
+    // Under its own id: the echo names the record it came from, so two parts
+    // at one address each draw their own stream.
+    if (worker.echo) sim!.addI2CTransactionListener?.(address, worker.echo, owner);
   }
 
   return {
@@ -197,7 +199,7 @@ export function attachI2cPart(opts: I2cPartOptions): I2cPartHandle {
       if (workerPin === null) return;
       try {
         sim!.unregisterSensor?.(workerPin);
-        if (worker?.echo) sim!.removeI2CTransactionListener?.(address);
+        if (worker?.echo) sim!.removeI2CTransactionListener?.(address, owner);
       } catch {
         /* the bridge is gone with its board */
       }

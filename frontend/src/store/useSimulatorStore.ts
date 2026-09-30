@@ -93,6 +93,7 @@ import {
 } from '../simulation/buses';
 import { RemoteI2cLane } from '../simulation/buses/remoteI2c';
 import { RemoteUartLane } from '../simulation/buses/remoteUart';
+import { I2cEchoListeners } from '../simulation/buses/i2cEchoListeners';
 import { remotePullLane, type RemotePullLane } from '../simulation/buses/remotePulls';
 import { i2cPartWorkerPin, parseI2cAddress } from '../simulation/parts/i2cPart';
 import {
@@ -854,17 +855,18 @@ export class Esp32BridgeShim {
   }
 
   // ── I2C write-only device relay (SSD1306, PCF8574) ───────────────────────
-  private _i2cTransactionListeners = new Map<number, (data: number[]) => void>();
+  private _i2cTransactionListeners = new I2cEchoListeners();
 
-  addI2CTransactionListener(addr: number, fn: (data: number[]) => void): void {
-    this._i2cTransactionListeners.set(addr, fn);
-    this.bridge.onI2cTransaction = (a: number, data: number[]) => {
-      this._i2cTransactionListeners.get(a)?.(data);
+  /** `owner` is the part's component id, which the worker's echo names. */
+  addI2CTransactionListener(addr: number, fn: (data: number[]) => void, owner?: string): void {
+    this._i2cTransactionListeners.add(addr, fn, owner);
+    this.bridge.onI2cTransaction = (a: number, data: number[], o?: string) => {
+      this._i2cTransactionListeners.deliver(a, data, o);
     };
   }
 
-  removeI2CTransactionListener(addr: number): void {
-    this._i2cTransactionListeners.delete(addr);
+  removeI2CTransactionListener(addr: number, owner?: string): void {
+    this._i2cTransactionListeners.remove(addr, owner);
     if (this._i2cTransactionListeners.size === 0) {
       this.bridge.onI2cTransaction = null;
     }
@@ -1054,7 +1056,7 @@ class Stm32BridgeShim {
   /** Levels the circuit applies; the worker only reports the ones it drives. */
   private externalScope = new ExternalPinScopeFeed(() => performance.now());
   private bridge: Stm32Bridge;
-  private _i2cTransactionListeners = new Map<number, (data: number[]) => void>();
+  private _i2cTransactionListeners = new I2cEchoListeners();
 
   /** The board's SPI lane: the STM32 runs in a backend QEMU worker, so its
    *  controller port is fed by the worker's batches and its responders travel
@@ -1253,14 +1255,14 @@ class Stm32BridgeShim {
   }
 
   // ── I2C write-only device relay (SSD1306, PCF8574) ────────────────────────
-  addI2CTransactionListener(addr: number, fn: (data: number[]) => void): void {
-    this._i2cTransactionListeners.set(addr, fn);
-    this.bridge.onI2cTransaction = (a: number, data: number[]) => {
-      this._i2cTransactionListeners.get(a)?.(data);
+  addI2CTransactionListener(addr: number, fn: (data: number[]) => void, owner?: string): void {
+    this._i2cTransactionListeners.add(addr, fn, owner);
+    this.bridge.onI2cTransaction = (a: number, data: number[], o?: string) => {
+      this._i2cTransactionListeners.deliver(a, data, o);
     };
   }
-  removeI2CTransactionListener(addr: number): void {
-    this._i2cTransactionListeners.delete(addr);
+  removeI2CTransactionListener(addr: number, owner?: string): void {
+    this._i2cTransactionListeners.remove(addr, owner);
     if (this._i2cTransactionListeners.size === 0) {
       this.bridge.onI2cTransaction = null;
     }
