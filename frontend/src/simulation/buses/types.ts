@@ -627,6 +627,7 @@ export type BusDiagnosticCode =
   | 'i2c-address-conflict'
   | 'i2c-wiring'
   | 'i2c-target-asleep'
+  | 'i2c-target-unmodelled'
   | 'uart-baud-mismatch'
   | 'uart-tx-contention'
   | 'uart-wiring'

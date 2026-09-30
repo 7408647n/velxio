@@ -76,6 +76,16 @@ MPU6050_RULES = {
     # Bytes the FIFO holds; past that the oldest go and FIFO_OFLOW_INT is set
     # (4.31, PS 7.17).
     'fifo_size': 1024,
+    # The DMP memory behind BANK_SEL (0x6D), MEM_START_ADDR (0x6E) and
+    # MEM_R_W (0x6F): 32 banks of 256 bytes, the bank field of BANK_SEL being
+    # 5 bits (i2cdevlib setMemoryBank, InvenSense eMPL mpu_write_mem).
+    # Undocumented in the register map.
+    'dmp_banks': 32,
+    # DMP memory that is not zero at power-on, by bank * 256 + address: the
+    # hardware revision i2cdevlib's dmpInitialize() reads at user bank 16,
+    # byte 6. Parts report 0xA5 or 0x4D there (jrowberg/i2cdevlib issues 246
+    # and 371); 0xA5 is the one in its MotionApps comments.
+    'dmp_rom': {0x1006: 0xA5},
 }
 
 # Motion and temperature at the chip, under the names of the panel's sliders
@@ -121,6 +131,10 @@ _MPU_FIFO_R_W       = 0x74
 # USER_CTRL: the FIFO takes samples, and the trigger that empties it (4.27).
 _MPU_USER_FIFO_EN   = 0x40
 _MPU_FIFO_RESET     = 0x04
+# The DMP memory port: bank, address in the bank, and the byte there.
+_MPU_BANK_SEL       = 0x6D
+_MPU_MEM_START_ADDR = 0x6E
+_MPU_MEM_R_W        = 0x6F
 # ACCEL_XOUT_H to GYRO_ZOUT_L: three axes, the die temperature, three axes.
 _MPU_SAMPLE_FIRST   = 0x3B
 _MPU_SAMPLE_LAST    = 0x48
@@ -141,6 +155,9 @@ for _reg, _mask in MPU6050_RULES['self_clearing'].items():
 # the FIFO, one byte per access (4.31).
 _MPU_POINTER_STAYS = bytearray(256)
 _MPU_POINTER_STAYS[_MPU_FIFO_R_W] = 1
+# MEM_R_W moves the memory address instead, so a DMP upload bursts into the
+# memory and not over FIFO_COUNT and WHO_AM_I behind it.
+_MPU_POINTER_STAYS[_MPU_MEM_R_W] = 1
 _MPU_CLEAR_ON_READ = bytearray(256)
 for _reg, _mask in MPU6050_RULES['clear_on_read'].items():
     _MPU_CLEAR_ON_READ[_reg] = _mask
@@ -198,6 +215,11 @@ class MPU6050Slave:
         FIFO_EN selects into a 1024-byte FIFO, in register order. FIFO_COUNT
         is latched when its high byte is read, and FIFO_R_W pops a byte per
         read without moving the pointer (an empty FIFO repeats the last one).
+      - BANK_SEL, MEM_START_ADDR and MEM_R_W reach 32 banks of DMP memory,
+        the address advancing within its bank and the pointer staying on
+        MEM_R_W, with the ROM byte i2cdevlib reads as the hardware revision.
+        The DMP itself does not run: an image written there produces no
+        packets.
     """
 
     def __init__(self, addr: int = 0x68, now_ns=None):
@@ -233,6 +255,7 @@ class MPU6050Slave:
         self._pulse_end_ns = None # where the INT pulse of the last sample ends
         self._fifo = bytearray()
         self._fifo_last = 0       # what an empty FIFO answers: the byte read last
+        self._dmp_mem = bytearray(MPU6050_RULES['dmp_banks'] * 256)
         # The panel moves on the worker's command thread and QEMU's thread
         # runs the bus: the samples due are taken of the world before a move,
         # under one lock with the bus events.
@@ -517,7 +540,18 @@ class MPU6050Slave:
         self._last_awake = bytes(_MPU_SAMPLE_SIZE)
         self._fifo = bytearray()
         self._fifo_last = 0
+        self._dmp_mem[:] = bytes(len(self._dmp_mem))
+        for at, value in MPU6050_RULES['dmp_rom'].items():
+            self._dmp_mem[at] = value
         self._restart_sampling()
+
+    def _dmp_cell(self) -> int:
+        """Where MEM_R_W reads or writes, and the address moved on past it.
+        The address wraps within its bank: eMPL refuses to cross one and
+        i2cdevlib selects the next bank itself."""
+        at = ((self.regs[_MPU_BANK_SEL] & 0x1F) << 8) | self.regs[_MPU_MEM_START_ADDR]
+        self.regs[_MPU_MEM_START_ADDR] = (self.regs[_MPU_MEM_START_ADDR] + 1) & 0xFF
+        return at % len(self._dmp_mem)
 
     def _read_register(self, reg: int) -> int:
         if reg == _MPU_FIFO_COUNT_H:
@@ -526,6 +560,8 @@ class MPU6050Slave:
             self.regs[_MPU_FIFO_COUNT_L] = len(self._fifo) & 0xFF
         if reg == _MPU_FIFO_R_W:
             return self._fifo_pop()
+        if reg == _MPU_MEM_R_W:
+            return self._dmp_mem[self._dmp_cell()]
         if _MPU_SAMPLE_FIRST <= reg <= _MPU_SAMPLE_LAST:
             return self._sample[reg - _MPU_SAMPLE_FIRST]
         return self.regs[reg]
@@ -549,6 +585,9 @@ class MPU6050Slave:
             self._fifo = bytearray()
         if reg == _MPU_FIFO_R_W:
             self._fifo_push(value)
+            return
+        if reg == _MPU_MEM_R_W:
+            self._dmp_mem[self._dmp_cell()] = value
             return
         stored = value & ~_MPU_SELF_CLEARING[reg] & 0xFF
         # The chip sampled until now, so what it holds asleep is this instant.

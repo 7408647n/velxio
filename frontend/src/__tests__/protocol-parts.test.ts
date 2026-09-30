@@ -1361,6 +1361,41 @@ describe('mpu6050 — the INT pin on the board', () => {
   });
 });
 
+describe('mpu6050 — a DMP image is uploaded', () => {
+  // The memory port works, the DMP does not run: a DMP sketch gets no
+  // packets, and its monitor says why once per run.
+  const listeners: Array<() => void> = [];
+  afterEach(() => {
+    for (const off of listeners.splice(0)) off();
+  });
+
+  it('tells the monitor once, and again on the next run', () => {
+    const rig = i2cRig({ imu: HW_I2C_PINS });
+    attachImu();
+    const heard: BusDiagnostic[] = [];
+    listeners.push(
+      busRegistry.onDiagnostic((d) => {
+        if (d.code === 'i2c-target-unmodelled') heard.push(d);
+      }),
+    );
+    // Reading the revision byte is not an upload.
+    rig.write(0x68, [0x6d, 0x70]);
+    rig.write(0x68, [0x6e, 0x06]);
+    expect(rig.readReg(0x68, 0x6f, 1)).toEqual([0xa5]);
+    expect(heard).toEqual([]);
+    rig.write(0x68, [0x6d, 0x00, 0x00]);
+    rig.write(0x68, [0x6f, 0xfb, 0x00, 0x00, 0x3e]);
+    rig.write(0x68, [0x6f, 0x00, 0x03]);
+    expect(heard.map((d) => [d.boardId, d.owners, d.message.split(':')[0]])).toEqual([
+      [RIG_BOARD, ['imu'], 'MPU6050 0x68'],
+    ]);
+    expect(heard[0].message).toMatch(/does not run the DMP/);
+    rig.reset();
+    rig.write(0x68, [0x6f, 0x01]);
+    expect(heard).toHaveLength(2);
+  });
+});
+
 describe('mpu6050 — read while asleep', () => {
   const NOTE = 'MPU6050 0x68 is in sleep mode: write 0x00 to PWR_MGMT_1 (0x6B) to wake it';
 

@@ -14,17 +14,21 @@
     "clear_on_read": { "3A": "FF" },
     "gyro_rate_hz": { "dlpf_off": 8000, "dlpf_on": 1000 },
     "int_pulse_us": 50,
-    "fifo_size": 1024
+    "fifo_size": 1024,
+    "dmp_banks": 32,
+    "dmp_rom": { "1006": "A5" }
   },
   "inputs": { "accelX": 0, "accelY": 0, "accelZ": 1, "gyroX": 0, "gyroY": 0, "gyroZ": 0, "temp": 24 },
   "vectors": [
     {
       "name": "power-on: PWR_MGMT_1 reads 0x40, WHO_AM_I reads 0x68, every other register reads 0x00",
-      "spec": "RM section 3: reset value 0x00 for all registers but 107 (0x40) and 117 (0x68). FIFO_R_W (0x74) is read on its own: a read there pops the FIFO and leaves the pointer where it is (section 4.31)",
+      "spec": "RM section 3: reset value 0x00 for all registers but 107 (0x40) and 117 (0x68). MEM_R_W (0x6F) and FIFO_R_W (0x74) are read on their own: a read there takes the next byte of the DMP memory or the FIFO and leaves the pointer where it is (section 4.31; i2cdevlib readMemoryBlock)",
       "steps": [
         { "op": "read", "reg": "6B", "n": 1, "expect": "40" },
         { "op": "read", "reg": "75", "n": 1, "expect": "68" },
-        { "op": "read", "reg": "00", "n": 116, "expect": "00*107 40 00*8" },
+        { "op": "read", "reg": "00", "n": 111, "expect": "00*107 40 00*3" },
+        { "op": "read", "reg": "6F", "n": 1, "expect": "00" },
+        { "op": "read", "reg": "70", "n": 4, "expect": "00*4" },
         { "op": "read", "reg": "74", "n": 1, "expect": "00" },
         { "op": "read", "reg": "75", "n": 139, "expect": "68 00*138" }
       ]
@@ -567,6 +571,37 @@
         { "op": "write", "data": "23 00" },
         { "op": "read", "reg": "72", "n": 2, "expect": "00 0C" },
         { "op": "read", "reg": "74", "n": 12, "expect": "00 00 00 00 40 00 00 00 00 00 00 00" }
+      ]
+    },
+    {
+      "name": "DMP memory port: BANK_SEL and MEM_START_ADDR select a byte of 32 x 256, MEM_R_W reads and writes it without moving the pointer, the revision byte i2cdevlib reads is there",
+      "spec": "Undocumented in the register map; the port as i2cdevlib (MPU6050.cpp setMemoryBank, setMemoryStartAddress, readMemoryBlock, writeMemoryBlock with its 16-byte chunks and read-back verify) and InvenSense eMPL (inv_mpu.c mpu_write_mem: BANK_SEL and MEM_START_ADDR as one burst, no bank crossing) drive it. The hardware revision at user bank 16 byte 6 as parts report it (jrowberg/i2cdevlib issues 246, 371)",
+      "steps": [
+        { "op": "write", "data": "6D 70" },
+        { "op": "write", "data": "6E 06" },
+        { "op": "read", "reg": "6F", "n": 1, "expect": "A5" },
+        { "op": "read", "reg": "6E", "n": 1, "expect": "07" },
+        { "op": "write", "data": "6D 00" },
+        { "op": "write", "data": "6E 00" },
+        { "op": "write", "data": "6F 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F 10" },
+        { "op": "read", "reg": "70", "n": 6, "expect": "00*6" },
+        { "op": "read", "reg": "75", "n": 1, "expect": "68" },
+        { "op": "write", "data": "6E 00" },
+        { "op": "read", "reg": "6F", "n": 16, "expect": "01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F 10" },
+        { "op": "read", "reg": "6E", "n": 1, "expect": "10" },
+        { "op": "write", "data": "6D 01 F0" },
+        { "op": "write", "data": "6F AA AA AA AA AA AA AA AA AA AA AA AA AA AA AA AA BB BB BB BB" },
+        { "op": "write", "data": "6D 01 FE" },
+        { "op": "read", "reg": "6F", "n": 2, "expect": "AA AA" },
+        { "op": "write", "data": "6D 01 00" },
+        { "op": "read", "reg": "6F", "n": 5, "expect": "BB BB BB BB 00" },
+        { "op": "write", "data": "6D 02 00" },
+        { "op": "read", "reg": "6F", "n": 1, "expect": "00" },
+        { "op": "write", "data": "6B 80" },
+        { "op": "write", "data": "6D 01 00" },
+        { "op": "read", "reg": "6F", "n": 4, "expect": "00*4" },
+        { "op": "write", "data": "6D 10 06" },
+        { "op": "read", "reg": "6F", "n": 1, "expect": "A5" }
       ]
     }
   ]

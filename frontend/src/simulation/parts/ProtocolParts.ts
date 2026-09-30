@@ -559,6 +559,20 @@ export const MPU6050_RULES = {
   int_pulse_us: 50,
   /** Bytes the FIFO holds; past that the oldest go and FIFO_OFLOW_INT is set (4.31, PS 7.17). */
   fifo_size: 1024,
+  /**
+   * The DMP memory behind BANK_SEL (0x6D), MEM_START_ADDR (0x6E) and MEM_R_W
+   * (0x6F): 32 banks of 256 bytes, the bank field of BANK_SEL being 5 bits
+   * (i2cdevlib setMemoryBank, InvenSense eMPL mpu_write_mem). Undocumented
+   * in the register map.
+   */
+  dmp_banks: 32,
+  /**
+   * DMP memory that is not zero at power-on, by bank * 256 + address: the
+   * hardware revision i2cdevlib's dmpInitialize() reads at user bank 16,
+   * byte 6. Parts report 0xA5 or 0x4D there (jrowberg/i2cdevlib issues 246
+   * and 371); 0xA5 is the one in its MotionApps comments.
+   */
+  dmp_rom: { 0x1006: 0xa5 },
 } as const;
 
 /** Motion and temperature at the chip, under the names of the panel's sliders. */
@@ -623,6 +637,10 @@ const MPU_FIFO_R_W = 0x74;
 /** USER_CTRL: the FIFO takes samples, and the trigger that empties it (4.27). */
 const MPU_USER_FIFO_EN = 0x40;
 const MPU_FIFO_RESET = 0x04;
+/** The DMP memory port: bank, address in the bank, and the byte there. */
+const MPU_BANK_SEL = 0x6d;
+const MPU_MEM_START_ADDR = 0x6e;
+const MPU_MEM_R_W = 0x6f;
 /** ACCEL_XOUT_H to GYRO_ZOUT_L: three axes, the die temperature, three axes. */
 const MPU_SAMPLE_FIRST = 0x3b;
 const MPU_SAMPLE_LAST = 0x48;
@@ -644,6 +662,9 @@ for (const [reg, mask] of Object.entries(MPU6050_RULES.self_clearing)) {
  */
 const MPU_POINTER_STAYS = new Uint8Array(256);
 MPU_POINTER_STAYS[MPU_FIFO_R_W] = 1;
+// MEM_R_W moves the memory address instead, so a DMP upload bursts into the
+// memory and not over FIFO_COUNT and WHO_AM_I behind it.
+MPU_POINTER_STAYS[MPU_MEM_R_W] = 1;
 const MPU_CLEAR_ON_READ = new Uint8Array(256);
 for (const [reg, mask] of Object.entries(MPU6050_RULES.clear_on_read)) {
   MPU_CLEAR_ON_READ[Number(reg)] = mask;
@@ -693,11 +714,18 @@ function mpuCounts(value: number): number {
  *    moving the pointer (an empty FIFO repeats the last one), so the FIFO
  *    calibrations of FastIMU and Kris Winer average real packets instead of
  *    dividing by a count of zero.
+ *  - BANK_SEL, MEM_START_ADDR and MEM_R_W reach 32 banks of DMP memory, the
+ *    address advancing within its bank and the pointer staying on MEM_R_W,
+ *    with the ROM byte i2cdevlib reads as the hardware revision. The DMP
+ *    itself does not run: an image written there produces no packets, and
+ *    the monitor is told once per run (onDmpUpload).
  */
 export class VirtualMPU6050 implements I2CDevice {
   address: number;
   /** The sample block was read while the chip sleeps, for the first time in this run. */
   onAsleepRead: (() => void) | null = null;
+  /** The sketch wrote to the DMP memory, for the first time in this run. */
+  onDmpUpload: (() => void) | null = null;
   /**
    * What the INT pad does, or the time it moves next, may have changed: the
    * host that drives the pin reads intPad() and intWakeNs() again.
@@ -741,6 +769,8 @@ export class VirtualMPU6050 implements I2CDevice {
   private fifoCount = 0;
   /** What an empty FIFO answers: the byte read last (4.31). */
   private fifoLast = 0;
+  private readonly dmpMem = new Uint8Array(MPU6050_RULES.dmp_banks * 256);
+  private dmpUploadSaid = false;
 
   constructor(address: number) {
     this.address = address;
@@ -835,6 +865,7 @@ export class VirtualMPU6050 implements I2CDevice {
    */
   boardReset(): void {
     this.asleepReadSaid = false;
+    this.dmpUploadSaid = false;
     this.restartSampling();
     this.onIntChange?.();
   }
@@ -1050,7 +1081,20 @@ export class VirtualMPU6050 implements I2CDevice {
     this.lastAwake.fill(0);
     this.fifoEmpty();
     this.fifoLast = 0;
+    this.dmpMem.fill(0);
+    for (const [at, value] of Object.entries(MPU6050_RULES.dmp_rom)) this.dmpMem[Number(at)] = value;
     this.restartSampling();
+  }
+
+  /**
+   * Where MEM_R_W reads or writes, and the address moved on past it. The
+   * address wraps within its bank: eMPL refuses to cross one and i2cdevlib
+   * selects the next bank itself.
+   */
+  private dmpCell(): number {
+    const at = ((this.regs[MPU_BANK_SEL] & 0x1f) << 8) | this.regs[MPU_MEM_START_ADDR];
+    this.regs[MPU_MEM_START_ADDR] = (this.regs[MPU_MEM_START_ADDR] + 1) & 0xff;
+    return at % this.dmpMem.length;
   }
 
   private readRegister(reg: number): number {
@@ -1060,6 +1104,7 @@ export class VirtualMPU6050 implements I2CDevice {
       this.regs[MPU_FIFO_COUNT_L] = this.fifoCount & 0xff;
     }
     if (reg === MPU_FIFO_R_W) return this.fifoPop();
+    if (reg === MPU_MEM_R_W) return this.dmpMem[this.dmpCell()];
     if (reg < MPU_SAMPLE_FIRST || reg > MPU_SAMPLE_LAST) return this.regs[reg];
     if (this.asleep && !this.asleepReadSaid) {
       this.asleepReadSaid = true;
@@ -1085,6 +1130,14 @@ export class VirtualMPU6050 implements I2CDevice {
     if (reg === MPU_USER_CTRL && (value & MPU_FIFO_RESET) !== 0) this.fifoEmpty();
     if (reg === MPU_FIFO_R_W) {
       this.fifoPush(value);
+      return;
+    }
+    if (reg === MPU_MEM_R_W) {
+      this.dmpMem[this.dmpCell()] = value;
+      if (!this.dmpUploadSaid) {
+        this.dmpUploadSaid = true;
+        this.onDmpUpload?.();
+      }
       return;
     }
     const stored = value & ~MPU_SELF_CLEARING[reg] & 0xff;
@@ -1243,6 +1296,12 @@ PartSimulationRegistry.register('mpu6050', {
       part.report(
         'i2c-target-asleep',
         `MPU6050 0x${addr.toString(16)} is in sleep mode: write 0x00 to PWR_MGMT_1 (0x6B) to wake it`,
+      );
+    device.onDmpUpload = () =>
+      part.report(
+        'i2c-target-unmodelled',
+        `MPU6050 0x${addr.toString(16)}: the sketch loads a DMP image, but the simulator does not run the DMP, ` +
+          'so no quaternion packets reach the FIFO. Read the accelerometer and gyroscope registers instead',
       );
     const releaseInt =
       intPin !== null && !part.remote
