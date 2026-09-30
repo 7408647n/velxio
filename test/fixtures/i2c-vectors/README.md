@@ -8,7 +8,7 @@ that pass the same file cannot drift apart again.
 | File | Chip | Replayed by |
 |---|---|---|
 | `mpu6050.json` | InvenSense MPU-6050 | `frontend/src/__tests__/protocol-parts.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
-| `ds1307.json` | DS1307 real-time clock | `frontend/src/__tests__/rtc-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
+| `ds1307.json` | DS1307 real-time clock | `frontend/src/__tests__/rtc-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin), and the compiled model `buses/models/ds1307.c` in both hosts: `frontend/src/__tests__/rtc-vectors-wasm.test.ts`, `test/backend/unit/test_wasm_i2c_models.py` |
 | `ds3231.json` | DS3231 real-time clock | `frontend/src/__tests__/rtc-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin), and the compiled model `buses/models/ds3231.c` in both hosts: `frontend/src/__tests__/rtc-vectors-wasm.test.ts`, `test/backend/unit/test_wasm_i2c_models.py` |
 | `bmp280.json` | Bosch BMP280 | `frontend/src/__tests__/bmp280-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
 
@@ -106,8 +106,9 @@ vector needs its own, in the vector:
   depends on when or where it runs.
 - `build_times`: the `__DATE__` and `__TIME__` pairs of the firmware that is
   running, as the compiler writes the two strings. A model that is set to one
-  of them stays on the host's clock; see `RtcCounters` in
-  `frontend/src/simulation/I2CBusManager.ts`. An empty list is a firmware
+  of them stays on the host's clock; see `frontend/src/simulation/buses/models/rtc.h`
+  (the model both hosts run by default) and `RtcCounters` in
+  `frontend/src/simulation/I2CBusManager.ts` (the tab's fallback). An empty list is a firmware
   whose image says nothing about when it was built.
 
 ## Numbers

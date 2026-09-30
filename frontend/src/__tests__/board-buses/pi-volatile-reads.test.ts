@@ -17,7 +17,8 @@ import type { I2cTarget, NetResolver, PinRef, ResolvedPin } from '../../simulati
 import { useSimulatorStore } from '../../store/useSimulatorStore';
 import { i2cTargetOf } from '../../simulation/parts/i2cPart';
 import { VirtualMPU6050 } from '../../simulation/parts/ProtocolParts';
-import type { I2CDevice } from '../../simulation/I2CBusManager';
+import { VirtualDS1307, VirtualDS3231, type I2CDevice } from '../../simulation/I2CBusManager';
+import { WasmDS1307, WasmDS3231, wasmI2cModule } from '../../simulation/parts/wasmI2cModels';
 
 class Circuit implements NetResolver {
   private readonly nets = new Map<string, ResolvedPin>();
@@ -159,6 +160,45 @@ describe('Raspberry Pi: the map names the registers a copy cannot answer for', (
       // The pointer write of this line is a sample too: 6 in, 6 out.
       expect(f.shim.answerBusLine('I2C 1 68 T 74 6')).toBe('I2C_DATA 1 68 000000004000');
       expect(count(f.shim.answerBusLine('I2C 1 68 T 72 2') ?? '')).toBe(before + 6);
+    } finally {
+      f.done();
+    }
+  });
+});
+
+describe('Raspberry Pi: the map says where a clock chip wraps its pointer', () => {
+  // The relay's copy wrapped its pointer after 0xFF for every chip; the
+  // DS3231 wraps after 0x12 and the DS1307 after 0x3F, so a read across the
+  // last register answered zeros where the chip answers its seconds again.
+  const clocks = [
+    ['ds3231 (compiled)', () => new WasmDS3231(wasmI2cModule('ds3231')!, { clock: () => 0 }), 0x12],
+    ['ds1307 (compiled)', () => new WasmDS1307(wasmI2cModule('ds1307')!, { clock: () => 0 }), 0x3f],
+    ['ds3231 (hand-written)', () => new VirtualDS3231({ clock: () => 0 }), 0x12],
+    ['ds1307 (hand-written)', () => new VirtualDS1307({ clock: () => 0 }), 0x3f],
+  ] as const;
+
+  for (const [name, make, wraps] of clocks) {
+    it(`the ${name} publishes pointer_wraps_after ${wraps}`, () => {
+      const f = onFabric(`pi-wrap-${name}`);
+      try {
+        f.attach('rtc', 2, 3, i2cTargetOf(make()), 0x68);
+        f.attach('other', 2, 3, i2cTargetOf(plainRegisters(0x57)), 0x57);
+        const [other, rtc] = f.shim.busTopology().i2c;
+        expect(rtc.pointer_wraps_after).toBe(wraps);
+        expect(other).not.toHaveProperty('pointer_wraps_after');
+      } finally {
+        f.done();
+      }
+    });
+  }
+
+  it('two chips at one address that wrap in different places publish no wrap', () => {
+    const f = onFabric('pi-wrap-shared');
+    try {
+      f.attach('a', 2, 3, i2cTargetOf(new VirtualDS3231({ clock: () => 0 })), 0x68);
+      f.attach('b', 2, 3, i2cTargetOf(new VirtualDS1307({ clock: () => 0 })), 0x68);
+      const [rtc] = f.shim.busTopology().i2c;
+      expect(rtc).not.toHaveProperty('pointer_wraps_after');
     } finally {
       f.done();
     }

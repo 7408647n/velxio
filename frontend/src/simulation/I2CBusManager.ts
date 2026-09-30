@@ -82,6 +82,12 @@ export interface I2CDevice {
    * at one address. A host answering from a copy keeps its own pointer there.
    */
   readonly pointerStays?: readonly number[];
+  /**
+   * Optional, with dumpRegisters: the register after which the device's
+   * pointer wraps to 0x00 (0x3F on a DS1307, 0x12 on a DS3231). Absent, it
+   * wraps after 0xFF. A host answering from a copy wraps its own there.
+   */
+  readonly pointerWrapsAfter?: number;
 }
 
 /**
@@ -756,6 +762,8 @@ function rtcAlarmMatched(
  */
 abstract class VirtualRtc implements I2CDevice {
   public address = 0x68;
+  /** Where the pointer wraps (I2CDevice.pointerWrapsAfter). */
+  readonly pointerWrapsAfter: number;
 
   protected readonly counters: RtcCounters;
   /** The time registers as the START of this transfer found them. */
@@ -768,6 +776,7 @@ abstract class VirtualRtc implements I2CDevice {
 
   protected constructor(options: RtcOptions, hasClockHalt: boolean, lastRegister: number) {
     this.lastRegister = lastRegister;
+    this.pointerWrapsAfter = lastRegister;
     this.counters = new RtcCounters(
       options.clock ?? hostWallClock,
       options.buildTimes ?? (() => []),

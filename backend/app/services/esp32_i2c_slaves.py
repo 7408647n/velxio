@@ -1843,18 +1843,17 @@ class DS3231Slave(_RtcSlave):
 def rtc_slave(sensor_type: str, record: dict, build_times=None):
     """The worker's copy of a clock chip, from the part's record.
 
-    DS1307Slave or DS3231Slave, unless the record of a DS3231 carries the
-    part's compiled model (`wasmB64`): the tab adds it only behind the
-    `i2cwasm` flag, which is off by default (project
-    i2c-model-fidelity-2026-09, P5, decision O4). Then the copy is that model
-    (wasm_i2c_models.WasmDS3231Slave), the same bytes the tab runs. A model
-    that cannot be run leaves the twin in its place, so a flag can never
-    cost a user the part.
+    The part's compiled model (wasm_i2c_models.WasmDS1307Slave or
+    WasmDS3231Slave, the same bytes the tab runs, buses/models/ds1307.c and
+    ds3231.c) when the record carries it (`wasmB64`), which the tab does
+    unless its `i2cwasm` flag is off (project i2c-model-fidelity-2026-09, P5).
+    DS1307Slave or DS3231Slave otherwise, and also when the model cannot be
+    run, so neither the flag nor a broken build can cost a user the part.
     """
-    if sensor_type == 'ds3231' and isinstance(record.get('wasmB64'), str):
+    if isinstance(record.get('wasmB64'), str):
         try:
             try:
-                from app.services.wasm_i2c_models import WasmDS3231Slave
+                from app.services import wasm_i2c_models as mod
             except ImportError:
                 import importlib.util as _ilu, pathlib as _pl, sys as _sys
                 mod = _sys.modules.get('wasm_i2c_models')
@@ -1864,12 +1863,13 @@ def rtc_slave(sensor_type: str, record: dict, build_times=None):
                     mod = _ilu.module_from_spec(spec)  # type: ignore[arg-type]
                     _sys.modules['wasm_i2c_models'] = mod
                     spec.loader.exec_module(mod)  # type: ignore[union-attr]
-                WasmDS3231Slave = mod.WasmDS3231Slave
-            return WasmDS3231Slave.from_b64(record['wasmB64'], record, build_times=build_times)
+            cls = mod.SLAVES.get(sensor_type)
+            if cls is not None:
+                return cls.from_b64(record['wasmB64'], record, build_times=build_times)
         except Exception as exc:  # noqa: BLE001 - any failure keeps the twin
             # stderr: a worker's stdout is its channel to the tab.
             import sys as _sys
-            print(f'ds3231: the compiled model could not be run ({exc}); '
+            print(f'{sensor_type}: the compiled model could not be run ({exc}); '
                   'the worker keeps its own copy', file=_sys.stderr)
     cls = DS3231Slave if sensor_type == 'ds3231' else DS1307Slave
     return cls(record, build_times=build_times)

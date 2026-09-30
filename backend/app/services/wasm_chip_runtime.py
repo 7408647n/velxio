@@ -361,6 +361,57 @@ def hosted_model_identity(model: dict, cs=None, bus_id=None) -> str:
     return digest.hexdigest()
 
 
+class _CompiledModule:
+    """A module compiled once, the engine it belongs to, and the imports it
+    names. A Store must be made from the module's engine, so the two travel
+    together."""
+
+    __slots__ = ("engine", "module", "imports")
+
+    def __init__(self, wasm_bytes: bytes) -> None:
+        self.engine = wasmtime.Engine()
+        self.module = wasmtime.Module(self.engine, wasm_bytes)
+        self.imports = frozenset((i.module, i.name) for i in self.module.imports)
+
+
+# Modules compiled for `share_module` runtimes, by the sha256 of their bytes,
+# least recently used first. The compile is most of what building a runtime
+# costs (8 to 20 ms for a 7 KB model on this host), and a part that attaches
+# again on every Run brings the same bytes every time.
+_MODULE_CACHE: "dict[str, _CompiledModule]" = {}
+_MODULE_CACHE_MAX = 16
+_MODULE_CACHE_LOCK = threading.Lock()
+
+
+def _compiled_module(wasm_bytes: bytes) -> _CompiledModule:
+    key = hashlib.sha256(wasm_bytes).hexdigest()
+    with _MODULE_CACHE_LOCK:
+        hit = _MODULE_CACHE.pop(key, None)
+        if hit is not None:
+            _MODULE_CACHE[key] = hit
+            return hit
+    compiled = _CompiledModule(wasm_bytes)
+    with _MODULE_CACHE_LOCK:
+        _MODULE_CACHE[key] = compiled
+        while len(_MODULE_CACHE) > _MODULE_CACHE_MAX:
+            _MODULE_CACHE.pop(next(iter(_MODULE_CACHE)))
+    return compiled
+
+
+class _ImportedOnly:
+    """A linker that defines only the host functions the module imports.
+    Defining the whole ABI costs a few milliseconds per runtime (a FuncType
+    and a trampoline each), and a register model imports a handful of it."""
+
+    def __init__(self, linker: wasmtime.Linker, imports: frozenset) -> None:
+        self._linker = linker
+        self._imports = imports
+
+    def define_func(self, module: str, name: str, ty, func) -> None:
+        if (module, name) in self._imports:
+            self._linker.define_func(module, name, ty, func)
+
+
 def _under_entry_lock(method):
     """Serialise a public entry into the chip.
 
@@ -415,6 +466,7 @@ class WasmChipRuntime:
         pad_volts: dict[str, float | None] | None = None,
         pin_releaser: Optional[Callable[[int], None]] = None,
         live_attrs: Optional[Callable[[str], "float | str | None"]] = None,
+        share_module: bool = False,
     ):
         """
         Args:
@@ -472,14 +524,21 @@ class WasmChipRuntime:
                         for vx_attr_read, a str for vx_attr_string_read, None
                         to fall through. The browser runtime's `liveAttrs`:
                         the wall clock a real-time clock counts and the build
-                        times it compares with (buses/models/ds3231.c).
+                        times it compares with (buses/models/rtc.h).
+            share_module: compile the bytes once per process and reuse the
+                        module for every runtime built from the same bytes,
+                        and define only the host functions the module imports
+                        (_compiled_module). For a model a part attaches on
+                        every Run (buses/models/ds1307.c, ds3231.c); off, each
+                        runtime compiles its own, as before.
         """
-        self._engine = wasmtime.Engine()
+        compiled = _compiled_module(wasm_bytes) if share_module else None
+        self._engine = compiled.engine if compiled else wasmtime.Engine()
         self._store = wasmtime.Store(self._engine)
         # Every public entry takes this (see _under_entry_lock). Created before
         # anything else so update_pad_volts and friends can run from __init__.
         self._entry_lock = threading.RLock()
-        self._module = wasmtime.Module(self._engine, wasm_bytes)
+        self._module = compiled.module if compiled else wasmtime.Module(self._engine, wasm_bytes)
 
         # Provide the linear memory (the WASM is compiled with --import-memory)
         self._memory = wasmtime.Memory(
@@ -606,8 +665,9 @@ class WasmChipRuntime:
 
         # Build the linker
         linker = wasmtime.Linker(self._engine)
-        self._define_wasi(linker)
-        self._define_velxio(linker)
+        defs = _ImportedOnly(linker, compiled.imports) if compiled else linker
+        self._define_wasi(defs)  # type: ignore[arg-type]
+        self._define_velxio(defs)  # type: ignore[arg-type]
         linker.define(self._store, "env", "memory", self._memory)
 
         self._instance = linker.instantiate(self._store, self._module)
@@ -1567,6 +1627,16 @@ class WasmChipRuntime:
     def read_memory(self, ptr: int, length: int) -> bytes:
         """`length` bytes of the chip's linear memory from `ptr`."""
         return self._read_bytes(ptr, length)
+
+    @_under_entry_lock
+    def write_memory(self, ptr: int, data: bytes) -> None:
+        """Store `data` in the chip's linear memory at `ptr`: a host that
+        pushes an input into a struct the chip exports (rtc.h, rtc_inputs)
+        instead of the chip calling out for it. Through the cached view, so a
+        store between two calls is one memmove; under the entry lock, since
+        the panel's thread pushes while the bus thread may be in the chip."""
+        view = self._mem_view()
+        ctypes.memmove(ctypes.addressof(view) + ptr, data, len(data))
 
     # ── Live attribute updates (sensor control panel sliders) ───────────────
     @_under_entry_lock

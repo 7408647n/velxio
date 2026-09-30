@@ -2,7 +2,16 @@
   "microsd": {
     "sourceSha256": "0e8fc439ae32b6fdebb257b108038067530845064eedf7a687dfab348beabbe3"
   },
+  "ds1307": {
+    "sourceSha256": "231d8a0cae9d1e61ae97672bce170bb71f6ab9fe4cb0f848b03babf5e2bdccef",
+    "includeSha256": {
+      "rtc.h": "d211445562a826a69c615b3d1dc2266c65dd6063e32affa3eab49e072160d891"
+    }
+  },
   "ds3231": {
-    "sourceSha256": "3ea3781f041ecfb027a885da83f16e1a7e11b3eb0e20a494ca4f4b6072384710"
+    "sourceSha256": "5f372799e2d7913f2a07b13438b425ca9cb6a872088a67e65b10b1cdf83d4ee2",
+    "includeSha256": {
+      "rtc.h": "d211445562a826a69c615b3d1dc2266c65dd6063e32affa3eab49e072160d891"
+    }
   }
 }
