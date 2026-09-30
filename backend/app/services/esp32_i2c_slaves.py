@@ -22,6 +22,7 @@ ACK convention (matches QEMU i2c core):
 
 import datetime as _datetime
 import math as _math
+import threading as _threading
 
 
 # ── Protocol constants ────────────────────────────────────────────────────────
@@ -62,6 +63,16 @@ MPU6050_RULES = {
     # TEMP_OUT = (T - 36.53) * 340 (4.18).
     'temp_lsb_per_c': 340,
     'temp_offset_c': 36.53,
+    # Bits a read of the register takes with it: "each bit will clear after
+    # the register is read" (4.16). With INT_RD_CLEAR set in INT_PIN_CFG, a
+    # read of any register clears them (4.14).
+    'clear_on_read': {0x3A: 0xFF},
+    # The gyroscope output rate the sample rate is divided from, in Hz: 8 kHz
+    # with the low-pass filter off (DLPF_CFG 0 or 7), 1 kHz with it on.
+    # Sample rate = rate / (1 + SMPLRT_DIV) (4.2, 4.3).
+    'gyro_rate_hz': {'dlpf_off': 8000, 'dlpf_on': 1000},
+    # How long INT stays active per interrupt with LATCH_INT_EN clear (4.14).
+    'int_pulse_us': 50,
 }
 
 # Motion and temperature at the chip, under the names of the panel's sliders
@@ -80,8 +91,20 @@ _MPU_INPUT_NAMES = {
     'gyro_x': 'gyroX', 'gyro_y': 'gyroY', 'gyro_z': 'gyroZ',
 }
 
+_MPU_SMPLRT_DIV     = 0x19
+_MPU_CONFIG         = 0x1A
 _MPU_GYRO_CONFIG    = 0x1B
 _MPU_ACCEL_CONFIG   = 0x1C
+_MPU_INT_PIN_CFG    = 0x37
+_MPU_INT_LEVEL      = 0x80   # active low, against active high
+_MPU_INT_OPEN       = 0x40   # open drain, against push-pull
+_MPU_LATCH_INT_EN   = 0x20   # held until cleared, against a pulse
+_MPU_INT_RD_CLEAR   = 0x10
+_MPU_INT_ENABLE     = 0x38
+_MPU_INT_STATUS     = 0x3A
+_MPU_DATA_RDY_INT   = 0x01
+# The interrupt sources the model raises, as bits of INT_ENABLE and INT_STATUS.
+_MPU_INT_SOURCES    = _MPU_DATA_RDY_INT
 # ACCEL_XOUT_H to GYRO_ZOUT_L: three axes, the die temperature, three axes.
 _MPU_SAMPLE_FIRST   = 0x3B
 _MPU_SAMPLE_LAST    = 0x48
@@ -98,6 +121,10 @@ for _first, _last in MPU6050_RULES['read_only']:
 _MPU_SELF_CLEARING = bytearray(256)
 for _reg, _mask in MPU6050_RULES['self_clearing'].items():
     _MPU_SELF_CLEARING[_reg] = _mask
+_MPU_CLEAR_ON_READ = bytearray(256)
+for _reg, _mask in MPU6050_RULES['clear_on_read'].items():
+    _MPU_CLEAR_ON_READ[_reg] = _mask
+_MPU_INT_PULSE_NS = MPU6050_RULES['int_pulse_us'] * 1000
 
 
 def _mpu_counts(value: float) -> int:
@@ -138,6 +165,15 @@ class MPU6050Slave:
         begins. The whole burst is answered from that one sample (4.17), so a
         slider moving while it is read cannot mix two instants.
       - Asleep, the block holds what it held when the chip fell asleep.
+      - Awake, it takes a sample every sample period of the guest's time
+        (now_ns), whether the sketch talks to it or not. Each one sets
+        DATA_RDY_INT when DATA_RDY_EN is set, which a read of INT_STATUS
+        clears, and moves the INT pad the way INT_PIN_CFG says (int_pad,
+        int_wake_ns). Nothing runs in the background for it: the samples due
+        are counted when the chip is next looked at, from the time that has
+        passed. With no clock (a libqemu that does not export it) one period
+        passes per register pointer the sketch writes, so a driver that waits
+        for DATA_RDY still finds it.
     """
 
     def __init__(self, addr: int = 0x68, now_ns=None):
@@ -160,9 +196,32 @@ class MPU6050Slave:
         self._last_awake = bytes(_MPU_SAMPLE_SIZE)
         # No START was heard for the read that comes next: latch on its first byte.
         self._latch_due = True
+        # Called when what the INT pad does, or the time it moves next, may
+        # have changed: the worker that drives the pin reads int_pad() and
+        # int_wake_ns() again.
+        self.on_int_change = None
+        # The guest time the sample periods are counted from, in ns: when the
+        # chip woke up or its rate changed. None until the chip is next
+        # looked at.
+        self._epoch_ns = None
+        self._taken = 0           # samples since the epoch
+        self._period_ns = 0.0     # the period _taken was counted with
+        self._pulse_end_ns = None # where the INT pulse of the last sample ends
+        # The panel moves on the worker's command thread and QEMU's thread
+        # runs the bus: the samples due are taken of the world before a move,
+        # under one lock with the bus events.
+        self._lock = _threading.RLock()
         self._power_on()
 
     def handle_event(self, event: int) -> int:
+        with self._lock:
+            result = self._handle_event(event)
+        cb = self.on_int_change
+        if cb is not None and (event & 0xFF) != I2C_FINISH:
+            cb()
+        return result
+
+    def _handle_event(self, event: int) -> int:
         op   = event & 0xFF          # low byte = operation type
         data = (event >> 8) & 0xFF   # high byte = data byte (for WRITE)
 
@@ -170,6 +229,7 @@ class MPU6050Slave:
             # reg_ptr is NOT reset here — a write-then-read (repeated START)
             # relies on reg_ptr having been set by the preceding WRITE phase.
             self.first_byte = True
+            self._sync()
             if op == I2C_START_RECV:
                 self._latch()
             return 0   # ACK (0 = success in QEMU convention)
@@ -180,20 +240,34 @@ class MPU6050Slave:
                 # First byte after START is the register address pointer
                 self.reg_ptr    = data
                 self.first_byte = False
+                # Every register access starts with a pointer, on every host
+                # and in both ways a repeated START is delivered: where there
+                # is no time to read, this is the chip's tick.
+                if self._now_ns is None:
+                    self._tick()
+                else:
+                    self._sync()
             else:
+                self._sync()
                 reg = self.reg_ptr
                 self.reg_ptr = (reg + 1) & 0xFF
                 self._write_register(reg, data)
             return 0   # ACK
 
         elif op == I2C_READ:
+            self._sync()
             if self._latch_due:
                 self._latch()
             reg = self.reg_ptr
             self.reg_ptr = (reg + 1) & 0xFF
-            if _MPU_SAMPLE_FIRST <= reg <= _MPU_SAMPLE_LAST:
-                return self._sample[reg - _MPU_SAMPLE_FIRST]
-            return self.regs[reg]
+            value = self._read_register(reg)
+            # What the read takes with it goes at the read, not at the FINISH:
+            # QEMU ends a transfer before a repeated START.
+            cleared = (0xFF if self.regs[_MPU_INT_PIN_CFG] & _MPU_INT_RD_CLEAR
+                       else _MPU_CLEAR_ON_READ[reg])
+            if cleared:
+                self.regs[_MPU_INT_STATUS] &= ~cleared & 0xFF
+            return value
 
         else:                         # I2C_FINISH, I2C_NACK, unknown
             # The pointer survives: i2cdevlib writes it in one transaction and
@@ -212,6 +286,12 @@ class MPU6050Slave:
         g and degrees per second, temp in degrees Celsius); whatever else the
         record carries, and anything that is not a finite number, is left out.
         """
+        with self._lock:
+            # The samples due until now were taken of the world as it was.
+            self._sync()
+            self._set_inputs(inputs)
+
+    def _set_inputs(self, inputs: dict) -> None:
         changed = dict(self._inputs)
         for name, value in inputs.items():
             key = _MPU_INPUT_NAMES.get(name)
@@ -231,20 +311,147 @@ class MPU6050Slave:
     def dump_registers(self) -> bytearray:
         """The registers as a read would find them now: the sample block
         encoded from the panel's values (or what a sleeping chip holds), and
-        no trigger bit."""
-        out = bytearray(self.regs)
-        out[_MPU_SAMPLE_FIRST:_MPU_SAMPLE_LAST + 1] = (
-            self._last_awake if self._asleep() else self._encode())
-        return out
+        no trigger bit. Nothing is cleared by it: it is not a read on the bus."""
+        with self._lock:
+            self._sync()
+            out = bytearray(self.regs)
+            out[_MPU_SAMPLE_FIRST:_MPU_SAMPLE_LAST + 1] = (
+                self._last_awake if self._asleep() else self._encode())
+            return out
+
+    def board_reset(self) -> None:
+        """The MCU was reset: the chip kept its supply and goes on sampling,
+        but the guest's clock started again, so the periods are counted from
+        where it stands now."""
+        with self._lock:
+            self._restart_sampling()
+
+    def int_pad(self) -> str:
+        """What the INT pad does at this instant: 'high', 'low', or 'z' when
+        an open-drain pad lets go. Active is high or low by INT_LEVEL; an
+        open-drain pad (INT_OPEN) only ever pulls low (4.14)."""
+        with self._lock:
+            self._sync()
+            cfg = self.regs[_MPU_INT_PIN_CFG]
+            high = self._int_active() != bool(cfg & _MPU_INT_LEVEL)
+            if not high:
+                return 'low'
+            return 'z' if cfg & _MPU_INT_OPEN else 'high'
+
+    def int_wake_ns(self):
+        """The guest time, in ns, at which the pad moves next with nobody
+        touching the chip: the end of the pulse under way, or the next sample
+        that raises an enabled interrupt. None when nothing is due: a latched
+        interrupt waits for the sketch, and so does a chip with no clock."""
+        with self._lock:
+            # Asleep, nothing moves: no sample, and going to sleep ended any
+            # pulse. The clock is not asked either (see _restart_sampling).
+            if self._asleep():
+                return None
+            self._sync()
+            now = self._now()
+            if now is None:
+                return None
+            if self._latched():
+                if self._int_active():
+                    return None
+            elif self._pulse_end_ns is not None and now < self._pulse_end_ns:
+                return self._pulse_end_ns
+            if self._epoch_ns is None:
+                return None
+            if not self.regs[_MPU_INT_ENABLE] & _MPU_INT_SOURCES:
+                return None
+            return self._epoch_ns + (self._taken + 1) * self._period_ns
 
     def _asleep(self) -> bool:
         return (self.regs[_MPU_PWR_MGMT_1] & _MPU_SLEEP) != 0
+
+    def _latched(self) -> bool:
+        return bool(self.regs[_MPU_INT_PIN_CFG] & _MPU_LATCH_INT_EN)
+
+    def _int_active(self) -> bool:
+        if self._latched():
+            return bool(self.regs[_MPU_INT_STATUS] & self.regs[_MPU_INT_ENABLE]
+                        & _MPU_INT_SOURCES)
+        now = self._now()
+        return (self._pulse_end_ns is not None and now is not None
+                and now < self._pulse_end_ns)
+
+    def _now(self):
+        """The guest's time in ns, or None where the host keeps none."""
+        if self._now_ns is None:
+            return None
+        return self._now_ns()
+
+    def _sample_period_ns(self) -> float:
+        """The sample period the registers select, in ns (4.2)."""
+        dlpf = self.regs[_MPU_CONFIG] & 0x07
+        rate = MPU6050_RULES['gyro_rate_hz']['dlpf_off' if dlpf in (0, 7) else 'dlpf_on']
+        return (1 + self.regs[_MPU_SMPLRT_DIV]) * 1e9 / rate
+
+    def _restart_sampling(self) -> None:
+        """The sample periods are counted from this instant: the chip woke
+        up, its rate changed, or its clock started again. Where the time
+        cannot be read yet, from the next look at the chip."""
+        # Asleep, the clock is not asked at all: a worker builds the twin
+        # before QEMU is initialised.
+        self._epoch_ns = None if self._asleep() else self._now()
+        self._taken = 0
+        self._period_ns = self._sample_period_ns()
+        self._pulse_end_ns = None
+
+    def _sync(self) -> None:
+        """Take the samples that came due since the chip was last looked at.
+        Called before anything reads or changes what a sample depends on, so
+        every sample is taken of the registers and the world of its instant."""
+        if self._asleep():
+            return
+        now = self._now()
+        if now is None:
+            self._epoch_ns = None
+            return
+        if self._epoch_ns is None or now < self._epoch_ns:
+            # A clock that was not there when the chip woke, or one that
+            # started again: the first sample is one period from here.
+            self._epoch_ns = now
+            self._taken = 0
+            return
+        due = int((now - self._epoch_ns) // self._period_ns)
+        if due <= self._taken:
+            return
+        n = due - self._taken
+        self._taken = due
+        self._sampled(n, self._epoch_ns + due * self._period_ns)
+
+    def _tick(self) -> None:
+        """One sample period passed, on a host where nothing measures it."""
+        if not self._asleep():
+            self._sampled(1, None)
+
+    def _sampled(self, n: int, at_ns) -> None:
+        """`n` samples were taken, the last of them at `at_ns` of the guest's
+        time. Only an enabled source raises its status bit: the register map
+        does not say whether a disabled one latches (4.15, 4.16), and every
+        driver that polls DATA_RDY enables it first."""
+        raised = self.regs[_MPU_INT_ENABLE] & _MPU_INT_SOURCES & _MPU_DATA_RDY_INT
+        if not raised:
+            return
+        self.regs[_MPU_INT_STATUS] |= raised
+        # A pulse has a length only where there is a clock to measure it on.
+        if at_ns is not None and not self._latched():
+            self._pulse_end_ns = at_ns + _MPU_INT_PULSE_NS
 
     def _power_on(self) -> None:
         self.regs[:] = bytes(256)
         for reg, value in MPU6050_RULES['power_on'].items():
             self.regs[reg] = value
         self._last_awake = bytes(_MPU_SAMPLE_SIZE)
+        self._restart_sampling()
+
+    def _read_register(self, reg: int) -> int:
+        if _MPU_SAMPLE_FIRST <= reg <= _MPU_SAMPLE_LAST:
+            return self._sample[reg - _MPU_SAMPLE_FIRST]
+        return self.regs[reg]
 
     def _write_register(self, reg: int, value: int) -> None:
         if _MPU_READ_ONLY[reg]:
@@ -262,7 +469,11 @@ class MPU6050Slave:
         # The chip sampled until now, so what it holds asleep is this instant.
         if reg == _MPU_PWR_MGMT_1 and stored & _MPU_SLEEP and not self._asleep():
             self._last_awake = self._encode()
+        was_asleep = self._asleep()
         self.regs[reg] = stored
+        # Waking up, or another rate: the first sample is one period from here.
+        if self._asleep() != was_asleep or self._sample_period_ns() != self._period_ns:
+            self._restart_sampling()
 
     def _latch(self) -> None:
         self._sample = self._last_awake if self._asleep() else self._encode()

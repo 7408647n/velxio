@@ -20,8 +20,11 @@
  *   is left in this file drives pins from host time and is fine with that.
  */
 
-import { PartSimulationRegistry } from './PartSimulationRegistry';
+import { PartSimulationRegistry, type AnySimulator } from './PartSimulationRegistry';
 import { attachSpiDevice, type SpiDevice } from '../buses';
+import { setBoardPinDrive, type BoardPinHost } from '../customChips/busNets';
+import { HIGHZ_DRIVE, Strength, type Drive } from '../customChips/busLogic';
+import { isSyntheticChipPin } from '../customChips/syntheticPins';
 import {
   loadSdBusChip,
   SdSpiCard,
@@ -33,6 +36,7 @@ import {
 import { requestLine, releaseLineGap } from '../line/requestLine';
 import { VirtualDS1307, VirtualBMP280, VirtualDS3231, VirtualPCF8574 } from '../I2CBusManager';
 import type { I2CDevice } from '../I2CBusManager';
+import type { GuestClock } from '../buses/types';
 import { attachI2cPart } from './i2cPart';
 import { HD44780Decoder } from '../HD44780Decoder';
 import { registerSensorUpdate, unregisterSensorUpdate } from '../SensorUpdateRegistry';
@@ -539,6 +543,20 @@ export const MPU6050_RULES = {
   /** TEMP_OUT = (T - 36.53) * 340 (4.18). */
   temp_lsb_per_c: 340,
   temp_offset_c: 36.53,
+  /**
+   * Bits a read of the register takes with it: "each bit will clear after
+   * the register is read" (4.16). With INT_RD_CLEAR set in INT_PIN_CFG, a
+   * read of any register clears them (4.14).
+   */
+  clear_on_read: { 0x3a: 0xff },
+  /**
+   * The gyroscope output rate the sample rate is divided from, in Hz: 8 kHz
+   * with the low-pass filter off (DLPF_CFG 0 or 7), 1 kHz with it on.
+   * Sample rate = rate / (1 + SMPLRT_DIV) (4.2, 4.3).
+   */
+  gyro_rate_hz: { dlpf_off: 8000, dlpf_on: 1000 },
+  /** How long INT stays active per interrupt with LATCH_INT_EN clear (4.14). */
+  int_pulse_us: 50,
 } as const;
 
 /** Motion and temperature at the chip, under the names of the panel's sliders. */
@@ -565,8 +583,23 @@ const MPU6050_INPUT_KEYS = [
   'temp',
 ] as const;
 
+const MPU_SMPLRT_DIV = 0x19;
+const MPU_CONFIG = 0x1a;
 const MPU_GYRO_CONFIG = 0x1b;
 const MPU_ACCEL_CONFIG = 0x1c;
+const MPU_INT_PIN_CFG = 0x37;
+/** Active low, against active high. */
+const MPU_INT_LEVEL = 0x80;
+/** Open drain, against push-pull. */
+const MPU_INT_OPEN = 0x40;
+/** Held until the interrupt is cleared, against a pulse. */
+const MPU_LATCH_INT_EN = 0x20;
+const MPU_INT_RD_CLEAR = 0x10;
+const MPU_INT_ENABLE = 0x38;
+const MPU_INT_STATUS = 0x3a;
+const MPU_DATA_RDY_INT = 0x01;
+/** The interrupt sources the model raises, as bits of INT_ENABLE and INT_STATUS. */
+const MPU_INT_SOURCES = MPU_DATA_RDY_INT;
 /** ACCEL_XOUT_H to GYRO_ZOUT_L: three axes, the die temperature, three axes. */
 const MPU_SAMPLE_FIRST = 0x3b;
 const MPU_SAMPLE_LAST = 0x48;
@@ -582,6 +615,14 @@ const MPU_SELF_CLEARING = new Uint8Array(256);
 for (const [reg, mask] of Object.entries(MPU6050_RULES.self_clearing)) {
   MPU_SELF_CLEARING[Number(reg)] = mask;
 }
+const MPU_CLEAR_ON_READ = new Uint8Array(256);
+for (const [reg, mask] of Object.entries(MPU6050_RULES.clear_on_read)) {
+  MPU_CLEAR_ON_READ[Number(reg)] = mask;
+}
+const MPU_INT_PULSE_NS = MPU6050_RULES.int_pulse_us * 1000;
+
+/** What the INT pad does to its line: it drives it, or lets go of it (open drain). */
+export type Mpu6050IntPad = 'high' | 'low' | 'z';
 
 /**
  * A physical value as the counts of a 16-bit output register. Half a count
@@ -609,11 +650,24 @@ function mpuCounts(value: number): number {
  *    The whole burst is answered from that one sample (4.17), so a slider
  *    moving while it is read cannot mix two instants.
  *  - Asleep, the block holds what it held when the chip fell asleep.
+ *  - Awake, it takes a sample every sample period of the guest's time
+ *    (setClock), whether the sketch talks to it or not. Each one sets
+ *    DATA_RDY_INT, which a read of INT_STATUS clears, and with DATA_RDY_EN
+ *    set moves the INT pad the way INT_PIN_CFG says. Nothing runs in the
+ *    background for it: the samples due are counted when the chip is next
+ *    looked at, from the time that has passed. On a board that keeps no time
+ *    one period passes per register pointer the sketch writes, so a driver
+ *    that waits for DATA_RDY still finds it.
  */
 export class VirtualMPU6050 implements I2CDevice {
   address: number;
   /** The sample block was read while the chip sleeps, for the first time in this run. */
   onAsleepRead: (() => void) | null = null;
+  /**
+   * What the INT pad does, or the time it moves next, may have changed: the
+   * host that drives the pin reads intPad() and intWakeNs() again.
+   */
+  onIntChange: (() => void) | null = null;
 
   private readonly regs = new Uint8Array(256);
   private readonly inputs: Mpu6050Inputs = {
@@ -634,14 +688,40 @@ export class VirtualMPU6050 implements I2CDevice {
   private asleepReadSaid = false;
   private regPtr = 0;
   private firstByte = true;
+  private clock: GuestClock | null = null;
+  /**
+   * The guest time the sample periods are counted from, in ns: when the chip
+   * woke up, or its rate changed. Null until the chip is next looked at.
+   */
+  private epochNs: number | null = null;
+  /** Samples taken since the epoch. */
+  private taken = 0;
+  /** The period `taken` was counted with. */
+  private periodNs = 0;
+  /** Where the INT pulse of the last sample ends; null when there is none. */
+  private pulseEndNs: number | null = null;
 
   constructor(address: number) {
     this.address = address;
     this.powerOn();
   }
 
+  /** The clock of the board the chip is on, or null when it is on no bus. */
+  setClock(clock: GuestClock | null): void {
+    this.clock = clock;
+    this.restartSampling();
+    this.onIntChange?.();
+  }
+
+  /** For the host that times the INT pin: the clock the chip keeps. */
+  get guestClock(): GuestClock | null {
+    return this.clock;
+  }
+
   /** The panel moved. Only the values it names change. */
   setInputs(values: Record<string, unknown>): void {
+    // The samples due until now were taken of the world as it was.
+    this.sync();
     for (const key of MPU6050_INPUT_KEYS) {
       const v = values[key];
       if (typeof v === 'number' && Number.isFinite(v)) this.inputs[key] = v;
@@ -653,7 +733,9 @@ export class VirtualMPU6050 implements I2CDevice {
   }
 
   start(read: boolean): void {
+    this.sync();
     if (read) this.latch();
+    this.onIntChange?.();
   }
 
   writeByte(value: number): boolean {
@@ -663,24 +745,37 @@ export class VirtualMPU6050 implements I2CDevice {
     if (this.firstByte) {
       this.regPtr = value & 0xff;
       this.firstByte = false;
+      // Every register access starts with a pointer, on every host and in
+      // both ways a repeated START is delivered: where there is no time to
+      // read, this is the chip's tick.
+      if (this.nowNs() === null) this.tick();
+      else this.sync();
       return true;
     }
+    this.sync();
     const reg = this.regPtr;
     this.regPtr = (reg + 1) & 0xff;
     this.writeRegister(reg, value & 0xff);
+    this.onIntChange?.();
     return true;
   }
 
   readByte(): number {
+    this.sync();
     if (this.latchDue) this.latch();
     const reg = this.regPtr;
     this.regPtr = (reg + 1) & 0xff;
-    if (reg < MPU_SAMPLE_FIRST || reg > MPU_SAMPLE_LAST) return this.regs[reg];
-    if (this.asleep && !this.asleepReadSaid) {
-      this.asleepReadSaid = true;
-      this.onAsleepRead?.();
+    const value = this.readRegister(reg);
+    // What the read takes with it goes at the read, not at the STOP: QEMU
+    // ends a transfer before a repeated START, and a driver may never send
+    // one (section "Principles" of the project's design).
+    const cleared =
+      (this.regs[MPU_INT_PIN_CFG] & MPU_INT_RD_CLEAR) !== 0 ? 0xff : MPU_CLEAR_ON_READ[reg];
+    if (cleared !== 0 && (this.regs[MPU_INT_STATUS] & cleared) !== 0) {
+      this.regs[MPU_INT_STATUS] &= ~cleared;
+      this.onIntChange?.();
     }
-    return this.sample[reg - MPU_SAMPLE_FIRST];
+    return value;
   }
 
   /**
@@ -692,25 +787,166 @@ export class VirtualMPU6050 implements I2CDevice {
     this.latchDue = true;
   }
 
-  /** A new run reads a chip that is still asleep: its monitor is told as well. */
+  /**
+   * A new run reads a chip that is still asleep: its monitor is told as well.
+   * The chip kept its supply and goes on sampling, but the guest's counter
+   * started again, so the periods are counted from where it stands now.
+   */
   boardReset(): void {
     this.asleepReadSaid = false;
+    this.restartSampling();
+    this.onIntChange?.();
   }
 
   /**
    * The registers as a read would find them now: the sample block encoded
    * from the panel's values (or what a sleeping chip holds), and no trigger
    * bit. A host that answers its guest from a copy (the Raspberry Pi relay)
-   * mirrors this.
+   * mirrors this. Nothing is cleared by it: it is not a read on the bus.
    */
   dumpRegisters(): Uint8Array {
+    this.sync();
     const out = this.regs.slice();
     out.set(this.asleep ? this.lastAwake : this.encode(), MPU_SAMPLE_FIRST);
     return out;
   }
 
+  /**
+   * What the INT pad does at this instant. Active is high or low by
+   * INT_LEVEL; an open-drain pad (INT_OPEN) only ever pulls low, and lets go
+   * where a push-pull one would drive high (4.14).
+   */
+  intPad(): Mpu6050IntPad {
+    this.sync();
+    const cfg = this.regs[MPU_INT_PIN_CFG];
+    const high = this.intActive() !== ((cfg & MPU_INT_LEVEL) !== 0);
+    if (!high) return 'low';
+    return (cfg & MPU_INT_OPEN) !== 0 ? 'z' : 'high';
+  }
+
+  /**
+   * The guest time, in ns, at which the pad moves next with nobody touching
+   * the chip: the end of the pulse under way, or the next sample that will
+   * raise an enabled interrupt. Null when nothing is due: a latched
+   * interrupt waits for the sketch, and so does a board with no clock.
+   */
+  intWakeNs(): number | null {
+    // Asleep, nothing moves: no sample, and going to sleep ended any pulse.
+    if (!this.sampling) return null;
+    this.sync();
+    const now = this.nowNs();
+    if (now === null) return null;
+    if (this.latched) {
+      if (this.intActive()) return null;
+    } else if (this.pulseEndNs !== null && now < this.pulseEndNs) {
+      return this.pulseEndNs;
+    }
+    if (!this.sampling || this.epochNs === null) return null;
+    if ((this.regs[MPU_INT_ENABLE] & MPU_INT_SOURCES) === 0) return null;
+    return this.epochNs + (this.taken + 1) * this.periodNs;
+  }
+
   private get asleep(): boolean {
     return (this.regs[MPU_PWR_MGMT_1] & MPU_SLEEP) !== 0;
+  }
+
+  /** Whether the chip takes samples: not while it sleeps. */
+  private get sampling(): boolean {
+    return !this.asleep;
+  }
+
+  /** LATCH_INT_EN: INT is held until the interrupt is cleared, not pulsed. */
+  private get latched(): boolean {
+    return (this.regs[MPU_INT_PIN_CFG] & MPU_LATCH_INT_EN) !== 0;
+  }
+
+  /** Whether the chip signals an interrupt on INT at this instant. */
+  private intActive(): boolean {
+    if (this.latched) {
+      return (this.regs[MPU_INT_STATUS] & this.regs[MPU_INT_ENABLE] & MPU_INT_SOURCES) !== 0;
+    }
+    const now = this.nowNs();
+    return this.pulseEndNs !== null && now !== null && now < this.pulseEndNs;
+  }
+
+  /** The guest's time in ns, or null on a board that keeps none. */
+  private nowNs(): number | null {
+    const clock = this.clock;
+    if (!clock) return null;
+    const hz = clock.clockHz();
+    if (!(hz > 0)) return null;
+    // Multiplied first: a whole number of ns comes out whole, so a period
+    // ends on the cycle it ends on and not one float step either side.
+    return (clock.now() * 1e9) / hz;
+  }
+
+  /** The sample period the registers select, in ns (4.2). */
+  private samplePeriodNs(): number {
+    const dlpf = this.regs[MPU_CONFIG] & 0x07;
+    const rate =
+      dlpf === 0 || dlpf === 7
+        ? MPU6050_RULES.gyro_rate_hz.dlpf_off
+        : MPU6050_RULES.gyro_rate_hz.dlpf_on;
+    return ((1 + this.regs[MPU_SMPLRT_DIV]) * 1e9) / rate;
+  }
+
+  /**
+   * The sample periods are counted from this instant: the chip woke up, its
+   * rate changed, or the clock it measures on did. Where the time cannot be
+   * read yet, from the next look at the chip.
+   */
+  private restartSampling(): void {
+    this.epochNs = this.sampling ? this.nowNs() : null;
+    this.taken = 0;
+    this.periodNs = this.samplePeriodNs();
+    this.pulseEndNs = null;
+  }
+
+  /**
+   * Take the samples that came due since the chip was last looked at. It is
+   * called before anything reads or changes what a sample depends on, so
+   * every sample is taken of the registers and the world of its own instant.
+   */
+  private sync(): void {
+    if (!this.sampling) return;
+    const now = this.nowNs();
+    if (now === null) {
+      // No time to measure on: the periods are the ticks of writeByte.
+      this.epochNs = null;
+      return;
+    }
+    const period = this.periodNs;
+    if (this.epochNs === null || now < this.epochNs) {
+      // A clock that was not there when the chip woke, or one that started
+      // again: the first sample is one period from here.
+      this.epochNs = now;
+      this.taken = 0;
+      return;
+    }
+    const due = Math.floor((now - this.epochNs) / period);
+    if (due <= this.taken) return;
+    const n = due - this.taken;
+    this.taken = due;
+    this.sampled(n, this.epochNs + due * period);
+  }
+
+  /** One sample period passed, on a board where nothing measures it. */
+  private tick(): void {
+    if (this.sampling) this.sampled(1, null);
+  }
+
+  /** `n` samples were taken, the last of them at `atNs` of the guest's time. */
+  private sampled(_n: number, atNs: number | null): void {
+    // Only an enabled source raises its status bit. The register map does
+    // not say whether a disabled one latches (4.15, 4.16), and every driver
+    // that polls DATA_RDY enables it first: FastIMU and Kris Winer write
+    // INT_ENABLE = 0x01. A driver that never enables it reads 0 there, as
+    // it did before the chip kept time.
+    const raised = this.regs[MPU_INT_ENABLE] & MPU_INT_SOURCES & MPU_DATA_RDY_INT;
+    if (raised === 0) return;
+    this.regs[MPU_INT_STATUS] |= raised;
+    // A pulse has a length only where there is a clock to measure it on.
+    if (atNs !== null && !this.latched) this.pulseEndNs = atNs + MPU_INT_PULSE_NS;
   }
 
   private powerOn(): void {
@@ -719,6 +955,16 @@ export class VirtualMPU6050 implements I2CDevice {
       this.regs[Number(reg)] = value;
     }
     this.lastAwake.fill(0);
+    this.restartSampling();
+  }
+
+  private readRegister(reg: number): number {
+    if (reg < MPU_SAMPLE_FIRST || reg > MPU_SAMPLE_LAST) return this.regs[reg];
+    if (this.asleep && !this.asleepReadSaid) {
+      this.asleepReadSaid = true;
+      this.onAsleepRead?.();
+    }
+    return this.sample[reg - MPU_SAMPLE_FIRST];
   }
 
   private writeRegister(reg: number, value: number): void {
@@ -737,7 +983,12 @@ export class VirtualMPU6050 implements I2CDevice {
     if (reg === MPU_PWR_MGMT_1 && (stored & MPU_SLEEP) !== 0 && !this.asleep) {
       this.lastAwake.set(this.encode());
     }
+    const sampled = this.sampling;
     this.regs[reg] = stored;
+    // Waking up, or another rate: the first sample is one period from here.
+    if (this.sampling !== sampled || this.samplePeriodNs() !== this.periodNs) {
+      this.restartSampling();
+    }
   }
 
   private latch(): void {
@@ -768,27 +1019,126 @@ export class VirtualMPU6050 implements I2CDevice {
   }
 }
 
+/**
+ * The MPU-6050's INT pad on the board pin it is wired to.
+ *
+ * The model says what the pad does and when it moves next; this puts it on
+ * the wire. The pad is one driver of the pin's net (busNets), so an
+ * open-drain INT that lets go leaves the line to the pull the sketch enabled,
+ * and the level reaches the guest's input register and its pin interrupt.
+ * The pin moves on the guest's clock: a timer at the next sample, and one at
+ * the end of each 50 us pulse, which run between two instructions at their
+ * cycle. While no interrupt is enabled nothing is armed at all.
+ */
+function hostMpu6050Int(
+  device: VirtualMPU6050,
+  simulator: AnySimulator,
+  pin: number,
+  componentId: string,
+): () => void {
+  const host = simulator.pinManager as unknown as BoardPinHost | undefined;
+  const sink = (level: boolean) => {
+    try {
+      simulator.setPinState(pin, level);
+    } catch {
+      /* the board is not up yet */
+    }
+  };
+  const driverId = `${componentId}::INT`;
+  const onNet = !!host && typeof host.triggerPinChange === 'function';
+  const put = (pad: Mpu6050IntPad): void => {
+    if (onNet) {
+      const drive: Drive =
+        pad === 'z' ? HIGHZ_DRIVE : { value: pad === 'high' ? 1 : 0, strength: Strength.STRONG };
+      setBoardPinDrive(host!, pin, driverId, drive, sink);
+    } else if (pad !== 'z') {
+      // A board with no pin nets: the level goes straight to the guest.
+      sink(pad === 'high');
+    }
+  };
+
+  let last: Mpu6050IntPad | null = null;
+  let cancel: (() => void) | null = null;
+  let armedAt = -1;
+  let disposed = false;
+  const disarm = (): void => {
+    cancel?.();
+    cancel = null;
+    armedAt = -1;
+  };
+  // Called on every byte the sketch moves: the timer already armed for the
+  // same instant stays, so a burst read costs no timer churn.
+  const refresh = (): void => {
+    if (disposed) return;
+    const pad = device.intPad();
+    if (pad !== last) {
+      last = pad;
+      put(pad);
+    }
+    const wake = device.intWakeNs();
+    const clock = device.guestClock;
+    const hz = clock?.clockHz() ?? 0;
+    if (wake === null || !clock || !(hz > 0)) {
+      disarm();
+      return;
+    }
+    // The first cycle at or past the instant, and never the cycle we are on:
+    // the timer that fires has to find the instant behind it, or it would
+    // arm itself for the same one again.
+    const at = Math.max(Math.ceil((wake * hz) / 1e9), clock.now() + 1);
+    if (cancel && at === armedAt) return;
+    disarm();
+    armedAt = at;
+    cancel = clock.at(at, () => {
+      cancel = null;
+      armedAt = -1;
+      refresh();
+    });
+  };
+  device.onIntChange = refresh;
+  refresh();
+
+  return () => {
+    disposed = true;
+    disarm();
+    device.onIntChange = null;
+    if (onNet) setBoardPinDrive(host!, pin, driverId, HIGHZ_DRIVE, sink);
+  };
+}
+
 PartSimulationRegistry.register('mpu6050', {
-  attachEvents: (element, simulator, _getPin, componentId) => {
+  attachEvents: (element, simulator, getPin, componentId) => {
     const el = element as any;
     // Respect AD0 pin: `el.ad0 = true` → address 0x69, else 0x68
     const addr = el.ad0 === true || el.ad0 === 'true' ? 0x69 : 0x68;
     const device = new VirtualMPU6050(addr);
     // The world starts where the panel's sliders do.
     device.setInputs(getSensorControl('mpu6050')?.defaultValues ?? {});
+    // A board pin, not a rail (-1) and not a net between chips.
+    const wiredInt = getPin('INT');
+    const intPin =
+      wiredInt !== null && wiredInt >= 0 && !isSyntheticChipPin(wiredInt) ? wiredInt : null;
     const part = attachI2cPart({
       simulator,
       componentId,
       device,
       // The worker's copy starts from the same values, under the names its
-      // sensor updates use, and not from defaults of its own.
-      worker: { type: 'mpu6050', props: { ...device.getInputs() } },
+      // sensor updates use, and not from defaults of its own. It drives the
+      // pin INT is wired to itself, next to the guest.
+      worker: {
+        type: 'mpu6050',
+        props: { ...device.getInputs(), ...(intPin !== null ? { int_pin: intPin } : {}) },
+      },
     });
     device.onAsleepRead = () =>
       part.report(
         'i2c-target-asleep',
         `MPU6050 0x${addr.toString(16)} is in sleep mode: write 0x00 to PWR_MGMT_1 (0x6B) to wake it`,
       );
+    const releaseInt =
+      intPin !== null && !part.remote
+        ? hostMpu6050Int(device, simulator, intPin, componentId)
+        : null;
 
     registerSensorUpdate(componentId, (values) => {
       // The worker's copy answers a QEMU board; this one answers every board
@@ -798,6 +1148,7 @@ PartSimulationRegistry.register('mpu6050', {
     });
 
     return () => {
+      releaseInt?.();
       part.dispose();
       unregisterSensorUpdate(componentId);
     };

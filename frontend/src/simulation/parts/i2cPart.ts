@@ -103,6 +103,12 @@ export interface I2cPartOptions {
 }
 
 export interface I2cPartHandle {
+  /**
+   * True when the guest is answered by the worker's copy of the part. What
+   * the chip does to the board besides answering the bus (an interrupt pin)
+   * is then the worker's to do, next to the guest, and not this tab's.
+   */
+  readonly remote: boolean;
   /** Forward live values to the worker's copy (a no-op in the tab). */
   updateWorker(values: Record<string, unknown>): void;
   /**
@@ -173,6 +179,7 @@ export function attachI2cPart(opts: I2cPartOptions): I2cPartHandle {
   }
 
   return {
+    remote: workerPin !== null,
     updateWorker: (values) => {
       if (workerPin !== null) sim!.updateSensor?.(workerPin, values);
     },

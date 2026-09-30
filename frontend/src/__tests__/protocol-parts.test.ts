@@ -38,12 +38,14 @@ import { busRegistry } from '../simulation/buses';
 import type {
   BoardPins,
   BusDiagnostic,
+  GuestClock,
   I2cControllerPort,
   I2cTransactionHandler,
   NetResolver,
   SpiControllerPort,
 } from '../simulation/buses';
 import { i2cPartWorkerPin } from '../simulation/parts/i2cPart';
+import { PinManager } from '../simulation/PinManager';
 import { MPU6050_RULES, VirtualMPU6050 } from '../simulation/parts/ProtocolParts';
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
@@ -243,7 +245,47 @@ interface I2cRig {
   dispose(): void;
 }
 
-function i2cRig(wiring: Record<string, Record<string, RigPin>>): I2cRig {
+/**
+ * The guest's clock as a test moves it: 16 MHz, like an Uno. Timers run when
+ * the time they wait for is reached, in order, as an engine runs them between
+ * two instructions.
+ */
+class RigClock implements GuestClock {
+  cycles = 0;
+  readonly hz = 16_000_000;
+  private timers: Array<{ at: number; cb: () => void }> = [];
+  now(): number {
+    return this.cycles;
+  }
+  clockHz(): number {
+    return this.hz;
+  }
+  scheduleEdge(): void {}
+  at(atCycle: number, cb: () => void): () => void {
+    const t = { at: atCycle, cb };
+    this.timers.push(t);
+    return () => {
+      this.timers = this.timers.filter((x) => x !== t);
+    };
+  }
+  /** Move the guest `us` microseconds on, firing every timer on the way. */
+  advanceUs(us: number): void {
+    const end = this.cycles + Math.round(us * 16);
+    for (;;) {
+      const due = this.timers.filter((t) => t.at <= end).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      this.timers = this.timers.filter((t) => t !== due);
+      this.cycles = Math.max(this.cycles, due.at);
+      due.cb();
+    }
+    this.cycles = end;
+  }
+  pending(): number {
+    return this.timers.length;
+  }
+}
+
+function i2cRig(wiring: Record<string, Record<string, RigPin>>, clock?: GuestClock): I2cRig {
   let handler: I2cTransactionHandler | null = null;
   const port: I2cControllerPort = {
     bus: 'i2c',
@@ -274,6 +316,7 @@ function i2cRig(wiring: Record<string, Record<string, RigPin>>): I2cRig {
     setResetHandler: (h) => {
       onReset = h;
     },
+    ...(clock ? { clock } : {}),
   });
   const bus = () => handler!;
   return {
@@ -721,12 +764,15 @@ interface VectorStep {
   rw?: string;
   at?: string;
   values?: Record<string, number>;
+  us?: number;
 }
 
 interface BusVector {
   name: string;
   spec: string;
   driver?: string;
+  /** False: the host keeps no guest time. Otherwise it stands at 0 until `advance`. */
+  clock?: boolean;
   steps: VectorStep[];
 }
 
@@ -767,6 +813,10 @@ interface VectorHost {
   stop(): void;
   inputs(values: Record<string, number>): void;
   dump(): Uint8Array;
+  /** What the INT pad does; a host that cannot see it skips the step. */
+  intPad?(): string;
+  /** Move the guest's time on. */
+  advanceUs?(us: number): void;
 }
 
 /** The part on the rig's bus, as a board whose firmware runs in the tab reaches it. */
@@ -794,8 +844,11 @@ function partHost(rig: I2cRig, id: string): VectorHost {
  * (the overlay's PartI2cTarget). The model then latches on the first byte
  * read after a write or a STOP.
  */
-function bareHost(dev: VirtualMPU6050): VectorHost {
+function bareHost(dev: VirtualMPU6050, clock?: RigClock): VectorHost {
+  if (clock) dev.setClock(clock);
   return {
+    intPad: () => dev.intPad(),
+    advanceUs: clock ? (us) => clock.advanceUs(us) : undefined,
     start: (read) => {
       if (!read) dev.stop();
       return true;
@@ -867,6 +920,13 @@ function replayVector(host: VectorHost, vector: BusVector, flavour: BusFlavour):
         got = Array.from(host.dump().slice(at, at + hexBytes(step.expect!).length));
         break;
       }
+      case 'advance':
+        expect(host.advanceUs, `step ${i}: time moves in a vector with no clock`).toBeDefined();
+        host.advanceUs!(step.us!);
+        break;
+      case 'int':
+        if (host.intPad) expect(host.intPad(), `step ${i} ${JSON.stringify(step)}`).toBe(step.expect);
+        break;
       default:
         throw new Error(`step ${i}: unknown op "${step.op}"`);
     }
@@ -877,20 +937,33 @@ function replayVector(host: VectorHost, vector: BusVector, flavour: BusFlavour):
   });
 }
 
+/**
+ * A model's rules table as the vectors write it: a table keyed by register
+ * has hexadecimal keys and bytes, the ranges of registers are hexadecimal
+ * pairs, and everything else is a plain number or list.
+ */
+function rulesAsJson(rules: object): Record<string, unknown> {
+  const hex = (n: number) => hexText([n]);
+  const value = (v: unknown): unknown => {
+    if (Array.isArray(v)) {
+      if (v.length > 0 && v.every(Array.isArray)) return v.map(([a, b]) => [hex(a), hex(b)]);
+      return v.map(value);
+    }
+    if (v !== null && typeof v === 'object') {
+      const entries = Object.entries(v);
+      if (entries.every(([k]) => /^\d+$/.test(k))) {
+        return Object.fromEntries(entries.map(([k, x]) => [hex(Number(k)), hex(x as number)]));
+      }
+      return Object.fromEntries(entries.map(([k, x]) => [k, value(x)]));
+    }
+    return v;
+  };
+  return Object.fromEntries(Object.entries(rules).map(([k, v]) => [k, value(v)]));
+}
+
 describe('mpu6050 — the rules table', () => {
   it('is the table the shared vectors carry', () => {
-    const hex = (n: number) => hexText([n]);
-    const pairs = (o: Record<string, number>) =>
-      Object.fromEntries(Object.entries(o).map(([reg, v]) => [hex(Number(reg)), hex(v)]));
-    expect({
-      power_on: pairs(MPU6050_RULES.power_on),
-      read_only: MPU6050_RULES.read_only.map(([first, last]) => [hex(first), hex(last)]),
-      self_clearing: pairs(MPU6050_RULES.self_clearing),
-      accel_lsb_per_g: [...MPU6050_RULES.accel_lsb_per_g],
-      gyro_lsb_per_dps: [...MPU6050_RULES.gyro_lsb_per_dps],
-      temp_lsb_per_c: MPU6050_RULES.temp_lsb_per_c,
-      temp_offset_c: MPU6050_RULES.temp_offset_c,
-    }).toEqual(MPU_VECTORS.rules);
+    expect(rulesAsJson(MPU6050_RULES)).toEqual(MPU_VECTORS.rules);
   });
 
   it('starts every vector from the values the panel starts from', () => {
@@ -904,9 +977,13 @@ describe('mpu6050 — shared bus vectors', () => {
 
   describe.each(flavours)('the part on the bus fabric, %s', (flavour) => {
     it.each(MPU_VECTORS.vectors.map((v) => [v.name, v] as const))('%s', (_name, vector) => {
-      const rig = i2cRig({ imu: HW_I2C_PINS });
+      // The guest's clock stands still until a step moves it; a vector that
+      // says `"clock": false` is a board that keeps no time.
+      const clock = vector.clock === false ? undefined : new RigClock();
+      const rig = i2cRig({ imu: HW_I2C_PINS }, clock);
       attachImu();
       const host = partHost(rig, 'imu');
+      if (clock) host.advanceUs = (us) => clock.advanceUs(us);
       host.inputs(MPU_VECTORS.inputs);
       replayVector(host, vector, flavour);
     });
@@ -914,7 +991,8 @@ describe('mpu6050 — shared bus vectors', () => {
 
   describe.each(flavours)('the model under a host that does not announce START, %s', (flavour) => {
     it.each(MPU_VECTORS.vectors.map((v) => [v.name, v] as const))('%s', (_name, vector) => {
-      const host = bareHost(new VirtualMPU6050(MPU_ADDR));
+      const clock = vector.clock === false ? undefined : new RigClock();
+      const host = bareHost(new VirtualMPU6050(MPU_ADDR), clock);
       host.inputs(MPU_VECTORS.inputs);
       replayVector(host, vector, flavour);
     });
@@ -1214,6 +1292,74 @@ describe('mpu6050 — driver traces', () => {
 });
 
 // ─── mpu6050: reading it asleep says so, once per run ────────────────────────
+
+describe('mpu6050 — the INT pin on the board', () => {
+  // The pad's level reaches the board pin INT is wired to, on the guest's
+  // clock: a timer at each sample, one at the end of each 50 us pulse, and
+  // none at all while no interrupt is enabled.
+  const INT_PIN = 2;
+  const setup = () => {
+    const clock = new RigClock();
+    const rig = i2cRig({ imu: HW_I2C_PINS }, clock);
+    const pinManager = new PinManager();
+    const edges: Array<[boolean, number]> = [];
+    const sim = {
+      setPinState: (pin: number, level: boolean) => {
+        if (pin === INT_PIN) edges.push([level, clock.cycles / 16]);
+      },
+      pinManager,
+    };
+    const dispose = PartSimulationRegistry.get('mpu6050')!.attachEvents!(
+      makeElement(),
+      sim as any,
+      (name) => (name === 'INT' ? INT_PIN : null),
+      'imu',
+    );
+    return { clock, rig, edges, dispose };
+  };
+
+  it('pulses for 50 us at every sample of the rate the sketch selected', () => {
+    const { clock, rig, edges } = setup();
+    rig.write(0x68, [0x19, 0x07]); // 1 kHz
+    rig.write(0x68, [0x38, 0x01]); // DATA_RDY_EN
+    expect(clock.pending()).toBe(0);
+    wakeImu(rig);
+    edges.length = 0;
+    clock.advanceUs(2500);
+    expect(edges).toEqual([
+      [true, 1000],
+      [false, 1050],
+      [true, 2000],
+      [false, 2050],
+    ]);
+  });
+
+  it('holds a latched interrupt until INT_STATUS is read, active low when INT_LEVEL says so', () => {
+    const { clock, rig, edges } = setup();
+    rig.write(0x68, [0x19, 0x07]);
+    rig.write(0x68, [0x37, 0xa0]); // INT_LEVEL (active low) + LATCH_INT_EN
+    rig.write(0x68, [0x38, 0x01]);
+    wakeImu(rig);
+    edges.length = 0;
+    clock.advanceUs(3500);
+    expect(edges).toEqual([[false, 1000]]);
+    // Nothing is armed while the line waits for the sketch.
+    expect(clock.pending()).toBe(0);
+    expect(rig.readReg(0x68, 0x3a, 1)).toEqual([0x01]);
+    expect(edges.at(-1)).toEqual([true, 3500]);
+  });
+
+  it('arms nothing while no interrupt is enabled, and lets go of the pin when it leaves', () => {
+    const { clock, rig, dispose } = setup();
+    wakeImu(rig);
+    clock.advanceUs(5000);
+    expect(clock.pending()).toBe(0);
+    rig.write(0x68, [0x38, 0x01]);
+    expect(clock.pending()).toBe(1);
+    dispose();
+    expect(clock.pending()).toBe(0);
+  });
+});
 
 describe('mpu6050 — read while asleep', () => {
   const NOTE = 'MPU6050 0x68 is in sleep mode: write 0x00 to PWR_MGMT_1 (0x6B) to wake it';

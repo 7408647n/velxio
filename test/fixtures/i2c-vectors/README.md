@@ -54,6 +54,16 @@ then 0x40. The empty string is no bytes.
 | `{ "op": "stop" }` | STOP |
 | `{ "op": "inputs", "values": { "accelX": 0.5 } }` | not a bus event: the panel moves. Only the named inputs change |
 | `{ "op": "dump", "at": "3B", "expect": "..." }` | not a bus event: the register file as a host that mirrors it would copy it, compared from register `at`. A model with no dump skips the step |
+| `{ "op": "advance", "us": 1000 }` | not a bus event: the guest's clock moves on, in microseconds (decimal). A chip that samples on its own takes the samples due |
+| `{ "op": "int", "expect": "low" }` | not a bus event: what the chip's interrupt pad does now, `high`, `low`, or `z` when an open-drain pad lets go. A host that cannot see the pad skips the step |
+
+## Time
+
+A vector runs on a guest clock that stands at 0 and moves only at `advance`
+steps: the time of the board the chip is on, never the host's. A vector with
+`"clock": false` runs on a host that keeps no time at all (a worker whose
+libqemu does not export its clock, a board with no engine clock), which a
+chip that samples on its own has to make do without.
 
 The chip acknowledges its address and every byte written to it. A runner
 fails the vector when it does not.
@@ -75,7 +85,7 @@ it), and may not depend on a STOP to begin a new read.
 ## Writing a runner
 
 A runner needs, per vector, a new model at `address` with `inputs` applied,
-and then a loop over `steps`. The TypeScript one is about forty lines
+a guest clock at 0 (none for `"clock": false`), and then a loop over `steps`. The TypeScript one is about forty lines
 (`replayVector` in `protocol-parts.test.ts`), and so is the Python one
 (`replay_vector` in `test_i2c_slaves.py`). For a QEMU device model the
 events are `I2C_START_SEND` and `I2C_START_RECV` for `start`, `I2C_WRITE` for
