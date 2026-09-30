@@ -2979,8 +2979,9 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             elif sensor_type == 'bmp280':
                 i2c_addr = int(s.get('addr', 0x76))
                 slave = _BMP280Slave(i2c_addr)
-                if 'temperature' in s: slave.update(float(s['temperature']), slave._press_hpa)
-                if 'pressure'    in s: slave.update(slave._temp_c, float(s['pressure']))
+                # As for the MPU-6050: the record carries where the panel's
+                # sliders are.
+                slave.update(**s)
                 _i2c_add(gpio, s, slave, i2c_addr)
                 sensor_data['i2c_addr'] = i2c_addr
                 sensor_data['slave'] = slave
@@ -3304,6 +3305,10 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                 elif sensor_type == 'bmp280':
                     i2c_addr = int(cmd.get('addr', 0x76))
                     slave = _BMP280Slave(i2c_addr)
+                    # A part attached while the board runs starts from its
+                    # record too. It started from the twin's own values and
+                    # took the panel's at the first slider move.
+                    slave.update(**cmd)
                     _i2c_add(gpio, cmd, slave, i2c_addr)
                     sensor_data['i2c_addr'] = i2c_addr
                     sensor_data['slave'] = slave
@@ -3378,10 +3383,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                         # stays where the record or an earlier update put it.
                         slave.update(**cmd)
                     elif stype == 'bmp280' and slave is not None:
-                        slave.update(
-                            temperature_c =float(sensor.get('temperature', 25.0)),
-                            pressure_hpa  =float(sensor.get('pressure', 1013.25)),
-                        )
+                        # Only what this update names, as above.
+                        slave.update(**cmd)
                     elif stype == 'ds3231' and slave is not None:
                         slave.temperatureC = float(sensor.get('temperature', 25.0))
                     elif stype == 'custom-chip':
