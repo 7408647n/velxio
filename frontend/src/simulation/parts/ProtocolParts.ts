@@ -557,6 +557,8 @@ export const MPU6050_RULES = {
   gyro_rate_hz: { dlpf_off: 8000, dlpf_on: 1000 },
   /** How long INT stays active per interrupt with LATCH_INT_EN clear (4.14). */
   int_pulse_us: 50,
+  /** Bytes the FIFO holds; past that the oldest go and FIFO_OFLOW_INT is set (4.31, PS 7.17). */
+  fifo_size: 1024,
 } as const;
 
 /** Motion and temperature at the chip, under the names of the panel's sliders. */
@@ -598,8 +600,29 @@ const MPU_INT_RD_CLEAR = 0x10;
 const MPU_INT_ENABLE = 0x38;
 const MPU_INT_STATUS = 0x3a;
 const MPU_DATA_RDY_INT = 0x01;
+const MPU_FIFO_OFLOW_INT = 0x10;
 /** The interrupt sources the model raises, as bits of INT_ENABLE and INT_STATUS. */
-const MPU_INT_SOURCES = MPU_DATA_RDY_INT;
+const MPU_INT_SOURCES = MPU_DATA_RDY_INT | MPU_FIFO_OFLOW_INT;
+const MPU_FIFO_EN = 0x23;
+/**
+ * The FIFO_EN bits in the order their data enters the FIFO, which is the
+ * order of the registers (4.6, 4.31): ACCEL (0x3B-0x40), TEMP, XG, YG, ZG, as
+ * [bit, offset in the sample block, bytes]. SLV0-2 push the external sensor
+ * data of the auxiliary master, which the model has none of.
+ */
+const MPU_FIFO_SOURCES: ReadonlyArray<readonly [number, number, number]> = [
+  [0x08, 0, 6],
+  [0x80, 6, 2],
+  [0x40, 8, 2],
+  [0x20, 10, 2],
+  [0x10, 12, 2],
+];
+const MPU_FIFO_COUNT_H = 0x72;
+const MPU_FIFO_COUNT_L = 0x73;
+const MPU_FIFO_R_W = 0x74;
+/** USER_CTRL: the FIFO takes samples, and the trigger that empties it (4.27). */
+const MPU_USER_FIFO_EN = 0x40;
+const MPU_FIFO_RESET = 0x04;
 /** ACCEL_XOUT_H to GYRO_ZOUT_L: three axes, the die temperature, three axes. */
 const MPU_SAMPLE_FIRST = 0x3b;
 const MPU_SAMPLE_LAST = 0x48;
@@ -615,6 +638,12 @@ const MPU_SELF_CLEARING = new Uint8Array(256);
 for (const [reg, mask] of Object.entries(MPU6050_RULES.self_clearing)) {
   MPU_SELF_CLEARING[Number(reg)] = mask;
 }
+/**
+ * Registers the pointer stays on after each byte: FIFO_R_W reads and writes
+ * the FIFO, one byte per access (4.31).
+ */
+const MPU_POINTER_STAYS = new Uint8Array(256);
+MPU_POINTER_STAYS[MPU_FIFO_R_W] = 1;
 const MPU_CLEAR_ON_READ = new Uint8Array(256);
 for (const [reg, mask] of Object.entries(MPU6050_RULES.clear_on_read)) {
   MPU_CLEAR_ON_READ[Number(reg)] = mask;
@@ -658,6 +687,12 @@ function mpuCounts(value: number): number {
  *    looked at, from the time that has passed. On a board that keeps no time
  *    one period passes per register pointer the sketch writes, so a driver
  *    that waits for DATA_RDY still finds it.
+ *  - With USER_CTRL.FIFO_EN set, each sample also pushes the sources FIFO_EN
+ *    selects into a 1024-byte FIFO, in register order. FIFO_COUNT is latched
+ *    when its high byte is read, and FIFO_R_W pops a byte per read without
+ *    moving the pointer (an empty FIFO repeats the last one), so the FIFO
+ *    calibrations of FastIMU and Kris Winer average real packets instead of
+ *    dividing by a count of zero.
  */
 export class VirtualMPU6050 implements I2CDevice {
   address: number;
@@ -700,6 +735,12 @@ export class VirtualMPU6050 implements I2CDevice {
   private periodNs = 0;
   /** Where the INT pulse of the last sample ends; null when there is none. */
   private pulseEndNs: number | null = null;
+  /** The FIFO: a ring of fifo_size bytes, `fifoCount` of them from `fifoHead`. */
+  private readonly fifo = new Uint8Array(MPU6050_RULES.fifo_size);
+  private fifoHead = 0;
+  private fifoCount = 0;
+  /** What an empty FIFO answers: the byte read last (4.31). */
+  private fifoLast = 0;
 
   constructor(address: number) {
     this.address = address;
@@ -754,7 +795,7 @@ export class VirtualMPU6050 implements I2CDevice {
     }
     this.sync();
     const reg = this.regPtr;
-    this.regPtr = (reg + 1) & 0xff;
+    this.regPtr = MPU_POINTER_STAYS[reg] ? reg : (reg + 1) & 0xff;
     this.writeRegister(reg, value & 0xff);
     this.onIntChange?.();
     return true;
@@ -764,7 +805,7 @@ export class VirtualMPU6050 implements I2CDevice {
     this.sync();
     if (this.latchDue) this.latch();
     const reg = this.regPtr;
-    this.regPtr = (reg + 1) & 0xff;
+    this.regPtr = MPU_POINTER_STAYS[reg] ? reg : (reg + 1) & 0xff;
     const value = this.readRegister(reg);
     // What the read takes with it goes at the read, not at the STOP: QEMU
     // ends a transfer before a repeated START, and a driver may never send
@@ -808,6 +849,9 @@ export class VirtualMPU6050 implements I2CDevice {
     this.sync();
     const out = this.regs.slice();
     out.set(this.asleep ? this.lastAwake : this.encode(), MPU_SAMPLE_FIRST);
+    // The count as it stands, not as a read of the high byte last latched it.
+    out[MPU_FIFO_COUNT_H] = this.fifoCount >> 8;
+    out[MPU_FIFO_COUNT_L] = this.fifoCount & 0xff;
     return out;
   }
 
@@ -936,17 +980,66 @@ export class VirtualMPU6050 implements I2CDevice {
   }
 
   /** `n` samples were taken, the last of them at `atNs` of the guest's time. */
-  private sampled(_n: number, atNs: number | null): void {
+  private sampled(n: number, atNs: number | null): void {
+    let events = MPU_DATA_RDY_INT;
+    if (this.fifoSamples(n)) events |= MPU_FIFO_OFLOW_INT;
     // Only an enabled source raises its status bit. The register map does
     // not say whether a disabled one latches (4.15, 4.16), and every driver
     // that polls DATA_RDY enables it first: FastIMU and Kris Winer write
     // INT_ENABLE = 0x01. A driver that never enables it reads 0 there, as
     // it did before the chip kept time.
-    const raised = this.regs[MPU_INT_ENABLE] & MPU_INT_SOURCES & MPU_DATA_RDY_INT;
+    const raised = this.regs[MPU_INT_ENABLE] & MPU_INT_SOURCES & events;
     if (raised === 0) return;
     this.regs[MPU_INT_STATUS] |= raised;
     // A pulse has a length only where there is a clock to measure it on.
     if (atNs !== null && !this.latched) this.pulseEndNs = atNs + MPU_INT_PULSE_NS;
+  }
+
+  /**
+   * Push `n` samples of the sources FIFO_EN selects, while USER_CTRL lets
+   * the FIFO take them. Returns whether bytes were lost to a full FIFO.
+   * The samples of one call are of one instant, so only as many as can
+   * still be in the FIFO afterwards are pushed.
+   */
+  private fifoSamples(n: number): boolean {
+    if ((this.regs[MPU_USER_CTRL] & MPU_USER_FIFO_EN) === 0) return false;
+    const sources = this.regs[MPU_FIFO_EN];
+    if (sources === 0) return false;
+    const block = this.encode();
+    const packet: number[] = [];
+    for (const [bit, at, len] of MPU_FIFO_SOURCES) {
+      if (sources & bit) for (let i = 0; i < len; i++) packet.push(block[at + i]);
+    }
+    if (packet.length === 0) return false;
+    const size = this.fifo.length;
+    const lost = this.fifoCount + n * packet.length > size;
+    const pushes = Math.min(n, Math.ceil(size / packet.length) + 1);
+    for (let k = 0; k < pushes; k++) for (const b of packet) this.fifoPush(b);
+    return lost;
+  }
+
+  /** One byte into the FIFO; when it is full the oldest goes (4.31). */
+  private fifoPush(value: number): void {
+    const size = this.fifo.length;
+    if (this.fifoCount === size) {
+      this.fifoHead = (this.fifoHead + 1) % size;
+      this.fifoCount--;
+    }
+    this.fifo[(this.fifoHead + this.fifoCount) % size] = value;
+    this.fifoCount++;
+  }
+
+  private fifoPop(): number {
+    if (this.fifoCount === 0) return this.fifoLast;
+    this.fifoLast = this.fifo[this.fifoHead];
+    this.fifoHead = (this.fifoHead + 1) % this.fifo.length;
+    this.fifoCount--;
+    return this.fifoLast;
+  }
+
+  private fifoEmpty(): void {
+    this.fifoHead = 0;
+    this.fifoCount = 0;
   }
 
   private powerOn(): void {
@@ -955,10 +1048,18 @@ export class VirtualMPU6050 implements I2CDevice {
       this.regs[Number(reg)] = value;
     }
     this.lastAwake.fill(0);
+    this.fifoEmpty();
+    this.fifoLast = 0;
     this.restartSampling();
   }
 
   private readRegister(reg: number): number {
+    if (reg === MPU_FIFO_COUNT_H) {
+      // Both bytes are latched when the high one is read (4.30).
+      this.regs[MPU_FIFO_COUNT_H] = this.fifoCount >> 8;
+      this.regs[MPU_FIFO_COUNT_L] = this.fifoCount & 0xff;
+    }
+    if (reg === MPU_FIFO_R_W) return this.fifoPop();
     if (reg < MPU_SAMPLE_FIRST || reg > MPU_SAMPLE_LAST) return this.regs[reg];
     if (this.asleep && !this.asleepReadSaid) {
       this.asleepReadSaid = true;
@@ -978,6 +1079,14 @@ export class VirtualMPU6050 implements I2CDevice {
     // SIG_COND_RESET clears the sensor registers too (4.27), which shows on a
     // sleeping chip; one that is awake has a new sample by the next read.
     if (reg === MPU_USER_CTRL && (value & MPU_SIG_COND_RESET) !== 0) this.lastAwake.fill(0);
+    // FIFO_RESET empties it whether or not it is enabled: the register map
+    // says "while FIFO_EN equals 0", and i2cdevlib resets it enabled and
+    // counts on it (MotionApps resetFIFO).
+    if (reg === MPU_USER_CTRL && (value & MPU_FIFO_RESET) !== 0) this.fifoEmpty();
+    if (reg === MPU_FIFO_R_W) {
+      this.fifoPush(value);
+      return;
+    }
     const stored = value & ~MPU_SELF_CLEARING[reg] & 0xff;
     // The chip sampled until now, so what it holds asleep is this instant.
     if (reg === MPU_PWR_MGMT_1 && (stored & MPU_SLEEP) !== 0 && !this.asleep) {

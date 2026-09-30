@@ -41,6 +41,7 @@ const firmware = (name: string): string =>
   );
 const ADAFRUIT = firmware('avr-mpu6050-adafruit');
 const PROBE = firmware('avr-mpu6050-probe');
+const FASTIMU = firmware('avr-mpu6050-fastimu');
 
 interface VectorStep {
   op: string;
@@ -218,4 +219,30 @@ describe('the register probe of the staging board matrix, on an Arduino Uno', ()
     // It wakes the chip before it reads the sample block.
     expect(b.notes).toEqual([]);
   }, 120_000);
+});
+
+describe('FastIMU on an Arduino Uno, compiled', () => {
+  // fixtures/avr-mpu6050-fastimu: FastIMU's MPU6050 driver, which reads the
+  // sensor only when INT_STATUS says DATA_RDY and calibrates by averaging
+  // 40 ms of FIFO packets. With no sample clock the FIFO count read 0, the
+  // average divided by it (garbage on AVR, an IntegerDivideByZero reboot on
+  // ESP32) and update() never read anything.
+  it('calibrates from the FIFO and reads the panel through DATA_RDY', () => {
+    const b = bench(FASTIMU);
+    expect(b.lines(/^F\d /, 3, 5000)).toEqual([
+      'F0 init=0',
+      // At rest: 1 g on Z is gravity, not bias, and the gyro reads 0.
+      'F1 valid=1 accel_bias_z=0.000 gyro_bias_x=0.000',
+      'F2 init=0',
+    ]);
+    expect(b.lines(/^A /, 2, 2000)).toEqual([
+      'A 0.00 0.00 1.00 G 0.0 0.0 0.0',
+      'A 0.00 0.00 1.00 G 0.0 0.0 0.0',
+    ]);
+    // 1640 counts at 16.4 per deg/s, which FastIMU scales by 2000 / 32768
+    // (F_MPU6050.cpp setGyroRange): the chip on the bench prints 100.1 too.
+    dispatchSensorUpdate('imu', { gyroX: 100, accelX: 0.5 });
+    expect(b.lines(/^A /, 2, 2000).pop()).toBe('A 0.50 0.00 1.00 G 100.1 0.0 0.0');
+    expect(b.notes).toEqual([]);
+  }, 180_000);
 });

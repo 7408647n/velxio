@@ -73,6 +73,9 @@ MPU6050_RULES = {
     'gyro_rate_hz': {'dlpf_off': 8000, 'dlpf_on': 1000},
     # How long INT stays active per interrupt with LATCH_INT_EN clear (4.14).
     'int_pulse_us': 50,
+    # Bytes the FIFO holds; past that the oldest go and FIFO_OFLOW_INT is set
+    # (4.31, PS 7.17).
+    'fifo_size': 1024,
 }
 
 # Motion and temperature at the chip, under the names of the panel's sliders
@@ -103,8 +106,21 @@ _MPU_INT_RD_CLEAR   = 0x10
 _MPU_INT_ENABLE     = 0x38
 _MPU_INT_STATUS     = 0x3A
 _MPU_DATA_RDY_INT   = 0x01
+_MPU_FIFO_OFLOW_INT = 0x10
 # The interrupt sources the model raises, as bits of INT_ENABLE and INT_STATUS.
-_MPU_INT_SOURCES    = _MPU_DATA_RDY_INT
+_MPU_INT_SOURCES    = _MPU_DATA_RDY_INT | _MPU_FIFO_OFLOW_INT
+_MPU_FIFO_EN        = 0x23
+# The FIFO_EN bits in the order their data enters the FIFO, which is the
+# order of the registers (4.6, 4.31): ACCEL (0x3B-0x40), TEMP, XG, YG, ZG, as
+# (bit, offset in the sample block, bytes). SLV0-2 push the external sensor
+# data of the auxiliary master, which the model has none of.
+_MPU_FIFO_SOURCES   = ((0x08, 0, 6), (0x80, 6, 2), (0x40, 8, 2), (0x20, 10, 2), (0x10, 12, 2))
+_MPU_FIFO_COUNT_H   = 0x72
+_MPU_FIFO_COUNT_L   = 0x73
+_MPU_FIFO_R_W       = 0x74
+# USER_CTRL: the FIFO takes samples, and the trigger that empties it (4.27).
+_MPU_USER_FIFO_EN   = 0x40
+_MPU_FIFO_RESET     = 0x04
 # ACCEL_XOUT_H to GYRO_ZOUT_L: three axes, the die temperature, three axes.
 _MPU_SAMPLE_FIRST   = 0x3B
 _MPU_SAMPLE_LAST    = 0x48
@@ -121,6 +137,10 @@ for _first, _last in MPU6050_RULES['read_only']:
 _MPU_SELF_CLEARING = bytearray(256)
 for _reg, _mask in MPU6050_RULES['self_clearing'].items():
     _MPU_SELF_CLEARING[_reg] = _mask
+# Registers the pointer stays on after each byte: FIFO_R_W reads and writes
+# the FIFO, one byte per access (4.31).
+_MPU_POINTER_STAYS = bytearray(256)
+_MPU_POINTER_STAYS[_MPU_FIFO_R_W] = 1
 _MPU_CLEAR_ON_READ = bytearray(256)
 for _reg, _mask in MPU6050_RULES['clear_on_read'].items():
     _MPU_CLEAR_ON_READ[_reg] = _mask
@@ -174,6 +194,10 @@ class MPU6050Slave:
         passed. With no clock (a libqemu that does not export it) one period
         passes per register pointer the sketch writes, so a driver that waits
         for DATA_RDY still finds it.
+      - With USER_CTRL.FIFO_EN set, each sample also pushes the sources
+        FIFO_EN selects into a 1024-byte FIFO, in register order. FIFO_COUNT
+        is latched when its high byte is read, and FIFO_R_W pops a byte per
+        read without moving the pointer (an empty FIFO repeats the last one).
     """
 
     def __init__(self, addr: int = 0x68, now_ns=None):
@@ -207,6 +231,8 @@ class MPU6050Slave:
         self._taken = 0           # samples since the epoch
         self._period_ns = 0.0     # the period _taken was counted with
         self._pulse_end_ns = None # where the INT pulse of the last sample ends
+        self._fifo = bytearray()
+        self._fifo_last = 0       # what an empty FIFO answers: the byte read last
         # The panel moves on the worker's command thread and QEMU's thread
         # runs the bus: the samples due are taken of the world before a move,
         # under one lock with the bus events.
@@ -250,7 +276,7 @@ class MPU6050Slave:
             else:
                 self._sync()
                 reg = self.reg_ptr
-                self.reg_ptr = (reg + 1) & 0xFF
+                self.reg_ptr = reg if _MPU_POINTER_STAYS[reg] else (reg + 1) & 0xFF
                 self._write_register(reg, data)
             return 0   # ACK
 
@@ -259,7 +285,7 @@ class MPU6050Slave:
             if self._latch_due:
                 self._latch()
             reg = self.reg_ptr
-            self.reg_ptr = (reg + 1) & 0xFF
+            self.reg_ptr = reg if _MPU_POINTER_STAYS[reg] else (reg + 1) & 0xFF
             value = self._read_register(reg)
             # What the read takes with it goes at the read, not at the FINISH:
             # QEMU ends a transfer before a repeated START.
@@ -317,6 +343,10 @@ class MPU6050Slave:
             out = bytearray(self.regs)
             out[_MPU_SAMPLE_FIRST:_MPU_SAMPLE_LAST + 1] = (
                 self._last_awake if self._asleep() else self._encode())
+            # The count as it stands, not as a read of the high byte last
+            # latched it.
+            out[_MPU_FIFO_COUNT_H] = len(self._fifo) >> 8
+            out[_MPU_FIFO_COUNT_L] = len(self._fifo) & 0xFF
             return out
 
     def board_reset(self) -> None:
@@ -433,7 +463,10 @@ class MPU6050Slave:
         time. Only an enabled source raises its status bit: the register map
         does not say whether a disabled one latches (4.15, 4.16), and every
         driver that polls DATA_RDY enables it first."""
-        raised = self.regs[_MPU_INT_ENABLE] & _MPU_INT_SOURCES & _MPU_DATA_RDY_INT
+        events = _MPU_DATA_RDY_INT
+        if self._fifo_samples(n):
+            events |= _MPU_FIFO_OFLOW_INT
+        raised = self.regs[_MPU_INT_ENABLE] & _MPU_INT_SOURCES & events
         if not raised:
             return
         self.regs[_MPU_INT_STATUS] |= raised
@@ -441,14 +474,58 @@ class MPU6050Slave:
         if at_ns is not None and not self._latched():
             self._pulse_end_ns = at_ns + _MPU_INT_PULSE_NS
 
+    def _fifo_samples(self, n: int) -> bool:
+        """Push `n` samples of the sources FIFO_EN selects, while USER_CTRL
+        lets the FIFO take them. Returns whether bytes were lost to a full
+        FIFO. The samples of one call are of one instant, so only as many as
+        can still be in the FIFO afterwards are pushed."""
+        if not self.regs[_MPU_USER_CTRL] & _MPU_USER_FIFO_EN:
+            return False
+        sources = self.regs[_MPU_FIFO_EN]
+        if not sources:
+            return False
+        block = self._encode()
+        packet = bytearray()
+        for bit, at, size in _MPU_FIFO_SOURCES:
+            if sources & bit:
+                packet += block[at:at + size]
+        if not packet:
+            return False
+        cap = MPU6050_RULES['fifo_size']
+        lost = len(self._fifo) + n * len(packet) > cap
+        pushes = min(n, -(-cap // len(packet)) + 1)
+        self._fifo += packet * pushes
+        if len(self._fifo) > cap:
+            del self._fifo[:len(self._fifo) - cap]
+        return lost
+
+    def _fifo_push(self, value: int) -> None:
+        """One byte into the FIFO; when it is full the oldest goes (4.31)."""
+        self._fifo.append(value)
+        if len(self._fifo) > MPU6050_RULES['fifo_size']:
+            del self._fifo[0]
+
+    def _fifo_pop(self) -> int:
+        if self._fifo:
+            self._fifo_last = self._fifo.pop(0)
+        return self._fifo_last
+
     def _power_on(self) -> None:
         self.regs[:] = bytes(256)
         for reg, value in MPU6050_RULES['power_on'].items():
             self.regs[reg] = value
         self._last_awake = bytes(_MPU_SAMPLE_SIZE)
+        self._fifo = bytearray()
+        self._fifo_last = 0
         self._restart_sampling()
 
     def _read_register(self, reg: int) -> int:
+        if reg == _MPU_FIFO_COUNT_H:
+            # Both bytes are latched when the high one is read (4.30).
+            self.regs[_MPU_FIFO_COUNT_H] = len(self._fifo) >> 8
+            self.regs[_MPU_FIFO_COUNT_L] = len(self._fifo) & 0xFF
+        if reg == _MPU_FIFO_R_W:
+            return self._fifo_pop()
         if _MPU_SAMPLE_FIRST <= reg <= _MPU_SAMPLE_LAST:
             return self._sample[reg - _MPU_SAMPLE_FIRST]
         return self.regs[reg]
@@ -465,6 +542,14 @@ class MPU6050Slave:
         # a sleeping chip; one that is awake has a new sample by the next read.
         if reg == _MPU_USER_CTRL and value & _MPU_SIG_COND_RESET:
             self._last_awake = bytes(_MPU_SAMPLE_SIZE)
+        # FIFO_RESET empties it whether or not it is enabled: the register map
+        # says "while FIFO_EN equals 0", and i2cdevlib resets it enabled and
+        # counts on it (MotionApps resetFIFO).
+        if reg == _MPU_USER_CTRL and value & _MPU_FIFO_RESET:
+            self._fifo = bytearray()
+        if reg == _MPU_FIFO_R_W:
+            self._fifo_push(value)
+            return
         stored = value & ~_MPU_SELF_CLEARING[reg] & 0xFF
         # The chip sampled until now, so what it holds asleep is this instant.
         if reg == _MPU_PWR_MGMT_1 and stored & _MPU_SLEEP and not self._asleep():

@@ -13,17 +13,20 @@
     "temp_offset_c": 36.53,
     "clear_on_read": { "3A": "FF" },
     "gyro_rate_hz": { "dlpf_off": 8000, "dlpf_on": 1000 },
-    "int_pulse_us": 50
+    "int_pulse_us": 50,
+    "fifo_size": 1024
   },
   "inputs": { "accelX": 0, "accelY": 0, "accelZ": 1, "gyroX": 0, "gyroY": 0, "gyroZ": 0, "temp": 24 },
   "vectors": [
     {
       "name": "power-on: PWR_MGMT_1 reads 0x40, WHO_AM_I reads 0x68, every other register reads 0x00",
-      "spec": "RM section 3: reset value 0x00 for all registers but 107 (0x40) and 117 (0x68)",
+      "spec": "RM section 3: reset value 0x00 for all registers but 107 (0x40) and 117 (0x68). FIFO_R_W (0x74) is read on its own: a read there pops the FIFO and leaves the pointer where it is (section 4.31)",
       "steps": [
         { "op": "read", "reg": "6B", "n": 1, "expect": "40" },
         { "op": "read", "reg": "75", "n": 1, "expect": "68" },
-        { "op": "read", "reg": "00", "n": 256, "expect": "00*107 40 00*9 68 00*138" }
+        { "op": "read", "reg": "00", "n": 116, "expect": "00*107 40 00*8" },
+        { "op": "read", "reg": "74", "n": 1, "expect": "00" },
+        { "op": "read", "reg": "75", "n": 139, "expect": "68 00*138" }
       ]
     },
     {
@@ -469,6 +472,101 @@
         { "op": "write", "data": "38 00" },
         { "op": "read", "reg": "3A", "n": 1, "expect": "01" },
         { "op": "read", "reg": "3A", "n": 1, "expect": "00" }
+      ]
+    },
+    {
+      "name": "FIFO: the sources FIFO_EN selects, in register order, once per sample; FIFO_COUNT latched at its high byte; FIFO_R_W pops without moving the pointer",
+      "spec": "RM sections 4.6 (FIFO_EN), 4.27 (USER_CTRL FIFO_EN, FIFO_RESET), 4.30 (FIFO_COUNT, latched when FIFO_COUNT_H is read), 4.31 (FIFO_R_W: data in order of register number; an empty FIFO repeats the last byte read)",
+      "steps": [
+        { "op": "inputs", "values": { "accelX": 1, "gyroZ": 100 } },
+        { "op": "write", "data": "19 07" },
+        { "op": "write", "data": "6B 00" },
+        { "op": "write", "data": "23 F8" },
+        { "op": "write", "data": "6A 40" },
+        { "op": "advance", "us": 1000 },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 0E" },
+        { "op": "read", "reg": "74", "n": 14, "expect": "40 00 00 00 40 00 EF 5C 00 00 00 00 33 2C" },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 00" },
+        { "op": "read", "reg": "74", "n": 2, "expect": "2C 2C" },
+        { "op": "advance", "us": 3000 },
+        { "op": "write", "data": "23 08" },
+        { "op": "advance", "us": 2000 },
+        { "op": "start", "rw": "w" },
+        { "op": "send", "data": "72" },
+        { "op": "start", "rw": "r" },
+        { "op": "recv", "n": 1, "expect": "00" },
+        { "op": "advance", "us": 1000 },
+        { "op": "recv", "n": 1, "expect": "36" },
+        { "op": "stop" },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 3C" },
+        { "op": "read", "reg": "74", "n": 14, "expect": "40 00 00 00 40 00 EF 5C 00 00 00 00 33 2C" },
+        { "op": "write", "data": "6A 44" },
+        { "op": "read", "reg": "6A", "n": 1, "expect": "40" },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 00" },
+        { "op": "write", "data": "6A 00" },
+        { "op": "advance", "us": 5000 },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 00" },
+        { "op": "write", "data": "74 AA BB" },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 02" },
+        { "op": "read", "reg": "74", "n": 3, "expect": "AA BB BB" }
+      ]
+    },
+    {
+      "name": "FIFO overflow: 1024 bytes, the oldest go, FIFO_OFLOW_INT is raised when FIFO_OFLOW_EN is set",
+      "spec": "PS section 7.17 (1024 bytes); RM sections 4.15 (FIFO_OFLOW_EN), 4.16 (FIFO_OFLOW_INT), 4.31 (on overflow the oldest data is lost)",
+      "steps": [
+        { "op": "write", "data": "6B 00" },
+        { "op": "write", "data": "38 10" },
+        { "op": "write", "data": "23 08" },
+        { "op": "write", "data": "6A 40" },
+        { "op": "advance", "us": 21000 },
+        { "op": "read", "reg": "72", "n": 2, "expect": "03 F0" },
+        { "op": "read", "reg": "3A", "n": 1, "expect": "00" },
+        { "op": "advance", "us": 125 },
+        { "op": "read", "reg": "72", "n": 2, "expect": "03 F6" },
+        { "op": "read", "reg": "3A", "n": 1, "expect": "00" },
+        { "op": "inputs", "values": { "accelX": 1 } },
+        { "op": "advance", "us": 250 },
+        { "op": "read", "reg": "72", "n": 2, "expect": "04 00" },
+        { "op": "read", "reg": "3A", "n": 1, "expect": "10" },
+        { "op": "read", "reg": "3A", "n": 1, "expect": "00" },
+        { "op": "read", "reg": "74", "n": 6, "expect": "00 00 40 00 00 00" },
+        { "op": "write", "data": "6A 44" },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 00" }
+      ]
+    },
+    {
+      "name": "FIFO: nothing enters while the chip sleeps or USER_CTRL keeps it off, and DEVICE_RESET empties it",
+      "spec": "RM sections 4.27 (USER_CTRL FIFO_EN), 4.28 (DEVICE_RESET), section 4 of the spec in RESEARCH.md (asleep, nothing is sampled)",
+      "steps": [
+        { "op": "write", "data": "23 78" },
+        { "op": "write", "data": "6A 40" },
+        { "op": "advance", "us": 5000 },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 00" },
+        { "op": "write", "data": "6B 00" },
+        { "op": "write", "data": "6A 00" },
+        { "op": "advance", "us": 5000 },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 00" },
+        { "op": "write", "data": "6A 40" },
+        { "op": "advance", "us": 125 },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 0C" },
+        { "op": "write", "data": "6B 80" },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 00" },
+        { "op": "read", "reg": "23", "n": 1, "expect": "00" },
+        { "op": "read", "reg": "6A", "n": 1, "expect": "00" }
+      ]
+    },
+    {
+      "name": "FIFO with no clock to measure on: one sample per register pointer written",
+      "spec": "The fallback of a host that keeps no guest time: the FastIMU and Kris Winer calibrations find a packet to average instead of a count of zero",
+      "clock": false,
+      "steps": [
+        { "op": "write", "data": "6B 00" },
+        { "op": "write", "data": "6A 40" },
+        { "op": "write", "data": "23 78" },
+        { "op": "write", "data": "23 00" },
+        { "op": "read", "reg": "72", "n": 2, "expect": "00 0C" },
+        { "op": "read", "reg": "74", "n": 12, "expect": "00 00 00 00 40 00 00 00 00 00 00 00" }
       ]
     }
   ]
