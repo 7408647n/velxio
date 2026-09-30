@@ -1,5 +1,5 @@
 {
-  "_comment": "Bus vectors for the InvenSense MPU-6050, shared by the tab model (frontend/src/simulation/parts/ProtocolParts.ts, vitest) and the backend twin (backend/app/services/esp32_i2c_slaves.py, pytest). The format is in README.md next to this file. Register facts are from the register map RM-MPU-6000A-00 rev 4.2; driver traces name the source they were read from.",
+  "_comment": "Bus vectors for the InvenSense MPU-6050, shared by the tab model (frontend/src/simulation/parts/ProtocolParts.ts, vitest) and the backend twin (backend/app/services/esp32_i2c_slaves.py, pytest). The format is in README.md next to this file. Register facts are from the register map RM-MPU-6000A-00 rev 4.2; driver traces name the source they were read from. ad0_values: the `ad0` property of the part and of the worker record as each model reads it, [value, the address it forces, or null when the AD0 net decides].",
   "format": 1,
   "device": "mpu6050",
   "address": "68",
@@ -21,6 +21,7 @@
     "dmp_rom": { "1006": "A5" }
   },
   "inputs": { "accelX": 0, "accelY": 0, "accelZ": 1, "gyroX": 0, "gyroY": 0, "gyroZ": 0, "temp": 24 },
+  "ad0_values": [[true, "69"], ["true", "69"], [" HIGH ", "69"], [1, "69"], ["1", "69"], ["on", "69"], ["vcc", "69"], [false, "68"], ["false", "68"], ["low", "68"], [0, "68"], ["0", "68"], ["off", "68"], ["GND", "68"], [null, null], ["", null], ["maybe", null], [2, null], [[], null]],
   "vectors": [
     {
       "name": "power-on: PWR_MGMT_1 reads 0x40, WHO_AM_I reads 0x68, the accelerometer trims hold their factory values, every other register reads 0x00",

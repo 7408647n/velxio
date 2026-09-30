@@ -3024,7 +3024,7 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             # For I2C sensors, also create the slave state machine immediately
             # so _on_i2c_event can find it when the firmware's Wire.begin() runs.
             elif sensor_type == 'mpu6050':
-                i2c_addr = int(s.get('addr', 0x68))
+                i2c_addr = _MPU6050Slave.address_of(s)
                 # On the guest's clock, the one the chips' timers run on.
                 slave = _MPU6050Slave(i2c_addr, now_ns=_guest_clock_ns)
                 # The record carries where the panel's sliders are, so the
@@ -3353,7 +3353,7 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                     except Exception:
                         pass
                 elif sensor_type == 'mpu6050':
-                    i2c_addr = int(cmd.get('addr', 0x68))
+                    i2c_addr = _MPU6050Slave.address_of(cmd)
                     slave = _MPU6050Slave(i2c_addr, now_ns=_guest_clock_ns)
                     slave.update(**cmd)
                     _i2c_add(gpio, cmd, slave, i2c_addr)

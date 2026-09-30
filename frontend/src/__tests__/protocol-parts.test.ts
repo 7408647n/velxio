@@ -46,7 +46,7 @@ import type {
 } from '../simulation/buses';
 import { i2cPartWorkerPin } from '../simulation/parts/i2cPart';
 import { PinManager } from '../simulation/PinManager';
-import { MPU6050_RULES, VirtualMPU6050 } from '../simulation/parts/ProtocolParts';
+import { MPU6050_RULES, VirtualMPU6050, parseAd0 } from '../simulation/parts/ProtocolParts';
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 
@@ -656,6 +656,34 @@ describe('mpu6050 — I2C IMU', () => {
     expect([rig.ack(0x68), rig.ack(0x69)]).toEqual([false, true]);
   });
 
+  it('follows the AD0 net: tied to a supply 0x69, to ground or left floating 0x68', () => {
+    const at = (ad0?: RigPin, props: Record<string, unknown> = {}) => {
+      const rig = i2cRig({ imu: { ...HW_I2C_PINS, ...(ad0 !== undefined ? { AD0: ad0 } : {}) } });
+      const off = attachImu('imu', props);
+      const answer = [rig.ack(0x68), rig.ack(0x69)];
+      off();
+      rig.dispose();
+      return answer;
+    };
+    expect(at('vcc')).toEqual([false, true]);
+    expect(at('gnd')).toEqual([true, false]);
+    expect(at()).toEqual([true, false]);
+    // A GPIO that drives it is read as low: the address is picked at attach.
+    expect(at(7)).toEqual([true, false]);
+    // The property overrides the wiring, either way.
+    expect(at('vcc', { ad0: 'false' })).toEqual([true, false]);
+    expect(at('gnd', { ad0: 'high' })).toEqual([false, true]);
+  });
+
+  it('reads the ad0 property as the worker reads its record', () => {
+    const values = MPU_VECTORS.ad0_values;
+    expect(values.length).toBeGreaterThan(10);
+    for (const [value, forced] of values) {
+      const want = forced === null ? null : forced === '69';
+      expect(parseAd0(value), JSON.stringify(value)).toBe(want);
+    }
+  });
+
   it('WHO_AM_I register (0x75) returns 0x68', () => {
     const rig = i2cRig({ imu: HW_I2C_PINS });
     attachImu();
@@ -778,6 +806,7 @@ interface BusVector {
 
 interface BusVectorFile {
   address: string;
+  ad0_values: Array<[unknown, string | null]>;
   rules: Record<string, unknown>;
   inputs: Record<string, number>;
   vectors: BusVector[];

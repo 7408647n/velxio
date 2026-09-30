@@ -183,6 +183,35 @@ for _reg, _mask in MPU6050_RULES['clear_on_read'].items():
 _MPU_INT_PULSE_NS = MPU6050_RULES['int_pulse_us'] * 1000
 
 
+def parse_ad0(value):
+    """The `ad0` property as a level: True (high), False (low), or None when
+    it says nothing and the AD0 net decides. parseAd0 in the tab's model
+    reads the property the same way; both are held to the cases of
+    test/fixtures/i2c-vectors/mpu6050.json."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return True if value == 1 else False if value == 0 else None
+    if not isinstance(value, str):
+        return None
+    v = value.strip().lower()
+    if v in ('1', 'true', 'high', 'on', 'vcc'):
+        return True
+    if v in ('0', 'false', 'low', 'off', 'gnd'):
+        return False
+    return None
+
+
+def mpu6050_address(record: dict) -> int:
+    """The address a sensor record puts the chip at. The tab resolves the
+    AD0 net and sends `addr`; a record without it (an older tab, a hand-made
+    config) is read by its `ad0` property, low when that says nothing."""
+    addr = record.get('addr')
+    if addr is not None:
+        return int(addr) & 0x7F
+    return 0x69 if parse_ad0(record.get('ad0')) else 0x68
+
+
 def _mpu_word(regs, reg: int) -> int:
     """The signed big-endian word at `reg`."""
     raw = (regs[reg] << 8) | regs[reg + 1]
@@ -293,6 +322,12 @@ class MPU6050Slave:
         # under one lock with the bus events.
         self._lock = _threading.RLock()
         self._power_on()
+
+    @staticmethod
+    def address_of(record: dict) -> int:
+        """The address a worker's sensor record puts the chip at (see
+        mpu6050_address)."""
+        return mpu6050_address(record)
 
     def handle_event(self, event: int) -> int:
         with self._lock:

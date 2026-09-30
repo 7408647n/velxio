@@ -221,6 +221,15 @@ export class BusRegistry {
     this.netlistChanged();
   }
 
+  /**
+   * Where a part's pin lands in the circuit as it stands: a board pin, a
+   * rail, a net between chips, or nothing. For a part that reads a strap at
+   * attach time (the MPU-6050's AD0 picks its address).
+   */
+  resolvePin(componentId: string, pinName: string): ResolvedPin {
+    return this.resolver.resolve({ kind: 'component', componentId, pinName });
+  }
+
   /** The circuit changed (wires, components, boards): recompute membership. */
   netlistChanged(): void {
     const present = new Set(this.resolver.boards());

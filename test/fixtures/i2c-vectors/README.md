@@ -27,6 +27,9 @@ that pass the same file cannot drift apart again.
   ranges, self-clearing masks, sensitivities). A model that exports the same
   table is tested against this copy, so the two agree on the facts and not only
   on the cases below.
+- `ad0_values` (MPU-6050): how each model reads the part's `ad0` property
+  and the worker record's, as `[value, "69" or "68", or null when the AD0
+  net decides]`.
 - `inputs`: the physical inputs every vector starts from, in the units of the
   sensor panel (g, deg/s, deg C for the MPU-6050).
 - `vectors`: each one starts from a chip that has just been powered on.

@@ -34,6 +34,7 @@ from app.services.esp32_i2c_slaves import (
     I2CWriteSink,
     MPU6050Slave,
     MPU6050_RULES,
+    parse_ad0,
     I2C_START_RECV,
     I2C_START_SEND,
     I2C_FINISH,
@@ -771,6 +772,18 @@ class TestMPU6050Slave(unittest.TestCase):
         """The twin and the tab model work from one table of facts, and the
         vectors hold the copy both are compared with."""
         self.assertEqual(rules_as_json(MPU6050_RULES), MPU_VECTORS['rules'])
+
+    def test_ad0_is_read_as_the_tab_reads_it(self):
+        """One parser for the part's property and the worker's record."""
+        for value, forced in MPU_VECTORS['ad0_values']:
+            want = None if forced is None else forced == '69'
+            self.assertEqual(parse_ad0(value), want, repr(value))
+            record = {'ad0': value}
+            self.assertEqual(MPU6050Slave.address_of(record),
+                             0x69 if want else 0x68, repr(value))
+        # The tab's resolved address wins over the property.
+        self.assertEqual(MPU6050Slave.address_of({'addr': 0x68, 'ad0': True}), 0x68)
+        self.assertEqual(MPU6050Slave.address_of({'addr': 105}), 0x69)
 
     def test_the_vectors_are_the_format_this_runner_reads(self):
         self.assertEqual(MPU_VECTORS['format'], 1)

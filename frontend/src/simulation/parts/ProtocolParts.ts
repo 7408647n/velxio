@@ -21,7 +21,7 @@
  */
 
 import { PartSimulationRegistry, type AnySimulator } from './PartSimulationRegistry';
-import { attachSpiDevice, type SpiDevice } from '../buses';
+import { attachSpiDevice, busRegistry, type SpiDevice } from '../buses';
 import { setBoardPinDrive, type BoardPinHost } from '../customChips/busNets';
 import { HIGHZ_DRIVE, Strength, type Drive } from '../customChips/busLogic';
 import { isSyntheticChipPin } from '../customChips/syntheticPins';
@@ -1227,6 +1227,38 @@ export class VirtualMPU6050 implements I2CDevice {
 }
 
 /**
+ * The `ad0` property as a level: true (high), false (low), or null when it
+ * says nothing and the AD0 net decides. The worker's copy reads a record the
+ * same way (esp32_i2c_slaves.parse_ad0), and both are held to the cases of
+ * test/fixtures/i2c-vectors/mpu6050.json.
+ */
+export function parseAd0(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1 ? true : value === 0 ? false : null;
+  if (typeof value !== 'string') return null;
+  const v = value.trim().toLowerCase();
+  if (['1', 'true', 'high', 'on', 'vcc'].includes(v)) return true;
+  if (['0', 'false', 'low', 'off', 'gnd'].includes(v)) return false;
+  return null;
+}
+
+/**
+ * The address the chip answers at: b110100 and the level of AD0 (PS 9.2).
+ * The `ad0` property overrides the wiring; otherwise AD0 tied to a supply is
+ * high and anything else is low: tied to ground, or floating, which the
+ * module's pull-down makes low (the GY-521 has a 4.7k to ground). A GPIO
+ * that drives AD0 is read as low: the address is chosen when the part
+ * attaches, not followed while the sketch runs.
+ */
+export function mpu6050Address(ad0Property: unknown, componentId: string | undefined): number {
+  const forced = parseAd0(ad0Property);
+  if (forced !== null) return forced ? 0x69 : 0x68;
+  if (!componentId) return 0x68;
+  const net = busRegistry.resolvePin(componentId, 'AD0');
+  return net.kind === 'rail' && net.rail === 'vcc' ? 0x69 : 0x68;
+}
+
+/**
  * The MPU-6050's INT pad on the board pin it is wired to.
  *
  * The model says what the pad does and when it moves next; this puts it on
@@ -1316,8 +1348,7 @@ function hostMpu6050Int(
 PartSimulationRegistry.register('mpu6050', {
   attachEvents: (element, simulator, getPin, componentId) => {
     const el = element as any;
-    // Respect AD0 pin: `el.ad0 = true` → address 0x69, else 0x68
-    const addr = el.ad0 === true || el.ad0 === 'true' ? 0x69 : 0x68;
+    const addr = mpu6050Address(el.ad0, componentId);
     const device = new VirtualMPU6050(addr);
     // The world starts where the panel's sliders do.
     device.setInputs(getSensorControl('mpu6050')?.defaultValues ?? {});
