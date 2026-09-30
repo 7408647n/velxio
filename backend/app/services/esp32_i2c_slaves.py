@@ -88,6 +88,9 @@ MPU6050_RULES = {
     # with the low-pass filter off (DLPF_CFG 0 or 7), 1 kHz with it on.
     # Sample rate = rate / (1 + SMPLRT_DIV) (4.2, 4.3).
     'gyro_rate_hz': {'dlpf_off': 8000, 'dlpf_on': 1000},
+    # With CYCLE set (and SLEEP clear) the chip wakes at LP_WAKE_CTRL
+    # (PWR_MGMT_2 bits 7:6) to take one sample and sleeps between (4.28, 4.29).
+    'cycle_rate_hz': (1.25, 5, 20, 40),
     # How long INT stays active per interrupt with LATCH_INT_EN clear (4.14).
     'int_pulse_us': 50,
     # Bytes the FIFO holds; past that the oldest go and FIFO_OFLOW_INT is set
@@ -163,6 +166,16 @@ _MPU_SIG_COND_RESET = 0x01
 _MPU_PWR_MGMT_1     = 0x6B
 _MPU_DEVICE_RESET   = 0x80
 _MPU_SLEEP          = 0x40
+_MPU_CYCLE          = 0x20
+_MPU_TEMP_DIS       = 0x08
+# PWR_MGMT_2: LP_WAKE_CTRL in bits 7:6, then STBY_XA, YA, ZA, XG, YG, ZG
+# (4.29). The standby bits as the fields of the sample block they freeze
+# (ax, ay, az, temp, gx, gy, gz: bit n is field n).
+_MPU_PWR_MGMT_2     = 0x6C
+_MPU_STBY_FIELDS    = ((0x20, 0x01), (0x10, 0x02), (0x08, 0x04),
+                       (0x04, 0x10), (0x02, 0x20), (0x01, 0x40))
+_MPU_TEMP_FIELD     = 0x08
+_MPU_ALL_FIELDS     = 0x7F
 
 _MPU_READ_ONLY = bytearray(256)
 for _first, _last in MPU6050_RULES['read_only']:
@@ -262,7 +275,10 @@ class MPU6050Slave:
         and from the full-scale ranges the sketch selected, when a read
         begins. The whole burst is answered from that one sample (4.17), so a
         slider moving while it is read cannot mix two instants.
-      - Asleep, the block holds what it held when the chip fell asleep.
+      - Asleep, the block holds what it held when the chip fell asleep. So
+        does an axis in standby (PWR_MGMT_2) and the temperature with
+        TEMP_DIS; in CYCLE mode the block moves only at each wake-up, at
+        LP_WAKE_CTRL.
       - Awake, it takes a sample every sample period of the guest's time
         (now_ns), whether the sketch talks to it or not. Each one sets
         DATA_RDY_INT when DATA_RDY_EN is set, which a read of INT_STATUS
@@ -299,8 +315,10 @@ class MPU6050Slave:
         self._inputs = dict(MPU6050_INPUTS)
         # The sample the read in progress is answered from.
         self._sample = bytes(_MPU_SAMPLE_SIZE)
-        # What the block held when SLEEP was set; zeros after power-on and reset.
-        self._last_awake = bytes(_MPU_SAMPLE_SIZE)
+        # What the fields that do not sample hold: the block as it was when
+        # SLEEP, a standby bit or TEMP_DIS stopped them, or at the last CYCLE
+        # wake-up. Zeros after power-on and reset.
+        self._held = bytes(_MPU_SAMPLE_SIZE)
         # No START was heard for the read that comes next: latch on its first byte.
         self._latch_due = True
         # Called when what the INT pad does, or the time it moves next, may
@@ -431,8 +449,7 @@ class MPU6050Slave:
         with self._lock:
             self._sync()
             out = bytearray(self.regs)
-            out[_MPU_SAMPLE_FIRST:_MPU_SAMPLE_LAST + 1] = (
-                self._last_awake if self._asleep() else self._encode())
+            out[_MPU_SAMPLE_FIRST:_MPU_SAMPLE_LAST + 1] = self._output()
             # The count as it stands, not as a read of the high byte last
             # latched it.
             out[_MPU_FIFO_COUNT_H] = len(self._fifo) >> 8
@@ -505,6 +522,8 @@ class MPU6050Slave:
 
     def _sample_period_ns(self) -> float:
         """The sample period the registers select, in ns (4.2)."""
+        if self._cycling():
+            return 1e9 / MPU6050_RULES['cycle_rate_hz'][self.regs[_MPU_PWR_MGMT_2] >> 6]
         dlpf = self.regs[_MPU_CONFIG] & 0x07
         rate = MPU6050_RULES['gyro_rate_hz']['dlpf_off' if dlpf in (0, 7) else 'dlpf_on']
         return (1 + self.regs[_MPU_SMPLRT_DIV]) * 1e9 / rate
@@ -553,6 +572,16 @@ class MPU6050Slave:
         time. Only an enabled source raises its status bit: the register map
         does not say whether a disabled one latches (4.15, 4.16), and every
         driver that polls DATA_RDY enables it first."""
+        # A CYCLE wake-up samples what is not in standby, and holds it until
+        # the next.
+        if self._cycling():
+            live = self._encode()
+            stby = self._standby_fields()
+            held = bytearray(self._held)
+            for f in range(7):
+                if not stby & (1 << f):
+                    held[2 * f:2 * f + 2] = live[2 * f:2 * f + 2]
+            self._held = bytes(held)
         events = _MPU_DATA_RDY_INT
         if self._fifo_samples(n):
             events |= _MPU_FIFO_OFLOW_INT
@@ -574,7 +603,7 @@ class MPU6050Slave:
         sources = self.regs[_MPU_FIFO_EN]
         if not sources:
             return False
-        block = self._encode()
+        block = self._output()
         packet = bytearray()
         for bit, at, size in _MPU_FIFO_SOURCES:
             if sources & bit:
@@ -604,7 +633,7 @@ class MPU6050Slave:
         self.regs[:] = bytes(256)
         for reg, value in MPU6050_RULES['power_on'].items():
             self.regs[reg] = value
-        self._last_awake = bytes(_MPU_SAMPLE_SIZE)
+        self._held = bytes(_MPU_SAMPLE_SIZE)
         self._fifo = bytearray()
         self._fifo_last = 0
         self._dmp_mem[:] = bytes(len(self._dmp_mem))
@@ -644,7 +673,7 @@ class MPU6050Slave:
         # SIG_COND_RESET clears the sensor registers too (4.27), which shows on
         # a sleeping chip; one that is awake has a new sample by the next read.
         if reg == _MPU_USER_CTRL and value & _MPU_SIG_COND_RESET:
-            self._last_awake = bytes(_MPU_SAMPLE_SIZE)
+            self._held = bytes(_MPU_SAMPLE_SIZE)
         # FIFO_RESET empties it whether or not it is enabled: the register map
         # says "while FIFO_EN equals 0", and i2cdevlib resets it enabled and
         # counts on it (MotionApps resetFIFO).
@@ -657,9 +686,10 @@ class MPU6050Slave:
             self._dmp_mem[self._dmp_cell()] = value
             return
         stored = value & ~_MPU_SELF_CLEARING[reg] & 0xFF
-        # The chip sampled until now, so what it holds asleep is this instant.
-        if reg == _MPU_PWR_MGMT_1 and stored & _MPU_SLEEP and not self._asleep():
-            self._last_awake = self._encode()
+        # What sampled until now holds this instant from here on if the write
+        # stops it; what did not keeps what it held.
+        if reg in (_MPU_PWR_MGMT_1, _MPU_PWR_MGMT_2):
+            self._held = self._output()
         was_asleep = self._asleep()
         self.regs[reg] = stored
         # Waking up, or another rate: the first sample is one period from here.
@@ -667,8 +697,36 @@ class MPU6050Slave:
             self._restart_sampling()
 
     def _latch(self) -> None:
-        self._sample = self._last_awake if self._asleep() else self._encode()
+        self._sample = self._output()
         self._latch_due = False
+
+    def _cycling(self) -> bool:
+        """CYCLE with SLEEP clear: one sample per wake-up (4.28)."""
+        return self.regs[_MPU_PWR_MGMT_1] & (_MPU_CYCLE | _MPU_SLEEP) == _MPU_CYCLE
+
+    def _standby_fields(self) -> int:
+        """The fields of the sample block that are not sampling, as bits
+        (ax = bit 0)."""
+        fields = 0
+        stby = self.regs[_MPU_PWR_MGMT_2]
+        for bit, field in _MPU_STBY_FIELDS:
+            if stby & bit:
+                fields |= field
+        if self.regs[_MPU_PWR_MGMT_1] & _MPU_TEMP_DIS:
+            fields |= _MPU_TEMP_FIELD
+        return fields
+
+    def _output(self) -> bytes:
+        """The sample block as the chip's registers hold it now."""
+        frozen = (_MPU_ALL_FIELDS if self._asleep() or self._cycling()
+                  else self._standby_fields())
+        if frozen == _MPU_ALL_FIELDS:
+            return bytes(self._held)
+        out = bytearray(self._encode())
+        for f in range(7):
+            if frozen & (1 << f):
+                out[2 * f:2 * f + 2] = self._held[2 * f:2 * f + 2]
+        return bytes(out)
 
     def _encode(self) -> bytes:
         inputs = self._inputs

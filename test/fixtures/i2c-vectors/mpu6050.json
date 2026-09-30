@@ -15,6 +15,7 @@
     "temp_offset_c": 36.53,
     "clear_on_read": { "3A": "FF" },
     "gyro_rate_hz": { "dlpf_off": 8000, "dlpf_on": 1000 },
+    "cycle_rate_hz": [1.25, 5, 20, 40],
     "int_pulse_us": 50,
     "fifo_size": 1024,
     "dmp_banks": 32,
@@ -633,6 +634,51 @@
         { "op": "write", "data": "6B 80" },
         { "op": "read", "reg": "06", "n": 6, "expect": "FA 38 04 B3 05 DC" },
         { "op": "read", "reg": "13", "n": 6, "expect": "00*6" }
+      ]
+    },
+    {
+      "name": "standby and TEMP_DIS: an axis in standby and a disabled temperature hold what they read when they stopped; the rest follows the panel",
+      "spec": "RM sections 4.28 (TEMP_DIS), 4.29 (STBY_XA to STBY_ZG); the data registers of a sensor that is not sampled keep the last sample (section 4 of the spec in RESEARCH.md)",
+      "steps": [
+        { "op": "inputs", "values": { "accelX": 0.5, "gyroX": 10 } },
+        { "op": "write", "data": "6B 00" },
+        { "op": "read", "reg": "3B", "n": 14, "expect": "20 00 00 00 40 00 EF 5C 05 1E 00 00 00 00" },
+        { "op": "write", "data": "6C 24" },
+        { "op": "inputs", "values": { "accelX": -0.5, "gyroX": -10, "accelZ": 0.5 } },
+        { "op": "read", "reg": "3B", "n": 14, "expect": "20 00 00 00 20 00 EF 5C 05 1E 00 00 00 00" },
+        { "op": "write", "data": "6B 08" },
+        { "op": "inputs", "values": { "temp": 30 } },
+        { "op": "read", "reg": "3B", "n": 14, "expect": "20 00 00 00 20 00 EF 5C 05 1E 00 00 00 00" },
+        { "op": "write", "data": "6B 00" },
+        { "op": "write", "data": "6C 00" },
+        { "op": "read", "reg": "3B", "n": 14, "expect": "E0 00 00 00 20 00 F7 54 FA E2 00 00 00 00" }
+      ]
+    },
+    {
+      "name": "CYCLE: the chip wakes at LP_WAKE_CTRL to take one sample, raises DATA_RDY then, and the block holds that sample until the next",
+      "spec": "RM sections 4.28 (CYCLE: wake up, take a single sample, return to sleep) and 4.29 (LP_WAKE_CTRL 1.25, 5, 20, 40 Hz)",
+      "steps": [
+        { "op": "inputs", "values": { "accelX": 0.5 } },
+        { "op": "write", "data": "6C 40" },
+        { "op": "write", "data": "38 01" },
+        { "op": "write", "data": "6B 00" },
+        { "op": "write", "data": "6B 20" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "20 00" },
+        { "op": "inputs", "values": { "accelX": 1 } },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "20 00" },
+        { "op": "read", "reg": "3A", "n": 1, "expect": "00" },
+        { "op": "advance", "us": 199999 },
+        { "op": "read", "reg": "3A", "n": 1, "expect": "00" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "20 00" },
+        { "op": "advance", "us": 1 },
+        { "op": "read", "reg": "3A", "n": 1, "expect": "01" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "40 00" },
+        { "op": "inputs", "values": { "accelX": 0 } },
+        { "op": "advance", "us": 1000 },
+        { "op": "read", "reg": "3A", "n": 1, "expect": "00" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "40 00" },
+        { "op": "write", "data": "6B 00" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "00 00" }
       ]
     }
   ]

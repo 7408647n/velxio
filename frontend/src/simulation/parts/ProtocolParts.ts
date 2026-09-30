@@ -584,6 +584,11 @@ export const MPU6050_RULES = {
    * Sample rate = rate / (1 + SMPLRT_DIV) (4.2, 4.3).
    */
   gyro_rate_hz: { dlpf_off: 8000, dlpf_on: 1000 },
+  /**
+   * With CYCLE set (and SLEEP clear) the chip wakes at LP_WAKE_CTRL
+   * (PWR_MGMT_2 bits 7:6) to take one sample and sleeps between (4.28, 4.29).
+   */
+  cycle_rate_hz: [1.25, 5, 20, 40],
   /** How long INT stays active per interrupt with LATCH_INT_EN clear (4.14). */
   int_pulse_us: 50,
   /** Bytes the FIFO holds; past that the oldest go and FIFO_OFLOW_INT is set (4.31, PS 7.17). */
@@ -682,6 +687,24 @@ const MPU_SIG_COND_RESET = 0x01;
 const MPU_PWR_MGMT_1 = 0x6b;
 const MPU_DEVICE_RESET = 0x80;
 const MPU_SLEEP = 0x40;
+const MPU_CYCLE = 0x20;
+const MPU_TEMP_DIS = 0x08;
+/**
+ * PWR_MGMT_2: LP_WAKE_CTRL in bits 7:6, then STBY_XA, YA, ZA, XG, YG, ZG
+ * (4.29). The standby bits as the fields of the sample block they freeze
+ * (ax, ay, az, temp, gx, gy, gz: bit n is field n).
+ */
+const MPU_PWR_MGMT_2 = 0x6c;
+const MPU_STBY_FIELDS: ReadonlyArray<readonly [number, number]> = [
+  [0x20, 0x01],
+  [0x10, 0x02],
+  [0x08, 0x04],
+  [0x04, 0x10],
+  [0x02, 0x20],
+  [0x01, 0x40],
+];
+const MPU_TEMP_FIELD = 0x08;
+const MPU_ALL_FIELDS = 0x7f;
 
 /** The accelerometer trims as words, by the register of their high byte. */
 const MPU_FACTORY_TRIM: Record<number, number> = {};
@@ -738,7 +761,9 @@ function mpuCounts(value: number): number {
  *    and from the full-scale ranges the sketch selected, when a read begins.
  *    The whole burst is answered from that one sample (4.17), so a slider
  *    moving while it is read cannot mix two instants.
- *  - Asleep, the block holds what it held when the chip fell asleep.
+ *  - Asleep, the block holds what it held when the chip fell asleep. So does
+ *    an axis in standby (PWR_MGMT_2) and the temperature with TEMP_DIS; in
+ *    CYCLE mode the block moves only at each wake-up, at LP_WAKE_CTRL.
  *  - Awake, it takes a sample every sample period of the guest's time
  *    (setClock), whether the sketch talks to it or not. Each one sets
  *    DATA_RDY_INT, which a read of INT_STATUS clears, and with DATA_RDY_EN
@@ -783,8 +808,12 @@ export class VirtualMPU6050 implements I2CDevice {
   };
   /** The sample the read in progress is answered from. */
   private readonly sample = new Uint8Array(MPU_SAMPLE_LAST - MPU_SAMPLE_FIRST + 1);
-  /** What the block held when SLEEP was set; zeros after power-on and reset. */
-  private readonly lastAwake = new Uint8Array(MPU_SAMPLE_LAST - MPU_SAMPLE_FIRST + 1);
+  /**
+   * What the fields that do not sample hold: the block as it was when SLEEP,
+   * a standby bit or TEMP_DIS stopped them, or at the last CYCLE wake-up.
+   * Zeros after power-on and reset.
+   */
+  private readonly held = new Uint8Array(MPU_SAMPLE_LAST - MPU_SAMPLE_FIRST + 1);
   /** No START was heard for the read that comes next: latch on its first byte. */
   private latchDue = true;
   private asleepReadSaid = false;
@@ -918,7 +947,7 @@ export class VirtualMPU6050 implements I2CDevice {
   dumpRegisters(): Uint8Array {
     this.sync();
     const out = this.regs.slice();
-    out.set(this.asleep ? this.lastAwake : this.encode(), MPU_SAMPLE_FIRST);
+    out.set(this.output(), MPU_SAMPLE_FIRST);
     // The count as it stands, not as a read of the high byte last latched it.
     out[MPU_FIFO_COUNT_H] = this.fifoCount >> 8;
     out[MPU_FIFO_COUNT_L] = this.fifoCount & 0xff;
@@ -996,6 +1025,9 @@ export class VirtualMPU6050 implements I2CDevice {
 
   /** The sample period the registers select, in ns (4.2). */
   private samplePeriodNs(): number {
+    if (this.cycling) {
+      return 1e9 / MPU6050_RULES.cycle_rate_hz[this.regs[MPU_PWR_MGMT_2] >> 6];
+    }
     const dlpf = this.regs[MPU_CONFIG] & 0x07;
     const rate =
       dlpf === 0 || dlpf === 7
@@ -1051,6 +1083,14 @@ export class VirtualMPU6050 implements I2CDevice {
 
   /** `n` samples were taken, the last of them at `atNs` of the guest's time. */
   private sampled(n: number, atNs: number | null): void {
+    // A CYCLE wake-up samples what is not in standby, and holds it until the next.
+    if (this.cycling) {
+      const live = this.encode();
+      const stby = this.standbyFields();
+      for (let f = 0; f < 7; f++) {
+        if (!(stby & (1 << f))) this.held.set(live.subarray(2 * f, 2 * f + 2), 2 * f);
+      }
+    }
     let events = MPU_DATA_RDY_INT;
     if (this.fifoSamples(n)) events |= MPU_FIFO_OFLOW_INT;
     // Only an enabled source raises its status bit. The register map does
@@ -1075,7 +1115,7 @@ export class VirtualMPU6050 implements I2CDevice {
     if ((this.regs[MPU_USER_CTRL] & MPU_USER_FIFO_EN) === 0) return false;
     const sources = this.regs[MPU_FIFO_EN];
     if (sources === 0) return false;
-    const block = this.encode();
+    const block = this.output();
     const packet: number[] = [];
     for (const [bit, at, len] of MPU_FIFO_SOURCES) {
       if (sources & bit) for (let i = 0; i < len; i++) packet.push(block[at + i]);
@@ -1117,7 +1157,7 @@ export class VirtualMPU6050 implements I2CDevice {
     for (const [reg, value] of Object.entries(MPU6050_RULES.power_on)) {
       this.regs[Number(reg)] = value;
     }
-    this.lastAwake.fill(0);
+    this.held.fill(0);
     this.fifoEmpty();
     this.fifoLast = 0;
     this.dmpMem.fill(0);
@@ -1162,7 +1202,7 @@ export class VirtualMPU6050 implements I2CDevice {
     }
     // SIG_COND_RESET clears the sensor registers too (4.27), which shows on a
     // sleeping chip; one that is awake has a new sample by the next read.
-    if (reg === MPU_USER_CTRL && (value & MPU_SIG_COND_RESET) !== 0) this.lastAwake.fill(0);
+    if (reg === MPU_USER_CTRL && (value & MPU_SIG_COND_RESET) !== 0) this.held.fill(0);
     // FIFO_RESET empties it whether or not it is enabled: the register map
     // says "while FIFO_EN equals 0", and i2cdevlib resets it enabled and
     // counts on it (MotionApps resetFIFO).
@@ -1180,10 +1220,9 @@ export class VirtualMPU6050 implements I2CDevice {
       return;
     }
     const stored = value & ~MPU_SELF_CLEARING[reg] & 0xff;
-    // The chip sampled until now, so what it holds asleep is this instant.
-    if (reg === MPU_PWR_MGMT_1 && (stored & MPU_SLEEP) !== 0 && !this.asleep) {
-      this.lastAwake.set(this.encode());
-    }
+    // What sampled until now holds this instant from here on if the write
+    // stops it; what did not keeps what it held.
+    if (reg === MPU_PWR_MGMT_1 || reg === MPU_PWR_MGMT_2) this.held.set(this.output());
     const sampled = this.sampling;
     this.regs[reg] = stored;
     // Waking up, or another rate: the first sample is one period from here.
@@ -1193,8 +1232,33 @@ export class VirtualMPU6050 implements I2CDevice {
   }
 
   private latch(): void {
-    this.sample.set(this.asleep ? this.lastAwake : this.encode());
+    this.sample.set(this.output());
     this.latchDue = false;
+  }
+
+  /** CYCLE with SLEEP clear: one sample per wake-up (4.28). */
+  private get cycling(): boolean {
+    return (this.regs[MPU_PWR_MGMT_1] & (MPU_CYCLE | MPU_SLEEP)) === MPU_CYCLE;
+  }
+
+  /** The fields of the sample block that are not sampling, as bits (ax = bit 0). */
+  private standbyFields(): number {
+    let fields = 0;
+    const stby = this.regs[MPU_PWR_MGMT_2];
+    for (const [bit, field] of MPU_STBY_FIELDS) if (stby & bit) fields |= field;
+    if (this.regs[MPU_PWR_MGMT_1] & MPU_TEMP_DIS) fields |= MPU_TEMP_FIELD;
+    return fields;
+  }
+
+  /** The sample block as the chip's registers hold it now. */
+  private output(): Uint8Array {
+    const frozen = this.asleep || this.cycling ? MPU_ALL_FIELDS : this.standbyFields();
+    if (frozen === MPU_ALL_FIELDS) return this.held.slice();
+    const out = this.encode();
+    for (let f = 0; f < 7; f++) {
+      if (frozen & (1 << f)) out.set(this.held.subarray(2 * f, 2 * f + 2), 2 * f);
+    }
+    return out;
   }
 
   private encode(): Uint8Array {
