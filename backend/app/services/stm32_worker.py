@@ -35,6 +35,7 @@ try:
         MPU6050Slave as _MPU6050Slave, BMP280Slave as _BMP280Slave,
         DS1307Slave as _DS1307Slave, DS3231Slave as _DS3231Slave,
         I2CWriteSink as _I2CWriteSink, find_build_times as _find_build_times,
+        rtc_slave as _rtc_slave,
     )
 except ImportError:
     import importlib.util as _ilu, pathlib as _pl, sys as _sys
@@ -47,6 +48,7 @@ except ImportError:
     _DS1307Slave = _mod.DS1307Slave; _DS3231Slave = _mod.DS3231Slave
     _I2CWriteSink = _mod.I2CWriteSink
     _find_build_times = _mod.find_build_times
+    _rtc_slave = _mod.rtc_slave
 
 _stdout_lock = threading.Lock()
 
@@ -199,8 +201,7 @@ def main() -> None:
             # The record carries the tab's clock, and the panel's temperature
             # for the DS3231, so the first read is already what the tab's
             # model shows.
-            _i2c_slaves[addr] = (_DS3231Slave if stype == 'ds3231' else _DS1307Slave)(
-                s, build_times=_firmware_build_times)
+            _i2c_slaves[addr] = _rtc_slave(stype, s, _firmware_build_times)
         elif stype in ('ssd1306', 'pcf8574'):
             sink = _I2CWriteSink.from_record(stype, s, _emit)
             _i2c_slaves[sink.addr] = sink

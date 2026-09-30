@@ -39,6 +39,13 @@ import type { I2CDevice, RtcDateTime } from '../I2CBusManager';
 import type { GuestClock } from '../buses/types';
 import { buildTimesOfPrograms } from '../firmwareBuildTime';
 import { attachI2cPart, hostClockRecord, parseI2cAddress } from './i2cPart';
+import {
+  WasmDS3231,
+  prepareWasmI2cModel,
+  wasmI2cModelB64,
+  wasmI2cModelEnabled,
+  wasmI2cModule,
+} from './wasmI2cModels';
 import { HD44780Decoder } from '../HD44780Decoder';
 import { registerSensorUpdate, unregisterSensorUpdate } from '../SensorUpdateRegistry';
 import { getSensorControl, sensorControlDefault } from '../sensorControlConfig';
@@ -2130,7 +2137,18 @@ PartSimulationRegistry.register('ds3231', {
       ? fromElement
       : sensorControlDefault('ds3231', 'temperature', 25);
 
-    const dev = new VirtualDS3231({ buildTimes: firmwareBuildTimes });
+    // Behind the i2cwasm flag, off by default: the compiled model of the chip
+    // (buses/models/ds3231.c) in place of VirtualDS3231, and its bytes in the
+    // worker's record so the worker runs it too (project
+    // i2c-model-fidelity-2026-09, P5). Until the compile is ready, this run
+    // keeps the hand-written model.
+    const wantWasm = wasmI2cModelEnabled('ds3231');
+    const wasmModule = wantWasm ? wasmI2cModule('ds3231') : null;
+    if (wantWasm && !wasmModule) void prepareWasmI2cModel('ds3231');
+    const dev = wasmModule
+      ? new WasmDS3231(wasmModule, { buildTimes: firmwareBuildTimes })
+      : new VirtualDS3231({ buildTimes: firmwareBuildTimes });
+    const wasmB64 = wasmModule ? wasmI2cModelB64('ds3231') : null;
     dev.temperatureC = initTemp;
     const part = attachI2cPart({
       simulator,
@@ -2138,7 +2156,10 @@ PartSimulationRegistry.register('ds3231', {
       device: dev,
       // The worker's copy starts from the same temperature and the same
       // clock, and not from defaults of its own.
-      worker: { type: 'ds3231', props: { temperature: initTemp, ...hostClockRecord() } },
+      worker: {
+        type: 'ds3231',
+        props: { temperature: initTemp, ...hostClockRecord(), ...(wasmB64 ? { wasmB64 } : {}) },
+      },
     });
     registerSensorUpdate(componentId, (values) => {
       part.updateWorker(values);
@@ -2147,10 +2168,12 @@ PartSimulationRegistry.register('ds3231', {
     });
     return () => {
       part.dispose();
+      if (dev instanceof WasmDS3231) dev.dispose();
       unregisterSensorUpdate(componentId);
     };
   },
 });
+if (wasmI2cModelEnabled('ds3231')) void prepareWasmI2cModel('ds3231');
 
 // ─── PCF8574 I/O Expander ────────────────────────────────────────────────────
 

@@ -27,7 +27,7 @@ done
 
 out="$front/public/bus-chips"
 mkdir -p "$out"
-for name in microsd; do
+for name in microsd ds3231; do
   "$clang" --target=wasm32-unknown-wasip1 -O2 -nostartfiles \
     -Wl,--import-memory -Wl,--export-table -Wl,--no-entry \
     -Wl,--export=chip_setup -Wl,--allow-undefined \
@@ -42,5 +42,5 @@ const h = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const out = {};
 for (const n of names) out[n] = { sourceSha256: h(`${here}/${n}.c`) };
 writeFileSync(`${here}/manifest.json`, JSON.stringify(out, null, 2) + "\n");
-' "$here" microsd
+' "$here" microsd ds3231
 echo "built: $(ls "$out"/*.wasm | xargs -n1 basename | tr '\n' ' ')"

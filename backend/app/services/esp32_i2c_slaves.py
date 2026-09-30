@@ -1829,6 +1829,41 @@ class DS3231Slave(_RtcSlave):
             r[0x0F] |= 0x02
 
 
+
+def rtc_slave(sensor_type: str, record: dict, build_times=None):
+    """The worker's copy of a clock chip, from the part's record.
+
+    DS1307Slave or DS3231Slave, unless the record of a DS3231 carries the
+    part's compiled model (`wasmB64`): the tab adds it only behind the
+    `i2cwasm` flag, which is off by default (project
+    i2c-model-fidelity-2026-09, P5, decision O4). Then the copy is that model
+    (wasm_i2c_models.WasmDS3231Slave), the same bytes the tab runs. A model
+    that cannot be run leaves the twin in its place, so a flag can never
+    cost a user the part.
+    """
+    if sensor_type == 'ds3231' and isinstance(record.get('wasmB64'), str):
+        try:
+            try:
+                from app.services.wasm_i2c_models import WasmDS3231Slave
+            except ImportError:
+                import importlib.util as _ilu, pathlib as _pl, sys as _sys
+                mod = _sys.modules.get('wasm_i2c_models')
+                if mod is None:
+                    spec = _ilu.spec_from_file_location(
+                        'wasm_i2c_models', _pl.Path(__file__).parent / 'wasm_i2c_models.py')
+                    mod = _ilu.module_from_spec(spec)  # type: ignore[arg-type]
+                    _sys.modules['wasm_i2c_models'] = mod
+                    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+                WasmDS3231Slave = mod.WasmDS3231Slave
+            return WasmDS3231Slave.from_b64(record['wasmB64'], record, build_times=build_times)
+        except Exception as exc:  # noqa: BLE001 - any failure keeps the twin
+            # stderr: a worker's stdout is its channel to the tab.
+            import sys as _sys
+            print(f'ds3231: the compiled model could not be run ({exc}); '
+                  'the worker keeps its own copy', file=_sys.stderr)
+    cls = DS3231Slave if sensor_type == 'ds3231' else DS1307Slave
+    return cls(record, build_times=build_times)
+
 # ── I2C Write Sink (relay for write-only devices: SSD1306, PCF8574) ──────────
 
 class I2CWriteSink:

@@ -1,5 +1,8 @@
 {
   "microsd": {
     "sourceSha256": "0e8fc439ae32b6fdebb257b108038067530845064eedf7a687dfab348beabbe3"
+  },
+  "ds3231": {
+    "sourceSha256": "3ea3781f041ecfb027a885da83f16e1a7e11b3eb0e20a494ca4f4b6072384710"
   }
 }

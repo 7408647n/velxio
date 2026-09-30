@@ -118,6 +118,7 @@ try:
         DS3231Slave  as _DS3231Slave,
         I2CWriteSink as _I2CWriteSink,
         find_build_times as _find_build_times,
+        rtc_slave as _rtc_slave,
     )
 except ImportError:
     # Fallback: direct import when running from backend/ directory as subprocess
@@ -135,6 +136,7 @@ except ImportError:
     _DS3231Slave  = _mod.DS3231Slave   # type: ignore[assignment]
     _I2CWriteSink = _mod.I2CWriteSink  # type: ignore[assignment]
     _find_build_times = _mod.find_build_times  # type: ignore[assignment]
+    _rtc_slave = _mod.rtc_slave  # type: ignore[assignment]
 
 # The table those slaves answer from, by (controller, address) and removed by
 # identity (project board-buses-2026-09, F5). Same fallback dance.
@@ -3112,8 +3114,7 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                 # The record carries the tab's clock, and the panel's
                 # temperature for the DS3231, so the first read is already
                 # what the tab's model shows.
-                slave = (_DS3231Slave if sensor_type == 'ds3231' else _DS1307Slave)(
-                    s, build_times=_firmware_build_times)
+                slave = _rtc_slave(sensor_type, s, _firmware_build_times)
                 _i2c_add(gpio, s, slave, i2c_addr)
                 sensor_data['i2c_addr'] = i2c_addr
                 sensor_data['slave'] = slave
@@ -3453,8 +3454,7 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                     sensor_data['slave'] = slave
                 elif sensor_type in ('ds1307', 'ds3231'):
                     i2c_addr = int(cmd.get('addr', 0x68))
-                    slave = (_DS3231Slave if sensor_type == 'ds3231' else _DS1307Slave)(
-                        cmd, build_times=_firmware_build_times)
+                    slave = _rtc_slave(sensor_type, cmd, _firmware_build_times)
                     _i2c_add(gpio, cmd, slave, i2c_addr)
                     sensor_data['i2c_addr'] = i2c_addr
                     sensor_data['slave'] = slave
