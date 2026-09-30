@@ -10,6 +10,8 @@
  * The firmware is RTClib's DS3231 example setup, built by the compile
  * service for the Uno (Intel HEX) and for the Pico (.bin):
  * `if (rtc.lostPower()) rtc.adjust(DateTime(F(__DATE__), F(__TIME__)))`.
+ * The part powers on with OSF clear, and then the sketch sets nothing; the
+ * tests of the path give it a module fresh from the bag.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -20,6 +22,7 @@ import { PartSimulationRegistry } from '../simulation/parts/PartSimulationRegist
 import '../simulation/parts/ProtocolParts';
 import { useSimulatorStore, getBoardSimulator } from '../store/useSimulatorStore';
 import { busRegistry } from '../simulation/buses/registry';
+import { DS3231_RULES } from '../simulation/I2CBusManager';
 import type { NetResolver, PinRef, ResolvedPin } from '../simulation/buses/types';
 
 // ── Frame clock ──────────────────────────────────────────────────────────────
@@ -92,8 +95,25 @@ class Circuit implements NetResolver {
   }
 }
 
+/**
+ * A DS3231 fresh from the bag, OSF set, for as long as the test runs. The
+ * part powers on with OSF clear (DS3231_RULES.power_on says why), so RTClib's
+ * example `if (rtc.lostPower()) rtc.adjust(...)` leaves it alone; a module
+ * that says it lost power is how these sketches get to set the clock.
+ */
+function freshFromTheBag(): void {
+  const powerOn = DS3231_RULES.power_on as Record<number, number>;
+  const status = powerOn[0x0f];
+  powerOn[0x0f] = status | 0x80;
+  restoreStatus.push(() => {
+    powerOn[0x0f] = status;
+  });
+}
+const restoreStatus: Array<() => void> = [];
+
 const cleanups: Array<() => void> = [];
 afterEach(() => {
+  while (restoreStatus.length) restoreStatus.pop()!();
   while (cleanups.length) {
     try {
       cleanups.pop()!();
@@ -169,6 +189,7 @@ function board(kind: Kind): Run {
 
 describe('RTClib sets the clock to the build time of the firmware the store compiled', () => {
   it('Arduino Uno: the clock stays on the time of the host', () => {
+    freshFromTheBag();
     const run = board('arduino-uno');
     useSimulatorStore.getState().compileBoardProgram(run.id, UNO_HEX);
     expect(run.lines(/^(READY|NOT FOUND|LOST=.)$/, 3)).toEqual(['READY', 'LOST=1', 'LOST=0']);
@@ -176,6 +197,7 @@ describe('RTClib sets the clock to the build time of the firmware the store comp
   }, 120_000);
 
   it('Raspberry Pi Pico: the clock stays on the time of the host', () => {
+    freshFromTheBag();
     const run = board('raspberry-pi-pico');
     useSimulatorStore.getState().compileBoardProgram(run.id, PICO_BIN);
     expect(run.lines(/^(READY|NOT FOUND|LOST=.)$/, 3, 1200)).toEqual(['READY', 'LOST=1', 'LOST=0']);
@@ -185,12 +207,20 @@ describe('RTClib sets the clock to the build time of the firmware the store comp
   it('a clock wired to one board knows the build time of the firmware of every board', () => {
     // The Pico's firmware is what talks to the clock; the Uno beside it was
     // compiled too. Each image is looked through.
+    freshFromTheBag();
     const run = board('raspberry-pi-pico');
     const other = useSimulatorStore.getState().addBoard('arduino-uno' as never, 300, 0);
     cleanups.push(() => useSimulatorStore.getState().removeBoard(other));
     useSimulatorStore.getState().compileBoardProgram(other, UNO_HEX);
     useSimulatorStore.getState().compileBoardProgram(run.id, PICO_BIN);
     expect(run.lines(/^NOW=/, 1, 1200)).toEqual(['NOW=2026-09-30 12:34:56 DOW=3 T=25.00']);
+  }, 120_000);
+
+  it('as the part comes, the sketch sets nothing and reads the time of the host', () => {
+    const run = board('arduino-uno');
+    useSimulatorStore.getState().compileBoardProgram(run.id, UNO_HEX);
+    expect(run.lines(/^(READY|NOT FOUND|LOST=.)$/, 3)).toEqual(['READY', 'LOST=0', 'LOST=0']);
+    expect(run.lines(/^NOW=/, 1)).toEqual(['NOW=2026-09-30 12:34:56 DOW=3 T=25.00']);
   }, 120_000);
 
   it('after the sketch set a date of its own, that is the date', () => {

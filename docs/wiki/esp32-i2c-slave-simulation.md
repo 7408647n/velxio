@@ -40,8 +40,8 @@
 >   finds the two strings in the image it was handed (`find_build_times`), and a clock that is
 >   set to them stays on the tab's time.
 > - DS1307: CH stops the clock, CONTROL and the 56 bytes of RAM are stored, the pointer wraps at
->   `0x3F`. DS3231: CONTROL powers on at `0x1C` and STATUS at `0x88` (OSF set, so
->   `lostPower()` is true until the sketch sets the time), the alarms set A1F and A2F, the
+>   `0x3F`. DS3231: CONTROL powers on at `0x1C` and STATUS at `0x08` (OSF clear, so
+>   `lostPower()` is false: a module somebody set, as CH is 0), the alarms set A1F and A2F, the
 >   temperature is two's complement and starts from the record, the pointer wraps at `0x12`.
 > - The seven time registers are latched at every START, so a burst cannot straddle a second.
 

@@ -4,7 +4,7 @@
   "device": "ds3231",
   "address": "68",
   "rules": {
-    "power_on": { "0E": "1C", "0F": "88" },
+    "power_on": { "0E": "1C", "0F": "08" },
     "write_mask": {
       "00": "7F", "01": "7F", "02": "7F", "03": "07", "04": "3F", "05": "9F", "06": "FF",
       "07": "FF", "08": "FF", "09": "FF", "0A": "FF", "0B": "FF", "0C": "FF", "0D": "FF",
@@ -21,10 +21,10 @@
   "build_times": [["Sep 29 2026", "23:39:41"]],
   "vectors": [
     {
-      "name": "power-on: the host's time with Monday as day 1, CONTROL 0x1C, STATUS 0x88 with OSF set, 25.00 C",
-      "spec": "Datasheet, Control Register (0Eh) and Status Register (0Fh), POR rows; OSF is set the first time power is applied. The host's time is the model's. Monday = 1: RTClib dowToDS3231",
+      "name": "power-on: the host's time with Monday as day 1, CONTROL 0x1C, STATUS 0x08 with OSF clear, 25.00 C",
+      "spec": "Datasheet, Control Register (0Eh) and Status Register (0Fh), POR rows. OSF is 0, not the datasheet's first power-up: the part is a module somebody set and whose battery kept it running, as the DS1307 powers on with CH 0. The host's time is the model's. Monday = 1: RTClib dowToDS3231",
       "steps": [
-        { "op": "read", "reg": "00", "n": 19, "expect": "56 34 12 03 30 09 26 00*7 1C 88 00 19 00" }
+        { "op": "read", "reg": "00", "n": 19, "expect": "56 34 12 03 30 09 26 00*7 1C 08 00 19 00" }
       ]
     },
     {
@@ -41,7 +41,7 @@
       "spec": "Datasheet, I2C Serial Data Bus, data read: the register pointer keeps the last address",
       "steps": [
         { "op": "write", "data": "0E" },
-        { "op": "get", "n": 2, "expect": "1C 88" },
+        { "op": "get", "n": 2, "expect": "1C 08" },
         { "op": "get", "n": 2, "expect": "00 19" }
       ]
     },
@@ -56,7 +56,7 @@
         { "op": "recv", "n": 1, "expect": "59" },
         { "op": "clock", "advance_ms": 200 },
         { "op": "recv", "n": 6, "expect": "59 12 03 30 09 26" },
-        { "op": "recv", "n": 12, "expect": "00*7 1C 88 00 19 00" },
+        { "op": "recv", "n": 12, "expect": "00*7 1C 08 00 19 00" },
         { "op": "recv", "n": 3, "expect": "00 00 13" },
         { "op": "stop" }
       ]
@@ -71,7 +71,7 @@
         { "op": "read", "reg": "00", "n": 7, "expect": "59 59 23 04 31 12 25" },
         { "op": "clock", "advance_ms": 1 },
         { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 05 01 01 26" },
-        { "op": "dump", "at": "00", "expect": "00 00 00 05 01 01 26 00*7 1C 88 00 19 00 00" }
+        { "op": "dump", "at": "00", "expect": "00 00 00 05 01 01 26 00*7 1C 08 00 19 00 00" }
       ]
     },
     {
@@ -114,7 +114,7 @@
       "spec": "Datasheet, Control Register: CONV. The conversion takes no time in the model (decision D5). Makuna Rtc RtcDS3231::ForceTemperatureCompensationUpdate polls CONV until it reads 0",
       "steps": [
         { "op": "write", "data": "0E 3C" },
-        { "op": "read", "reg": "0E", "n": 2, "expect": "1C 88" },
+        { "op": "read", "reg": "0E", "n": 2, "expect": "1C 08" },
         { "op": "write", "data": "0E 05" },
         { "op": "read", "reg": "0E", "n": 1, "expect": "05" },
         { "op": "write", "data": "0E FF" },
@@ -124,16 +124,16 @@
       ]
     },
     {
-      "name": "OSF is set at power-on, a write of 0 clears it, and a write of 1 does not set it; EN32kHz reads back",
-      "spec": "Datasheet, Status Register: OSF remains at logic 1 until written to logic 0. Bits 6 to 4 read 0. RTClib RTC_DS3231::lostPower is register 0x0F >> 7, enable32K and disable32K write bit 3",
+      "name": "OSF is clear at power-on and a write of 1 does not set it; EN32kHz reads back",
+      "spec": "Datasheet, Status Register: OSF can only be written to logic 0; the chip sets it when its oscillator stops, which this model's never does. Bits 6 to 4 read 0. RTClib RTC_DS3231::lostPower is register 0x0F >> 7, enable32K and disable32K write bit 3",
       "steps": [
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
-        { "op": "write", "data": "0F 08" },
         { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "write", "data": "0F FF" },
         { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "write", "data": "0F 00" },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "00" }
+        { "op": "read", "reg": "0F", "n": 1, "expect": "00" },
+        { "op": "write", "data": "0F 88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" }
       ]
     },
     {
@@ -154,25 +154,25 @@
         { "op": "write", "data": "07 00 35 12 B0" },
         { "op": "write", "data": "0E 1D" },
         { "op": "write", "data": "0F" },
-        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "get", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 3749 },
         { "op": "write", "data": "0F" },
-        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "get", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 1 },
         { "op": "write", "data": "0F" },
-        { "op": "get", "n": 1, "expect": "89" },
+        { "op": "get", "n": 1, "expect": "09" },
         { "op": "clock", "advance_ms": 60000 },
         { "op": "write", "data": "0F" },
-        { "op": "get", "n": 1, "expect": "89" },
-        { "op": "write", "data": "0F 88" },
+        { "op": "get", "n": 1, "expect": "09" },
+        { "op": "write", "data": "0F 08" },
         { "op": "write", "data": "0F" },
-        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "get", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 86339000 },
         { "op": "write", "data": "0F" },
-        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "get", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 1000 },
         { "op": "write", "data": "0F" },
-        { "op": "get", "n": 1, "expect": "89" }
+        { "op": "get", "n": 1, "expect": "09" }
       ]
     },
     {
@@ -181,12 +181,12 @@
       "steps": [
         { "op": "write", "data": "0E 00" },
         { "op": "write", "data": "07 00 35 12 B0" },
-        { "op": "write", "data": "0F 8B" },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "write", "data": "0F 0B" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 4000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "89" },
-        { "op": "write", "data": "0F 8A" },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" }
+        { "op": "read", "reg": "0F", "n": 1, "expect": "09" },
+        { "op": "write", "data": "0F 0A" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" }
       ]
     },
     {
@@ -194,21 +194,21 @@
       "spec": "Datasheet, Table 2, alarm 1 mask bits 1111, 1110 and 1100",
       "steps": [
         { "op": "write", "data": "07 80 80 80 80" },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 750 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "89" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "09" },
         { "op": "write", "data": "07 05 80 80 80" },
-        { "op": "write", "data": "0F 88" },
+        { "op": "write", "data": "0F 08" },
         { "op": "clock", "advance_ms": 7000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 1000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "89" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "09" },
         { "op": "write", "data": "07 05 36 80 80" },
-        { "op": "write", "data": "0F 88" },
+        { "op": "write", "data": "0F 08" },
         { "op": "clock", "advance_ms": 59000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 1000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "89" }
+        { "op": "read", "reg": "0F", "n": 1, "expect": "09" }
       ]
     },
     {
@@ -217,7 +217,7 @@
       "steps": [
         { "op": "write", "data": "07 30 40 12 80" },
         { "op": "clock", "advance_ms": 3600000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "89" }
+        { "op": "read", "reg": "0F", "n": 1, "expect": "09" }
       ]
     },
     {
@@ -226,21 +226,21 @@
       "steps": [
         { "op": "write", "data": "0B 80 80 80" },
         { "op": "clock", "advance_ms": 3000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 1000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "8A" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "0A" },
         { "op": "write", "data": "0B 37 80 80" },
-        { "op": "write", "data": "0F 88" },
+        { "op": "write", "data": "0F 08" },
         { "op": "clock", "advance_ms": 60000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 60000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "8A" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "0A" },
         { "op": "write", "data": "0B 40 13 80" },
-        { "op": "write", "data": "0F 88" },
+        { "op": "write", "data": "0F 08" },
         { "op": "clock", "advance_ms": 3600000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 180000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "8A" }
+        { "op": "read", "reg": "0F", "n": 1, "expect": "0A" }
       ]
     },
     {
@@ -250,12 +250,12 @@
         { "op": "write", "data": "07 00 35 12 29" },
         { "op": "write", "data": "0B 35 12 01" },
         { "op": "clock", "advance_ms": 60000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "write", "data": "07 00 36 12 30" },
         { "op": "clock", "advance_ms": 60000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "89" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "09" },
         { "op": "clock", "advance_ms": 86400000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "8B" }
+        { "op": "read", "reg": "0F", "n": 1, "expect": "0B" }
       ]
     },
     {
@@ -264,15 +264,15 @@
       "steps": [
         { "op": "write", "data": "07 00 35 12 44" },
         { "op": "clock", "advance_ms": 60000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 86400000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "89" },
-        { "op": "write", "data": "0F 88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "09" },
+        { "op": "write", "data": "0F 08" },
         { "op": "write", "data": "00 58 59 23 01 27 09 26" },
         { "op": "write", "data": "07 00 00 00 42" },
         { "op": "clock", "advance_ms": 2000 },
         { "op": "read", "reg": "00", "n": 7, "expect": "00 00 00 02 28 09 26" },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "89" }
+        { "op": "read", "reg": "0F", "n": 1, "expect": "09" }
       ]
     },
     {
@@ -281,10 +281,10 @@
       "steps": [
         { "op": "write", "data": "07 00 35 72 80" },
         { "op": "clock", "advance_ms": 60000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "write", "data": "00 58 34 72 03 30 09 26" },
         { "op": "clock", "advance_ms": 2000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "89" }
+        { "op": "read", "reg": "0F", "n": 1, "expect": "09" }
       ]
     },
     {
@@ -294,10 +294,10 @@
         { "op": "write", "data": "07 00 00 13 80" },
         { "op": "write", "data": "00 00 30 14 03 30 09 26" },
         { "op": "clock", "advance_ms": 5000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "write", "data": "00 59 59 12 03 30 09 26" },
         { "op": "clock", "advance_ms": 1000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "89" }
+        { "op": "read", "reg": "0F", "n": 1, "expect": "09" }
       ]
     },
     {
@@ -354,15 +354,15 @@
     },
     {
       "name": "the build time of the firmware, written in one burst, leaves the clock on the host's time",
-      "spec": "Decision D7. RTClib 2.1.4 RTC_DS3231::adjust(DateTime(F(__DATE__), F(__TIME__))) after lostPower(): pointer 0, seconds, minutes, hours, day of week with Monday as 1, date, month, year; then STATUS is read and written back with OSF cleared. 29 September 2026 is a Tuesday",
+      "spec": "Decision D7. RTClib 2.1.4 RTC_DS3231::adjust(DateTime(F(__DATE__), F(__TIME__))): pointer 0, seconds, minutes, hours, day of week with Monday as 1, date, month, year; then STATUS is read and written back with OSF cleared. 29 September 2026 is a Tuesday",
       "driver": "rtclib-ds3231-adjust-build-time",
       "steps": [
         { "op": "write", "data": "" },
         { "op": "write", "data": "0F" },
-        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "get", "n": 1, "expect": "08" },
         { "op": "write", "data": "00 41 39 23 02 29 09 26" },
         { "op": "write", "data": "0F" },
-        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "get", "n": 1, "expect": "08" },
         { "op": "write", "data": "0F 08" },
         { "op": "read", "reg": "00", "n": 7, "expect": "56 34 12 03 30 09 26" },
         { "op": "clock", "advance_ms": 750 },
@@ -377,9 +377,9 @@
       "steps": [
         { "op": "write", "data": "07 00 00 06 80" },
         { "op": "write", "data": "00 41 39 23 02 29 09 26" },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" },
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" },
         { "op": "clock", "advance_ms": 1000 },
-        { "op": "read", "reg": "0F", "n": 1, "expect": "88" }
+        { "op": "read", "reg": "0F", "n": 1, "expect": "08" }
       ]
     },
     {
@@ -408,10 +408,10 @@
       "steps": [
         { "op": "write", "data": "" },
         { "op": "write", "data": "0F" },
-        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "get", "n": 1, "expect": "08" },
         { "op": "write", "data": "00 30 59 23 04 29 02 24" },
         { "op": "write", "data": "0F" },
-        { "op": "get", "n": 1, "expect": "88" },
+        { "op": "get", "n": 1, "expect": "08" },
         { "op": "write", "data": "0F 08" },
         { "op": "write", "data": "0E" },
         { "op": "get", "n": 1, "expect": "1C" },

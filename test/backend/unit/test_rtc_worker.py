@@ -167,6 +167,6 @@ class TestWhatTheChipsKeep:
 
     def test_ds3231_control_and_status(self, worker):
         w = worker(sensors=[record('ds3231', **TAB)])
-        assert read_regs(w, 0x0E, 2) == [0x1C, 0x88]
-        write_reg(w, 0x0F, 0x08)
         assert read_regs(w, 0x0E, 2) == [0x1C, 0x08]
+        write_reg(w, 0x0F, 0x80)
+        assert read_regs(w, 0x0E, 2) == [0x1C, 0x00]

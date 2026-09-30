@@ -6,6 +6,9 @@
  *
  * fixtures/avr-rtclib-ds3231 is the setup of RTClib's own DS3231 example:
  * `if (rtc.lostPower()) rtc.adjust(DateTime(F(__DATE__), F(__TIME__)))`.
+ * The part powers on with OSF clear, so that sketch reads the host's time
+ * and sets nothing; the tests of the adjust() give it a module fresh from
+ * the bag.
  * fixtures/avr-rtclib-ds1307 sets the clock with the same two strings and no
  * F(). Both are what decision D7 of project i2c-model-fidelity-2026-09 is
  * about: a clock set to the build time of its firmware stays on the host's
@@ -33,7 +36,12 @@ import { AVRSimulator } from '../simulation/AVRSimulator';
 import { PinManager } from '../simulation/PinManager';
 import { PartSimulationRegistry } from '../simulation/parts/PartSimulationRegistry';
 import '../simulation/parts/ProtocolParts';
-import { VirtualDS1307, VirtualDS3231, type I2CDevice } from '../simulation/I2CBusManager';
+import {
+  DS3231_RULES,
+  VirtualDS1307,
+  VirtualDS3231,
+  type I2CDevice,
+} from '../simulation/I2CBusManager';
 import { buildTimesOfProgram } from '../simulation/firmwareBuildTime';
 import { dispatchSensorUpdate } from '../simulation/SensorUpdateRegistry';
 import { busRegistry } from '../simulation/buses';
@@ -172,12 +180,29 @@ function builtAt(hex: string): string[] {
   );
 }
 
+/**
+ * A DS3231 fresh from the bag, OSF set, for as long as the test runs. The
+ * part powers on with OSF clear (DS3231_RULES.power_on says why), so RTClib's
+ * example `if (rtc.lostPower()) rtc.adjust(...)` leaves it alone; a module
+ * that says it lost power is how these sketches get to set the clock.
+ */
+function freshFromTheBag(): void {
+  const powerOn = DS3231_RULES.power_on as Record<number, number>;
+  const status = powerOn[0x0f];
+  powerOn[0x0f] = status | 0x80;
+  restoreStatus.push(() => {
+    powerOn[0x0f] = status;
+  });
+}
+const restoreStatus: Array<() => void> = [];
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(HOST);
 });
 
 afterEach(() => {
+  while (restoreStatus.length) restoreStatus.pop()!();
   compiled(null);
   useSimulatorStore.setState({ compiledHex: null });
   clearBench();
@@ -185,7 +210,16 @@ afterEach(() => {
 });
 
 describe('RTClib RTC_DS3231 on an Arduino Uno, compiled', () => {
+  it('as it comes, says it kept its power and shows the time of the host', () => {
+    compiled(RTCLIB_DS3231);
+    const b = bench(RTCLIB_DS3231, part('ds3231'));
+    expect(b.lines(/^(READY|NOT FOUND|LOST=.)$/, 3)).toEqual(['READY', 'LOST=0', 'LOST=0']);
+    expect(b.writes.some((w) => w.length === 8)).toBe(false);
+    expect(b.lines(/^NOW=/, 1)).toEqual(['NOW=2026-09-30 12:34:56 DOW=3 T=25.00']);
+  }, 120_000);
+
   it('writes the build time that the scan of its image finds', () => {
+    freshFromTheBag();
     const clock = Date.UTC(2026, 8, 30, 12, 34, 56, 250);
     const b = bench(RTCLIB_DS3231, model(new VirtualDS3231({ clock: () => clock })));
     expect(b.lines(/^(READY|NOT FOUND|LOST=.)$/, 3)).toEqual(['READY', 'LOST=1', 'LOST=0']);
@@ -196,7 +230,8 @@ describe('RTClib RTC_DS3231 on an Arduino Uno, compiled', () => {
     expect(b.lines(/^NOW=/, 1)).toEqual([`NOW=${written(adjust)} DOW=3 T=25.00`]);
   }, 120_000);
 
-  it('on the canvas, stays on the time of the host', () => {
+  it('on the canvas, set to the build time, stays on the time of the host', () => {
+    freshFromTheBag();
     compiled(RTCLIB_DS3231);
     const b = bench(RTCLIB_DS3231, part('ds3231'));
     expect(b.lines(/^(READY|NOT FOUND|LOST=.)$/, 3)).toEqual(['READY', 'LOST=1', 'LOST=0']);
@@ -209,12 +244,14 @@ describe('RTClib RTC_DS3231 on an Arduino Uno, compiled', () => {
   }, 120_000);
 
   it('finds the image where the single-board load path leaves it', () => {
+    freshFromTheBag();
     useSimulatorStore.setState({ compiledHex: RTCLIB_DS3231 });
     const b = bench(RTCLIB_DS3231, part('ds3231'));
     expect(b.lines(/^NOW=/, 1)).toEqual(['NOW=2026-09-30 12:34:56 DOW=3 T=25.00']);
   }, 120_000);
 
   it('with no image in the store, keeps the time it was given and counts from it', () => {
+    freshFromTheBag();
     const b = bench(RTCLIB_DS3231, part('ds3231'));
     const [built] = builtAt(RTCLIB_DS3231);
     expect(b.lines(/^NOW=/, 1)).toEqual([`NOW=${built} DOW=3 T=25.00`]);

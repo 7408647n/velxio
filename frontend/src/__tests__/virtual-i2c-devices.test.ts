@@ -652,21 +652,21 @@ describe('VirtualDS3231 — time registers', () => {
     expect(rtcRead(dev, 0x0e, 1)).toEqual([0x1c]);
   });
 
-  it('register 0x0F (status) powers on at 0x88, and lostPower() is true until adjust()', () => {
+  it('register 0x0F (status) powers on at 0x08, and lostPower() is false', () => {
+    // A module somebody set, as the DS1307 powers on with CH 0.
     const dev = new VirtualDS3231({ clock: rtcClock().read });
     const lostPower = () => rtcRead(dev, 0x0f, 1)[0] >> 7 === 1;
-    expect(rtcRead(dev, 0x0f, 1)).toEqual([0x88]);
-    expect(lostPower()).toBe(true);
-    // RTClib adjust(): the time, then STATUS written back with OSF cleared.
-    rtcWrite(dev, 0x00, 0x00, 0x30, 0x12, 0x06, 0x19, 0x01, 0x13);
-    rtcWrite(dev, 0x0f, rtcRead(dev, 0x0f, 1)[0] & ~0x80);
+    expect(rtcRead(dev, 0x0f, 1)).toEqual([0x08]);
+    expect(lostPower()).toBe(false);
+    // OSF can only be written to 0: a sketch cannot set it either.
+    rtcWrite(dev, 0x0f, 0x88);
     expect(lostPower()).toBe(false);
   });
 
   it('CONV is over by the next read', () => {
     const dev = new VirtualDS3231({ clock: rtcClock().read });
     rtcWrite(dev, 0x0e, 0x1c | 0x20);
-    expect(rtcRead(dev, 0x0e, 2)).toEqual([0x1c, 0x88]);
+    expect(rtcRead(dev, 0x0e, 2)).toEqual([0x1c, 0x08]);
   });
 
   it('A1F latches when the time matches and clears when the sketch writes 0 to it', () => {

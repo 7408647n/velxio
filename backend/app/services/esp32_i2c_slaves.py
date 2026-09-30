@@ -436,18 +436,18 @@ DS1307_RULES = {
 
 DS3231_RULES = {
     # CONTROL 0x1C: oscillator on, 8.192 kHz selected, INTCN set, both alarm
-    # interrupts off. STATUS 0x88: EN32kHz set, and OSF set.
+    # interrupts off. STATUS 0x08: EN32kHz set, OSF clear.
     #
-    # OSF is the datasheet's value for "the first time power is applied", and
-    # that is what a Run is to the part: it is built again, and a date a
-    # sketch set in the run before is gone with the old one. So the flag says
-    # what is true, and a sketch that follows the RTClib example
-    # (`if (rtc.lostPower()) rtc.adjust(...)`) sets the clock on every Run, as
-    # it does on a module fresh from the bag. Unlike CH, OSF stops nothing: a
-    # sketch that does not look at it reads the host's time. Of the 141
-    # projects of the 2026-09 corpus that test lostPower(), 139 set the clock
-    # when it is true and 2 print a line; none stops.
-    'power_on': {0x0E: 0x1C, 0x0F: 0x88},
+    # OSF powers on at 0, as the DS1307's CH does, and for the same reason:
+    # the part is a module somebody set and whose battery kept it running,
+    # which is why it shows the host's time. The datasheet sets OSF "the first
+    # time power is applied", and a module fresh from the bag would say
+    # lostPower() on every Run: in the 2026-09 corpus about 64 projects would
+    # print a "lost power" line each time and 2 would blank their clock. The
+    # chip also sets OSF when its oscillator stops (VCC and VBAT both too low,
+    # EOSC in battery mode), and this model has no such case: it runs from
+    # VCC with its oscillator on. So OSF only ever reads 0 here.
+    'power_on': {0x0E: 0x1C, 0x0F: 0x08},
     # The bits of each register a write stores as written. Bit 7 of the
     # seconds does not exist. CONV is left out of CONTROL (self_clearing), and
     # of STATUS only EN32kHz is a plain read/write bit.
@@ -989,9 +989,9 @@ class DS3231Slave(_RtcSlave):
       - CONTROL powers on at 0x1C. RTClib's setAlarm1() and setAlarm2() refuse
         to arm an alarm unless INTCN reads 1, and CONV is gone by the next
         read (Makuna's Rtc polls it after forcing a conversion).
-      - STATUS powers on with OSF set (DS3231_RULES['power_on'] says why), and
-        RTClib's lostPower() reads it. adjust() clears it. OSF, A1F and A2F
-        can only be written to 0.
+      - STATUS powers on with OSF clear (DS3231_RULES['power_on'] says why),
+        so RTClib's lostPower() is false. OSF, A1F and A2F can only be
+        written to 0.
       - A1F and A2F are set when the clock counts through a second the
         alarm's registers match, whether or not the interrupt is enabled, and
         stay until the sketch writes them to 0 (RTClib alarmFired,

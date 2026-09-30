@@ -345,8 +345,10 @@ class TestDS3231Slave(unittest.TestCase):
         unless INTCN reads 1."""
         self.assertEqual(i2c_read_seq(self.slave, 0x0E, 1), [0x1C])
 
-    def test_status_register_powers_on_with_osf_set(self):
-        self.assertEqual(i2c_read_seq(self.slave, 0x0F, 1), [0x88])
+    def test_status_register_powers_on_with_osf_clear(self):
+        """A module somebody set, as the DS1307 powers on with CH 0: RTClib's
+        lostPower() is false and a sketch prints no "lost power" line."""
+        self.assertEqual(i2c_read_seq(self.slave, 0x0F, 1), [0x08])
 
     def test_temperature_default_25c(self):
         self.assertEqual(i2c_read_seq(self.slave, 0x11, 2), [25, 0x00])
