@@ -1420,6 +1420,38 @@ describe('mpu6050 — the INT pin on the board', () => {
     expect(edges.at(-1)).toEqual([true, 3500]);
   });
 
+  it('drives the pin on a board whose registerSensor declines the part, as AVR and RP2040 do', () => {
+    // Their simulators carry a registerSensor that answers false and no
+    // hostsCustomChips. The part was taken for worker-hosted there, and the
+    // pin INT is wired to never moved on an Uno.
+    const clock = new RigClock();
+    const rig = i2cRig({ imu: HW_I2C_PINS }, clock);
+    const edges: boolean[] = [];
+    const registerSensor = vi.fn(() => false);
+    const sim = {
+      setPinState: (pin: number, level: boolean) => {
+        if (pin === INT_PIN) edges.push(level);
+      },
+      pinManager: new PinManager(),
+      registerSensor,
+      updateSensor: () => {},
+      unregisterSensor: () => {},
+    };
+    PartSimulationRegistry.get('mpu6050')!.attachEvents!(
+      makeElement(),
+      sim as any,
+      (name) => (name === 'INT' ? INT_PIN : null),
+      'imu',
+    );
+    expect(registerSensor).toHaveBeenCalled();
+    rig.write(0x68, [0x19, 0x07]);
+    rig.write(0x68, [0x38, 0x01]);
+    wakeImu(rig);
+    edges.length = 0;
+    clock.advanceUs(1500);
+    expect(edges).toEqual([true, false]);
+  });
+
   it('arms nothing while no interrupt is enabled, and lets go of the pin when it leaves', () => {
     const { clock, rig, dispose } = setup();
     wakeImu(rig);
