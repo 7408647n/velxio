@@ -1271,6 +1271,11 @@ PartSimulationRegistry.register('bmp280', {
       device: dev,
       worker: { type: 'bmp280', props: { temperature: initTemp, pressure: initPressure } },
     });
+    dev.onAsleepRead = () =>
+      part.report(
+        'i2c-target-asleep',
+        `BMP280 0x${addr.toString(16)} is in sleep mode and has not measured: write the mode to ctrl_meas (0xF4), 0x27 for normal mode`,
+      );
 
     registerSensorUpdate(componentId, (values) => {
       part.updateWorker(values);

@@ -25,6 +25,13 @@
 > first read shows the panel's values (24 °C, not 25). The per-event log line and the `i2c_trace`
 > message of "Debugging Infrastructure" are off unless the backend runs with
 > `VELXIO_I2C_TRACE=1`: they cost about 0.8 ms on every register read.
+>
+> The `BMP280Slave` of section 8 changed the same way, as the twin of `VirtualBMP280`
+> (`test/fixtures/i2c-vectors/bmp280.json`). It powers on in sleep mode with `0x80000` in its data
+> registers and measures once the sketch writes a mode to `ctrl_meas` (`0xF4`); forced mode is one
+> measurement and reads back as sleep mode; `measuring` (status bit 3) reads 1 once after a
+> conversion starts; `0xB6` written to `0xE0` is a reset; and a write is pairs of register address
+> and data, with no auto-increment.
 
 ---
 

@@ -355,6 +355,11 @@ describe('VirtualBMP280 — temperature compensation', () => {
    * the two 20-bit raw ADC values.  Returns { adcP, adcT }.
    */
   function readRawAdc(dev: VirtualBMP280): { adcP: number; adcT: number } {
+    // The chip powers on asleep and measures nothing there: normal mode,
+    // oversampling x1, as every driver selects before it reads.
+    dev.writeByte(0xf4);
+    dev.writeByte(0x27);
+    dev.stop();
     dev.writeByte(0xf7);
     const pMsb = dev.readByte();
     const pLsb = dev.readByte();
@@ -417,11 +422,11 @@ describe('VirtualBMP280 — temperature compensation', () => {
     return p + ((digP9 * p * p) / 2147483648.0 + (p * digP8) / 32768.0 + digP7) / 16.0;
   }
 
-  it('default 25°C produces compensated temperature within ±0.5°C', () => {
+  it('default 24°C, where the sensor panel starts, produces compensated temperature within ±0.5°C', () => {
     const dev = new VirtualBMP280();
     const { adcT } = readRawAdc(dev);
     const centideg = compensateT(adcT);
-    expect(centideg / 100).toBeCloseTo(25, 0);
+    expect(centideg / 100).toBeCloseTo(24, 0);
   });
 
   it('setting temperatureC = 20 produces ~20°C compensated output', () => {
@@ -448,6 +453,9 @@ describe('VirtualBMP280 — temperature compensation', () => {
 
 describe('VirtualBMP280 — pressure compensation', () => {
   function readRawAdc(dev: VirtualBMP280): { adcP: number; adcT: number } {
+    dev.writeByte(0xf4);
+    dev.writeByte(0x27); // normal mode, oversampling x1
+    dev.stop();
     dev.writeByte(0xf7);
     const pMsb = dev.readByte(),
       pLsb = dev.readByte(),
@@ -518,10 +526,136 @@ describe('VirtualBMP280 — ctrl_meas register is writable', () => {
     const dev = new VirtualBMP280();
     // Set reg pointer via normal write
     dev.writeByte(0xf4); // pointer → 0xF4
-    dev.writeByte(0x57); // write 0x57 (forced mode + oversampling)
+    dev.writeByte(0x57); // write 0x57 (normal mode + oversampling)
     dev.stop();
     dev.writeByte(0xf4); // read back
     expect(dev.readByte()).toBe(0x57);
+  });
+});
+
+// The rules below are held to the datasheet, step by step, by the shared bus
+// vectors (bmp280-vectors.test.ts). These are the same rules on the bare
+// model, one driver's habit each.
+describe('VirtualBMP280 — what a driver can tell from the chip', () => {
+  const write = (dev: VirtualBMP280, ...bytes: number[]) => {
+    for (const b of bytes) expect(dev.writeByte(b)).toBe(true);
+    dev.stop();
+  };
+  const read = (dev: VirtualBMP280, reg: number, n: number): number[] => {
+    dev.writeByte(reg);
+    const out = Array.from({ length: n }, () => dev.readByte());
+    dev.stop();
+    return out;
+  };
+  const RESET_VALUE = [0x80, 0x00, 0x00, 0x80, 0x00, 0x00];
+
+  it('holds the reset value 0x80000 in the data registers until a mode is selected', () => {
+    const dev = new VirtualBMP280();
+    expect(read(dev, 0xf7, 6)).toEqual(RESET_VALUE);
+    dev.temperatureC = 30;
+    dev.pressureHPa = 900;
+    expect(read(dev, 0xf7, 6)).toEqual(RESET_VALUE);
+  });
+
+  it('measuring reads 1 on the first status read after a forced write and 0 after', () => {
+    // SparkFun's Example6 and pocketBME280's examples wait for the 1 with no
+    // timeout, Adafruit's takeForcedMeasurement() waits for the 0.
+    const dev = new VirtualBMP280();
+    expect(read(dev, 0xf3, 1)).toEqual([0x00]);
+    write(dev, 0xf4, 0x25);
+    expect([0, 1, 2].map(() => read(dev, 0xf3, 1)[0])).toEqual([0x08, 0, 0]);
+  });
+
+  it('im_update is never seen', () => {
+    // esp-idf-lib and the Bosch API wait for it to clear after a soft reset.
+    const dev = new VirtualBMP280();
+    write(dev, 0xe0, 0xb6);
+    expect(read(dev, 0xf3, 1)[0] & 0x01).toBe(0);
+    write(dev, 0xf4, 0x25);
+    expect(read(dev, 0xf3, 1)[0] & 0x01).toBe(0);
+  });
+
+  it('forced mode is one measurement, and the mode bits are back at 00', () => {
+    const dev = new VirtualBMP280();
+    dev.temperatureC = 30;
+    write(dev, 0xf4, 0x25);
+    expect(read(dev, 0xf4, 1)).toEqual([0x24]);
+    const first = read(dev, 0xf7, 6);
+    expect(first).not.toEqual(RESET_VALUE);
+    dev.temperatureC = 10;
+    expect(read(dev, 0xf7, 6), 'what was measured stays until the next conversion').toEqual(first);
+    write(dev, 0xf4, 0x26); // 10 is forced mode too
+    expect(read(dev, 0xf4, 1)).toEqual([0x24]);
+    expect(read(dev, 0xf7, 6)).not.toEqual(first);
+  });
+
+  it('a soft reset restores the power-on registers and reads 0x00, and keeps the panel', () => {
+    const dev = new VirtualBMP280();
+    dev.temperatureC = 30;
+    write(dev, 0xf5, 0x90);
+    write(dev, 0xf4, 0x57);
+    const measured = read(dev, 0xf7, 6);
+    write(dev, 0xe0, 0xb6);
+    expect(read(dev, 0xe0, 1)).toEqual([0x00]);
+    expect(read(dev, 0xf3, 3)).toEqual([0x00, 0x00, 0x00]);
+    expect(read(dev, 0xf7, 6)).toEqual(RESET_VALUE);
+    expect(read(dev, 0xd0, 1)).toEqual([0x58]);
+    expect(dev.temperatureC).toBe(30);
+    write(dev, 0xf4, 0x57);
+    expect(read(dev, 0xf7, 6)).toEqual(measured);
+  });
+
+  it('only the reset word resets', () => {
+    const dev = new VirtualBMP280();
+    write(dev, 0xf4, 0x27);
+    write(dev, 0xe0, 0xb5);
+    expect(read(dev, 0xe0, 1)).toEqual([0x00]);
+    expect(read(dev, 0xf4, 1)).toEqual([0x27]);
+  });
+
+  it('a write is pairs of register address and data, with no auto-increment', () => {
+    const dev = new VirtualBMP280();
+    write(dev, 0xf5, 0xa0, 0xf4, 0x27);
+    expect(read(dev, 0xf4, 2)).toEqual([0x27, 0xa0]);
+    // Three bytes from a master that expects the address to count up: the
+    // third is taken for an address, and config keeps what it had.
+    write(dev, 0xf4, 0x57, 0x10);
+    expect(read(dev, 0xf4, 2)).toEqual([0x57, 0xa0]);
+  });
+
+  it('esp-idf-lib reads status and ctrl_meas with its two-byte write', () => {
+    // bmp280_is_measuring() sends { 0xF3, 0xF4 } and reads two bytes. The
+    // chip takes 0xF4 for the data of the read-only status, and the read
+    // begins at 0xF3. With an auto-incrementing write it read ctrl_meas and
+    // config, and its busy flag was bit 3 of the oversampling.
+    const dev = new VirtualBMP280();
+    write(dev, 0xf4, 0x6d); // forced, temperature x4, pressure x4
+    const poll = (): boolean => {
+      dev.writeByte(0xf3);
+      dev.writeByte(0xf4);
+      const [status, ctrl] = [dev.readByte(), dev.readByte()];
+      dev.stop();
+      return (ctrl & 0x03) === 0x01 || (status & 0x08) !== 0;
+    };
+    expect([poll(), poll(), poll()]).toEqual([true, false, false]);
+    expect(read(dev, 0xf3, 2), 'status was not written').toEqual([0x00, 0x6c]);
+  });
+
+  it('the calibration, the id and the data registers cannot be written', () => {
+    const dev = new VirtualBMP280();
+    const before = Array.from(dev.dumpRegisters());
+    for (const reg of [0x88, 0x9f, 0xd0, 0xf3, 0xf7, 0xfc, 0x00, 0xf6]) write(dev, reg, 0xaa);
+    expect(Array.from(dev.dumpRegisters())).toEqual(before);
+  });
+
+  it('dumpRegisters is what a read would find, with no trigger bit', () => {
+    const dev = new VirtualBMP280();
+    expect(Array.from(dev.dumpRegisters().slice(0xf7, 0xfd))).toEqual(RESET_VALUE);
+    write(dev, 0xf4, 0x27);
+    dev.temperatureC = 30;
+    const dump = dev.dumpRegisters();
+    expect(dump[0xf3]).toBe(0x00);
+    expect(Array.from(dump.slice(0xf7, 0xfd))).toEqual(read(dev, 0xf7, 6));
   });
 });
 
