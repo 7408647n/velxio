@@ -1739,7 +1739,7 @@ void loop() {
     id: 'stm32-bluepill-rtc',
     title: 'STM32: DS1307 RTC Clock (I2C)',
     description:
-      'Read the current time and date from a DS1307 real-time clock over I2C1 on the STM32 Blue Pill (SCL=PB6, SDA=PB7). The QEMU DS1307 slave returns the live system clock in BCD, ticking once a second in the Serial Monitor.',
+      'Read the current time and date from a DS1307 real-time clock over I2C1 on the STM32 Blue Pill (SCL=PB6, SDA=PB7). The DS1307 shows the time of your browser in BCD, ticking once a second in the Serial Monitor.',
     category: 'sensors',
     difficulty: 'intermediate',
     boardFilter: 'stm32-bluepill',

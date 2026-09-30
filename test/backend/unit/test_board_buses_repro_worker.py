@@ -124,10 +124,11 @@ def sd_cmd(idx: int, arg: int = 0) -> list[int]:
 class Worker:
     """One esp32_worker.py child process with libqemu stubbed at ctypes."""
 
-    def __init__(self, tmp_path: Path, sensors=(), bus_map=None) -> None:
+    def __init__(self, tmp_path: Path, sensors=(), bus_map=None,
+                 firmware: bytes = b'\x00' * 64) -> None:
         cfg = {
             'lib_path': str(tmp_path / 'libqemu-xtensa.so'),
-            'firmware_b64': base64.b64encode(b'\x00' * 64).decode('ascii'),
+            'firmware_b64': base64.b64encode(firmware).decode('ascii'),
             'machine': 'esp32-picsimlab',
             'sensors': list(sensors),
         }

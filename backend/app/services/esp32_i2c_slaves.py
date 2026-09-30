@@ -20,8 +20,9 @@ ACK convention (matches QEMU i2c core):
   For READ events: return value is the data byte delivered to the firmware.
 """
 
-import datetime as _datetime
 import math as _math
+import re as _re
+import time as _time
 
 
 # ── Protocol constants ────────────────────────────────────────────────────────
@@ -408,62 +409,677 @@ class BMP280Slave:
 
 # ── DS1307 / DS3231 Real-Time Clock ──────────────────────────────────────────
 
-class DS1307Slave:
-    """DS1307 I2C RTC — returns current system time in BCD (address 0x68)."""
+# What the two clock chips do with a byte written to them, as tables. They are
+# DS1307_RULES and DS3231_RULES of the tab models
+# (frontend/src/simulation/I2CBusManager.ts) and the `rules` of
+# test/fixtures/i2c-vectors/ds1307.json and ds3231.json, which the tests hold
+# both copies against. DS1307: datasheet REV 3/15. DS3231: datasheet 19-5170
+# rev 10.
+DS1307_RULES = {
+    # CONTROL powers on with RS1 and RS0 set ("typically set to a 1", Control
+    # Register). The RAM is modelled as zeros; the datasheet leaves it open.
+    #
+    # CH powers on at 0: the clock runs. The datasheet has CH at 1 on a chip
+    # that never had power, with the time stopped at 00:00:00 of 01/01/00, and
+    # a sketch that only reads the clock would show that forever (seven
+    # examples of the gallery only read it). So the part comes as a module
+    # somebody set: running, and on the host's time.
+    'power_on': {0x07: 0x03},
+    # The bits of each register that exist; the others always read 0 (Table 2).
+    'write_mask': {
+        0x00: 0xFF, 0x01: 0x7F, 0x02: 0x7F, 0x03: 0x07,
+        0x04: 0x3F, 0x05: 0x1F, 0x06: 0xFF, 0x07: 0x93,
+    },
+    # The address pointer wraps to 0x00 after the last byte of the RAM.
+    'last_register': 0x3F,
+}
 
-    def __init__(self) -> None:
+DS3231_RULES = {
+    # CONTROL 0x1C: oscillator on, 8.192 kHz selected, INTCN set, both alarm
+    # interrupts off. STATUS 0x88: EN32kHz set, and OSF set.
+    #
+    # OSF is the datasheet's value for "the first time power is applied", and
+    # that is what a Run is to the part: it is built again, and a date a
+    # sketch set in the run before is gone with the old one. So the flag says
+    # what is true, and a sketch that follows the RTClib example
+    # (`if (rtc.lostPower()) rtc.adjust(...)`) sets the clock on every Run, as
+    # it does on a module fresh from the bag. Unlike CH, OSF stops nothing: a
+    # sketch that does not look at it reads the host's time. Of the 141
+    # projects of the 2026-09 corpus that test lostPower(), 139 set the clock
+    # when it is true and 2 print a line; none stops.
+    'power_on': {0x0E: 0x1C, 0x0F: 0x88},
+    # The bits of each register a write stores as written. Bit 7 of the
+    # seconds does not exist. CONV is left out of CONTROL (self_clearing), and
+    # of STATUS only EN32kHz is a plain read/write bit.
+    'write_mask': {
+        0x00: 0x7F, 0x01: 0x7F, 0x02: 0x7F, 0x03: 0x07,
+        0x04: 0x3F, 0x05: 0x9F, 0x06: 0xFF,
+        0x07: 0xFF, 0x08: 0xFF, 0x09: 0xFF, 0x0A: 0xFF,
+        0x0B: 0xFF, 0x0C: 0xFF, 0x0D: 0xFF,
+        0x0E: 0xDF, 0x0F: 0x08, 0x10: 0xFF,
+    },
+    # CONV starts a temperature conversion and is never stored: the conversion
+    # takes no time here, so the next read finds CONV and BSY at 0.
+    'self_clearing': {0x0E: 0x20},
+    # OSF, A2F and A1F: "This bit can only be written to logic 0. Attempting
+    # to write to logic 1 leaves the value unchanged."
+    'write_zero_to_clear': {0x0F: 0x83},
+    # The temperature registers.
+    'read_only': ((0x11, 0x12),),
+    # The address pointer wraps to 0x00 after the temperature's low byte.
+    'last_register': 0x12,
+    # Quarter degrees, ten bits, two's complement: -128.00 to +127.75 C.
+    'temp_lsb_per_c': 4,
+}
+
+_RTC_MS_DAY = 86_400_000
+
+_BUILD_MONTHS = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+# `__DATE__` and `__TIME__` as C lays them down: each ends its literal, so a
+# NUL follows. `__DATE__` pads the day with a space ("Sep  1 2026"). A time is
+# not the tail of something longer made of digits and colons (a MAC address).
+# Both patterns start with a character class and name no month: megabytes of
+# image go through them on the thread that runs the guest.
+_BUILD_DATE = _re.compile(rb'([A-Z][a-z]{2}) ([ 0-3][0-9]) ([0-9]{4})\x00')
+_BUILD_TIME = _re.compile(rb'([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9])\x00')
+
+
+def find_build_times(image: bytes) -> list:
+    """When a firmware image was compiled, read from the image itself: every
+    `__DATE__` paired with every `__TIME__` found in it, as (year, month, day,
+    hour, minute, second).
+
+    A sketch that sets a clock to "now" writes those two strings, which
+    RTClib parses when the sketch runs, so both are in the image as text (an
+    ELF or a merged flash image here). The image is the only thing that says
+    when it was built: the build cache answers a compile request with a build
+    that can be two weeks old. An image carries more than one such string (an
+    ESP32 build has the time its bootloader and its application descriptor
+    were compiled next to the sketch's, seconds apart) and nothing in it says
+    which one the sketch reads. The tab does the same with the images it
+    holds (frontend/src/simulation/firmwareBuildTime.ts).
+    """
+    # The padding behind a flash image holds nothing.
+    image = bytes(image).rstrip(b'\xff')
+    dates = {}
+    for m in _BUILD_DATE.finditer(image):
+        month, day = m.group(1).decode(), int(m.group(2))
+        if month in _BUILD_MONTHS and 1 <= day <= 31:
+            dates[m.group(0)] = (int(m.group(3)), _BUILD_MONTHS.index(month) + 1, day)
+    if not dates:
+        return []
+    times = {}
+    for m in _BUILD_TIME.finditer(image):
+        if m.start() == 0 or image[m.start() - 1] not in b'0123456789:':
+            times[m.group(0)] = tuple(int(g) for g in m.groups())
+    return [date + time for date in dates.values() for time in times.values()]
+
+
+def _rtc_bcd(n: int) -> int:
+    return (((n // 10) % 10) << 4 | (n % 10)) & 0xFF
+
+
+def _rtc_bin(bcd: int) -> int:
+    return ((bcd >> 4) & 0xF) * 10 + (bcd & 0xF)
+
+
+def _rtc_days_of(year: int, month: int, day: int) -> int:
+    """Days since 1 January 1970 of a date. Written out and not left to
+    datetime, which refuses what the tab's copy counts through: a month 0 or
+    a 31 June a sketch wrote."""
+    m0 = month - 1
+    m = m0 % 12                       # 0 = January
+    y = year + m0 // 12 - (1 if m < 2 else 0)
+    era = y // 400
+    yoe = y - era * 400
+    doy = (153 * (m + (-2 if m > 1 else 10)) + 2) // 5
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468 + (day - 1)
+
+
+def _rtc_date_of(days: int) -> tuple:
+    z = days + 719468
+    era = z // 146097
+    doe = z - era * 146097
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    month = mp + 3 if mp < 10 else mp - 9
+    return yoe + era * 400 + (1 if month <= 2 else 0), month, doy - (153 * mp + 2) // 5 + 1
+
+
+def _rtc_weekday_after(weekday: int, days: int) -> int:
+    """The day-of-week register after `days` midnights. It counts 1 to 7 and
+    back to 1, from whatever it holds: the chip gives the numbers no meaning.
+    A 0, which is what RTClib writes to a DS1307, becomes 1 at the first
+    midnight."""
+    if days == 0:
+        return weekday
+    if weekday == 0:
+        return 0 if days < 0 else (days - 1) % 7 + 1
+    return (weekday - 1 + days) % 7 + 1
+
+
+def _rtc_hour_of(register: int) -> int:
+    """Hours as the register holds them: bit 6 selects 12-hour mode, bit 5 is
+    PM there."""
+    if register & 0x40:
+        return _rtc_bin(register & 0x1F) % 12 + (12 if register & 0x20 else 0)
+    return _rtc_bin(register & 0x3F)
+
+
+def _rtc_hour_register(hour: int, twelve_hour: bool) -> int:
+    if not twelve_hour:
+        return _rtc_bcd(hour)
+    return 0x40 | (0x20 if hour >= 12 else 0) | _rtc_bcd(hour % 12 or 12)
+
+
+def _rtc_alarm_matched(start: int, to: int, weekday_at_start: int,
+                       second, minute, hour, day_register: int) -> bool:
+    """Whether an alarm's registers matched the clock at one of the seconds it
+    counted through, (start, to]. "The match is tested on the once-per-second
+    update of the time and date registers", so a minute nobody read the chip
+    in is looked through here, from one field to the next and not second by
+    second.
+
+    `second`, `minute` and `hour` are what the field has to be, or None where
+    the alarm's mask bit leaves it out; an hour of -1 cannot match (the alarm
+    is in 12-hour form and the clock is not, or the reverse). `day_register`
+    is the alarm's day/date register as written.
+    """
+    first_day = start // _RTC_MS_DAY
+
+    def day_matches(days: int) -> bool:
+        if day_register & 0x80:
+            return True
+        if day_register & 0x40:
+            return _rtc_weekday_after(weekday_at_start, days - first_day) == day_register & 0x0F
+        return _rtc_date_of(days)[2] == _rtc_bin(day_register & 0x3F)
+
+    # Longer ago than a year the chip would have matched as well; nobody waits.
+    t = max(start, to - 400 * _RTC_MS_DAY) + 1000
+    while t <= to:
+        days = t // _RTC_MS_DAY
+        day = days * _RTC_MS_DAY
+        if not day_matches(days):
+            t = day + _RTC_MS_DAY
+            continue
+        h = (t - day) // 3_600_000
+        if hour is not None and h != hour:
+            t = day + hour * 3_600_000 if h < hour else day + _RTC_MS_DAY
+            continue
+        m = (t - day) // 60_000 % 60
+        if minute is not None and m != minute:
+            hour_start = day + h * 3_600_000
+            t = hour_start + minute * 60_000 if m < minute else hour_start + 3_600_000
+            continue
+        s = (t - day) // 1000 % 60
+        if second is not None and s != second:
+            minute_start = day + h * 3_600_000 + m * 60_000
+            t = minute_start + second * 1000 if s < second else minute_start + 60_000
+            continue
+        return True
+    return False
+
+
+class TabClock:
+    """The clock of the tab, told from the worker's.
+
+    The worker's own clock is the server's, in the server's time zone (UTC in
+    the container), and the tab's model shows the browser's. The sensor record
+    of a clock chip carries both halves of the difference: `utcOffsetMin`,
+    how far the browser's zone is from UTC in minutes east, and `epochMs`,
+    the epoch as the browser counted it when the board was run.
+
+    The record is stamped in the tab and read here some time later (the
+    socket, the worker starting), and that time would show as a clock that is
+    behind. Two clocks that are set from the network differ by less than the
+    delivery takes, so a difference of under a minute is taken as none and
+    the worker's epoch is used; a browser whose clock is further off than
+    that is a clock somebody set, and it is followed.
+    """
+
+    SAME_CLOCK_MS = 60_000
+
+    def __init__(self, now_ms=None) -> None:
+        self._now_ms = now_ms or (lambda: _time.time() * 1000.0)
+        self._skew_ms = 0.0
+        self._offset_ms = 0.0
+
+    def set(self, record: dict) -> None:
+        """Take what a sensor record or an update says about the clock."""
+        offset = _finite(record.get('utcOffsetMin'))
+        if offset is not None:
+            self._offset_ms = offset * 60_000.0
+        epoch = _finite(record.get('epochMs'))
+        if epoch is not None:
+            skew = epoch - self._now_ms()
+            self._skew_ms = 0.0 if abs(skew) <= self.SAME_CLOCK_MS else skew
+
+    def __call__(self) -> int:
+        """Milliseconds since 00:00 of 1 January 1970 of the calendar on the
+        user's wall."""
+        return int(self._now_ms() + self._skew_ms + self._offset_ms)
+
+
+def _finite(value):
+    """A number of a sensor record as a float, or None for anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if _math.isfinite(number) else None
+
+
+class _RtcCounters:
+    """The counters of a clock chip: seconds to year as the registers hold
+    them, and when they last moved.
+
+    Until the sketch sets a time the counters are the host's clock, read again
+    at every START. A time the sketch writes is kept and counted from, as the
+    chip does, with one exception (project i2c-model-fidelity-2026-09,
+    decision D7): a time that is the compile time of the firmware. That is
+    what `rtc.adjust(DateTime(F(__DATE__), F(__TIME__)))` writes, the line of
+    every RTClib example, and it means "now": counted from, it would show the
+    hour of the compile server, in its time zone and as old as the build. The
+    model takes it as a clock that was set when the firmware was built and
+    has run since, which is the host's clock.
+
+    The rule, to the second. When a write phase that wrote any of the
+    registers 0x00 to 0x02 or 0x04 to 0x06 ends, the six of them are read as a
+    date and a time (year 2000 + YY; CH, the century bit and the 12-hour bits
+    taken out). If they are one of the firmware's build times, the counters
+    follow the host's clock from then on. The day of week is not compared:
+    the strings carry none, and RTClib writes 0 there to a DS1307. It is kept
+    as written and moved on by the days between the two dates, as the
+    midnights in between would have. Anything else written is kept. So is
+    everything a firmware writes whose image holds no build time.
+    """
+
+    def __init__(self, clock, build_times, has_clock_halt: bool) -> None:
+        self._clock = clock
+        self._build_times = build_times
+        # DS1307: bit 7 of the seconds is CH, and it stops the clock.
+        self._has_clock_halt = has_clock_halt
+        # Seconds, minutes, hours, day of week, date, month, year.
+        self.regs = bytearray(7)
+        # The counters are the host's clock.
+        self._following = True
+        # A time register was written in the write phase that is open.
+        self._written = False
+        # The seconds the clock counted through, for the alarms: (start, to],
+        # and the weekday at `start`.
+        self.on_count = None
+        now = self._clock()
+        self._show(now // 1000 * 1000)
+        # No sketch has said what the numbers mean yet. Monday = 1 is what
+        # RTClib writes to a DS3231 and compares an alarm on a weekday with
+        # (dowToDS3231), and what the Seeed DS1307 library calls MON.
+        self.regs[3] = (now // _RTC_MS_DAY + 3) % 7 + 1
+        # Host time at which the second the registers show began.
+        self._tick_at = now // 1000 * 1000
+
+    @property
+    def halted(self) -> bool:
+        return self._has_clock_halt and bool(self.regs[0] & 0x80)
+
+    def sync(self) -> None:
+        """Bring the counters to the present."""
+        now = self._clock()
+        if self._following:
+            to = now // 1000 * 1000
+            self._count(self.time(), to, True)
+            self._tick_at = to
+            return
+        if self.halted:
+            return
+        seconds = (now - self._tick_at) // 1000
+        if seconds <= 0:
+            # The host's clock was set back: the chip does not count backwards.
+            if now < self._tick_at:
+                self._tick_at = now
+            return
+        start = self.time()
+        self._count(start, start + seconds * 1000, True)
+        self._tick_at += seconds * 1000
+
+    def write(self, reg: int, value: int) -> None:
+        """A byte written to one of the seven registers, already cut to the
+        bits that exist."""
+        self.regs[reg] = value
+        # The day of week is a counter of its own: writing it sets no time.
+        if reg == 3:
+            return
+        self._following = False
+        self._written = True
+        # "The countdown chain is reset whenever the seconds register is
+        # written."
+        if reg == 0:
+            self._tick_at = self._clock()
+
+    def commit(self) -> None:
+        """The write phase ended: what was written is a time now."""
+        if not self._written:
+            return
+        self._written = False
+        if self.halted:
+            return
+        was_set = self.time()
+        days = was_set // _RTC_MS_DAY
+        ms = was_set - days * _RTC_MS_DAY
+        written = _rtc_date_of(days) + (ms // 3_600_000, ms // 60_000 % 60, ms // 1000 % 60)
+        if not any(tuple(built) == written for built in self._build_times()):
+            return
+        self._following = True
+        to = self._clock() // 1000 * 1000
+        # Set back then, running since: no alarm is owed for the time in between.
+        self._count(was_set, to, False)
+        self._tick_at = to
+
+    def time(self) -> int:
+        """The time the registers show, as the clock counts it."""
+        r = self.regs
+        days = _rtc_days_of(2000 + _rtc_bin(r[6]), _rtc_bin(r[5] & 0x1F), _rtc_bin(r[4] & 0x3F))
+        return (days * _RTC_MS_DAY + _rtc_hour_of(r[2]) * 3_600_000
+                + _rtc_bin(r[1] & 0x7F) * 60_000 + _rtc_bin(r[0] & 0x7F) * 1000)
+
+    def _count(self, start: int, to: int, alarms: bool) -> None:
+        if to == start:
+            return
+        weekday = self.regs[3]
+        self.regs[3] = _rtc_weekday_after(weekday, to // _RTC_MS_DAY - start // _RTC_MS_DAY)
+        self._show(to)
+        if alarms and to > start and self.on_count is not None:
+            self.on_count(start, to, weekday)
+
+    def _show(self, time: int) -> None:
+        """Put a time in the registers. CH, the 12-hour mode and the day of
+        week stay."""
+        r = self.regs
+        days = time // _RTC_MS_DAY
+        ms = time - days * _RTC_MS_DAY
+        year, month, day = _rtc_date_of(days)
+        # The year register counts 00 to 99, and the century bit of the
+        # DS3231 turns over with it.
+        centuries = (year - 2000) // 100
+        r[0] = (r[0] & 0x80) | _rtc_bcd(ms // 1000 % 60)
+        r[1] = _rtc_bcd(ms // 60_000 % 60)
+        r[2] = _rtc_hour_register(ms // 3_600_000, bool(r[2] & 0x40))
+        r[4] = _rtc_bcd(day)
+        r[5] = ((r[5] & 0x80) ^ (0x80 if centuries & 1 else 0)) | _rtc_bcd(month)
+        r[6] = _rtc_bcd((year - 2000) % 100)
+
+
+class _RtcSlave:
+    """What the DS1307 and the DS3231 have in common on the bus: a register
+    pointer that wraps, and seven time registers that are answered from a
+    copy.
+
+    "When reading or writing the time and date registers, secondary (user)
+    buffers are used to prevent errors when the internal registers update.
+    [...] the user buffers are synchronized to the internal registers on any
+    START and when the register pointer rolls over to zero." So a burst that
+    starts at 12:34:59 reads 12:34:59 to its last byte, however long the
+    guest takes over it, and never 12:35:59.
+
+    `record` is the sensor record of the part, which carries the tab's clock
+    (TabClock). `clock` replaces it, for a test: a TabClock over a machine
+    clock of the test's own, or any callable that returns the host's wall
+    time in milliseconds. `build_times` is a callable that
+    returns the build times of the firmware (find_build_times); it is asked
+    when the sketch sets the clock, and not before.
+    """
+
+    LAST_REGISTER = 0x3F
+    HAS_CLOCK_HALT = False
+
+    def __init__(self, record=None, *, clock=None, build_times=None) -> None:
+        self.addr       = 0x68
         self.reg_ptr    = 0
         self.first_byte = True
+        # What the record and its updates say about the clock lands here. A
+        # clock of another kind is not moved by them.
+        self.tab_clock  = clock if isinstance(clock, TabClock) else TabClock()
+        if isinstance(record, dict):
+            self.tab_clock.set(record)
+        self._counters = _RtcCounters(clock or self.tab_clock, build_times or (lambda: ()),
+                                      self.HAS_CLOCK_HALT)
+        # The time registers as the START of this transfer found them.
+        self._latched = bytes(7)
+        # No START was heard for the transfer that comes next: it begins at
+        # its first byte.
+        self._latch_due = True
 
-    @staticmethod
-    def _bcd(n: int) -> int:
-        return ((n // 10) << 4) | (n % 10)
+    def _read_register(self, reg: int) -> int:
+        """A register behind the time, as the transfer in progress is answered."""
+        raise NotImplementedError
 
-    def _read_reg(self, reg: int) -> int:
-        now = _datetime.datetime.now()
-        if   reg == 0x00: return self._bcd(now.second)
-        elif reg == 0x01: return self._bcd(now.minute)
-        elif reg == 0x02: return self._bcd(now.hour)
-        elif reg == 0x03: return self._bcd(now.weekday() + 1)  # Mon=1..Sun=7
-        elif reg == 0x04: return self._bcd(now.day)
-        elif reg == 0x05: return self._bcd(now.month)
-        elif reg == 0x06: return self._bcd(now.year % 100)
-        return 0x00
+    def _write_register(self, reg: int, value: int) -> None:
+        raise NotImplementedError
+
+    def _latch_inputs(self) -> None:
+        """What else is sampled when a transfer begins."""
+
+    def _register_now(self, reg: int) -> int:
+        """A register behind the time as it is now, whatever a transfer in
+        progress was told."""
+        return self._read_register(reg)
 
     def handle_event(self, event: int) -> int:
         op   = event & 0xFF
         data = (event >> 8) & 0xFF
 
         if op in (I2C_START_RECV, I2C_START_SEND):
-            self.first_byte = True; return 0
-        elif op == I2C_WRITE:
-            if self.first_byte:
-                self.reg_ptr = data; self.first_byte = False
+            # reg_ptr is NOT reset here: a write-then-read (repeated START)
+            # relies on it having been set by the preceding WRITE phase.
+            self.first_byte = True
+            self._begin()
             return 0
+
+        elif op == I2C_WRITE:
+            if self.first_byte and self._latch_due:
+                self._begin()
+            self._latch_due = True
+            if self.first_byte:
+                # Past the last register the datasheets say nothing: the
+                # DS1307 has six address bits to count with, the DS3231 is
+                # given the byte.
+                self.reg_ptr = data & 0x3F if self.LAST_REGISTER == 0x3F else data
+                self.first_byte = False
+            else:
+                reg = self.reg_ptr
+                self.reg_ptr = self._after(reg)
+                self._write_register(reg, data)
+            return 0
+
         elif op == I2C_READ:
-            val = self._read_reg(self.reg_ptr)
-            self.reg_ptr = (self.reg_ptr + 1) & 0x3F
-            return val
+            if self._latch_due:
+                self._begin()
+            reg = self.reg_ptr
+            value = self._latched[reg] if reg < 7 else self._read_register(reg)
+            self.reg_ptr = self._after(reg)
+            if self.reg_ptr == 0:
+                self._latch()
+            return value & 0xFF
+
+        else:                         # I2C_FINISH, I2C_NACK, unknown
+            # The pointer survives: the Seeed library writes it in one
+            # transaction and reads in the next, and QEMU ends every write
+            # phase this way, the one before a repeated START included. What
+            # a write phase wrote to the time registers is a time from here.
+            self._counters.commit()
+            self.first_byte = True
+            self._latch_due = True
+            return 0
+
+    def update(self, /, **record) -> None:
+        """The tab sent the part's record again, or a part of it."""
+        self.tab_clock.set(record)
+
+    def dump_registers(self) -> bytearray:
+        """The registers as a read would find them now."""
+        self._counters.sync()
+        out = bytearray(256)
+        for reg in range(7, self.LAST_REGISTER + 1):
+            out[reg] = self._register_now(reg) & 0xFF
+        out[0:7] = self._counters.regs
+        return out
+
+    def _begin(self) -> None:
+        # A repeated START ends a write phase as a STOP does.
+        self._counters.commit()
+        self._latch()
+        self._latch_due = False
+
+    def _latch(self) -> None:
+        self._counters.sync()
+        self._latched = bytes(self._counters.regs)
+        self._latch_inputs()
+
+    def _after(self, reg: int) -> int:
+        return 0 if reg == self.LAST_REGISTER else (reg + 1) & 0xFF
+
+
+class DS1307Slave(_RtcSlave):
+    """DS1307: the clock with 56 bytes of battery-backed RAM, at 0x68. The
+    twin of VirtualDS1307 in the tab: both replay
+    test/fixtures/i2c-vectors/ds1307.json.
+
+      - The time is the host's until the sketch sets one; then it is the
+        sketch's, counted from the moment it was written (_RtcCounters has
+        the one exception, a firmware's own build time).
+      - CH, bit 7 of the seconds, stops the clock where it is, and RTClib's
+        isrunning() reads it. Clearing it starts the clock from there.
+      - CONTROL and the RAM at 0x08 to 0x3F keep what is written to them
+        (RTClib readnvram and writenvram).
+      - The pointer wraps from 0x3F to 0x00.
+    """
+
+    LAST_REGISTER = DS1307_RULES['last_register']
+    HAS_CLOCK_HALT = True
+
+    def __init__(self, record=None, *, clock=None, build_times=None) -> None:
+        super().__init__(record, clock=clock, build_times=build_times)
+        # CONTROL at 0x07 and the RAM behind it, under their own addresses.
+        self._ram = bytearray(self.LAST_REGISTER + 1)
+        for reg, value in DS1307_RULES['power_on'].items():
+            self._ram[reg] = value
+
+    def _read_register(self, reg: int) -> int:
+        return self._ram[reg]
+
+    def _write_register(self, reg: int, value: int) -> None:
+        mask = DS1307_RULES['write_mask'].get(reg, 0xFF)
+        if reg < 7:
+            self._counters.write(reg, value & mask)
         else:
-            self.first_byte = True; return 0
+            self._ram[reg] = value & mask
 
 
-class DS3231Slave(DS1307Slave):
-    """DS3231 I2C RTC with on-chip temperature (address 0x68)."""
+class DS3231Slave(_RtcSlave):
+    """DS3231: the temperature-compensated clock with two alarms, at 0x68. The
+    twin of VirtualDS3231 in the tab: both replay
+    test/fixtures/i2c-vectors/ds3231.json.
 
-    def __init__(self) -> None:
-        super().__init__()
+      - The time registers are the DS1307's, without CH: powered from VCC the
+        oscillator runs whatever EOSC says (Control Register, bit 7).
+      - CONTROL powers on at 0x1C. RTClib's setAlarm1() and setAlarm2() refuse
+        to arm an alarm unless INTCN reads 1, and CONV is gone by the next
+        read (Makuna's Rtc polls it after forcing a conversion).
+      - STATUS powers on with OSF set (DS3231_RULES['power_on'] says why), and
+        RTClib's lostPower() reads it. adjust() clears it. OSF, A1F and A2F
+        can only be written to 0.
+      - A1F and A2F are set when the clock counts through a second the
+        alarm's registers match, whether or not the interrupt is enabled, and
+        stay until the sketch writes them to 0 (RTClib alarmFired,
+        clearAlarm). The INT/SQW pin is not driven.
+      - The temperature is the panel's, in quarter degrees, two's complement:
+        q = round(T x 4), 0x11 = q >> 2, 0x12 = (q & 3) << 6. It is read only.
+      - The pointer wraps from 0x12 to 0x00.
+    """
+
+    LAST_REGISTER = DS3231_RULES['last_register']
+
+    def __init__(self, record=None, *, clock=None, build_times=None) -> None:
+        super().__init__(record, clock=clock, build_times=build_times)
         self.temperatureC = 25.0
+        # Alarm 1 (0x07-0x0A), alarm 2 (0x0B-0x0D), CONTROL, STATUS and the
+        # aging offset.
+        self._regs = bytearray(self.LAST_REGISTER + 1)
+        for reg, value in DS3231_RULES['power_on'].items():
+            self._regs[reg] = value
+        # The temperature as the START of this transfer found it.
+        self._temperature = bytes(2)
+        self._counters.on_count = self._check_alarms
+        if isinstance(record, dict):
+            self._set_temperature(record.get('temperature'))
 
-    def _read_reg(self, reg: int) -> int:
-        if reg == 0x0E: return 0x00   # Control
-        if reg == 0x0F: return 0x00   # Status (OSF cleared)
-        if reg == 0x11:               # Temp MSB (signed integer °C)
-            return int(self.temperatureC) & 0xFF
-        if reg == 0x12:               # Temp LSB (fractional bits 7:6)
-            frac = abs(self.temperatureC) - int(abs(self.temperatureC))
-            return (round(frac / 0.25) & 0x03) << 6
-        return super()._read_reg(reg)
+    def update(self, temperature=None, /, **record) -> None:
+        """The panel moved, or the tab sent the record again. The temperature
+        is `temperature` of a record, in degrees Celsius, or the one argument
+        of a caller that has nothing else to say."""
+        super().update(**record)
+        self._set_temperature(record.get('temperature', temperature))
+
+    def _set_temperature(self, value) -> None:
+        celsius = _finite(value)
+        if celsius is not None:
+            self.temperatureC = celsius
+
+    def _read_register(self, reg: int) -> int:
+        if reg in (0x11, 0x12):
+            return self._temperature[reg - 0x11]
+        return self._regs[reg] if reg <= 0x10 else 0x00
+
+    def _write_register(self, reg: int, value: int) -> None:
+        mask = DS3231_RULES['write_mask'].get(reg)
+        if mask is None:
+            return
+        if reg < 7:
+            self._counters.write(reg, value & mask)
+            return
+        flags = DS3231_RULES['write_zero_to_clear'].get(reg, 0)
+        self._regs[reg] = (self._regs[reg] & flags & value) | (value & mask)
+
+    def _latch_inputs(self) -> None:
+        self._temperature = self._temperature_registers()
+
+    def _register_now(self, reg: int) -> int:
+        if reg in (0x11, 0x12):
+            return self._temperature_registers()[reg - 0x11]
+        return self._read_register(reg)
+
+    def _temperature_registers(self) -> bytes:
+        limit = 128 * DS3231_RULES['temp_lsb_per_c']
+        celsius = _finite(self.temperatureC)
+        quarters = (celsius or 0.0) * DS3231_RULES['temp_lsb_per_c']
+        # Half a step rounds away from zero, as in the other twin (round()
+        # sends 99.5 to 100 and 98.5 to 98).
+        size = _math.floor(abs(quarters) + 0.5) if abs(quarters) < limit else limit
+        q = max(-limit, min(limit - 1, size if quarters >= 0 else -size))
+        return bytes(((q >> 2) & 0xFF, (q & 3) << 6))
+
+    def _check_alarms(self, start: int, to: int, weekday: int) -> None:
+        r = self._regs
+        twelve_hour = bool(self._counters.regs[2] & 0x40)
+
+        def field(reg: int):
+            return None if reg & 0x80 else _rtc_bin(reg & 0x7F)
+
+        def hour(reg: int):
+            if reg & 0x80:
+                return None
+            return _rtc_hour_of(reg & 0x7F) if bool(reg & 0x40) == twelve_hour else -1
+
+        if _rtc_alarm_matched(start, to, weekday,
+                              field(r[0x07]), field(r[0x08]), hour(r[0x09]), r[0x0A]):
+            r[0x0F] |= 0x01
+        # Alarm 2 has no seconds register: it matches at second 00.
+        if _rtc_alarm_matched(start, to, weekday, 0, field(r[0x0B]), hour(r[0x0C]), r[0x0D]):
+            r[0x0F] |= 0x02
 
 
 # ── I2C Write Sink (relay for write-only devices: SSD1306, PCF8574) ──────────

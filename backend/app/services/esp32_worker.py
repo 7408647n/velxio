@@ -117,6 +117,7 @@ try:
         DS1307Slave  as _DS1307Slave,
         DS3231Slave  as _DS3231Slave,
         I2CWriteSink as _I2CWriteSink,
+        find_build_times as _find_build_times,
     )
 except ImportError:
     # Fallback: direct import when running from backend/ directory as subprocess
@@ -133,6 +134,7 @@ except ImportError:
     _DS1307Slave  = _mod.DS1307Slave   # type: ignore[assignment]
     _DS3231Slave  = _mod.DS3231Slave   # type: ignore[assignment]
     _I2CWriteSink = _mod.I2CWriteSink  # type: ignore[assignment]
+    _find_build_times = _mod.find_build_times  # type: ignore[assignment]
 
 # The table those slaves answer from, by (controller, address) and removed by
 # identity (project board-buses-2026-09, F5). Same fallback dance.
@@ -823,6 +825,22 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     except Exception as exc:
         _emit({'type': 'error', 'message': f'Firmware decode error: {exc}'})
         os._exit(1)
+
+    # When this firmware was built, for a clock chip the sketch sets to
+    # __DATE__ and __TIME__ (esp32_i2c_slaves, decision D7 of project
+    # i2c-model-fidelity-2026-09). Read from the image the first time a
+    # sketch sets a clock: megabytes to look through, and most sketches
+    # never do.
+    _build_times: list = []
+
+    def _firmware_build_times() -> tuple:
+        if not _build_times:
+            try:
+                _build_times.append(tuple(_find_build_times(fw_bytes)))
+            except Exception as e:  # noqa: BLE001
+                _log(f'build time scan failed: {e!r}')
+                _build_times.append(())
+        return _build_times[0]
 
     rom_dir   = os.path.dirname(lib_path).encode()
     args_list = [
@@ -2986,7 +3004,11 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                 sensor_data['slave'] = slave
             elif sensor_type in ('ds1307', 'ds3231'):
                 i2c_addr = int(s.get('addr', 0x68))
-                slave = _DS3231Slave() if sensor_type == 'ds3231' else _DS1307Slave()
+                # The record carries the tab's clock, and the panel's
+                # temperature for the DS3231, so the first read is already
+                # what the tab's model shows.
+                slave = (_DS3231Slave if sensor_type == 'ds3231' else _DS1307Slave)(
+                    s, build_times=_firmware_build_times)
                 _i2c_add(gpio, s, slave, i2c_addr)
                 sensor_data['i2c_addr'] = i2c_addr
                 sensor_data['slave'] = slave
@@ -3309,7 +3331,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                     sensor_data['slave'] = slave
                 elif sensor_type in ('ds1307', 'ds3231'):
                     i2c_addr = int(cmd.get('addr', 0x68))
-                    slave = _DS3231Slave() if sensor_type == 'ds3231' else _DS1307Slave()
+                    slave = (_DS3231Slave if sensor_type == 'ds3231' else _DS1307Slave)(
+                        cmd, build_times=_firmware_build_times)
                     _i2c_add(gpio, cmd, slave, i2c_addr)
                     sensor_data['i2c_addr'] = i2c_addr
                     sensor_data['slave'] = slave
@@ -3382,8 +3405,10 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                             temperature_c =float(sensor.get('temperature', 25.0)),
                             pressure_hpa  =float(sensor.get('pressure', 1013.25)),
                         )
-                    elif stype == 'ds3231' and slave is not None:
-                        slave.temperatureC = float(sensor.get('temperature', 25.0))
+                    elif stype in ('ds1307', 'ds3231') and slave is not None:
+                        # Only what this update names: the temperature the
+                        # slider moved to, or the tab's clock sent again.
+                        slave.update(**cmd)
                     elif stype == 'custom-chip':
                         # Live control values (chip.json `controls`) land on
                         # the chip runtime's attr store; the running WASM

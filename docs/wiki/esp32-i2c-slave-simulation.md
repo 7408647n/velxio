@@ -25,6 +25,25 @@
 > first read shows the panel's values (24 °C, not 25). The per-event log line and the `i2c_trace`
 > message of "Debugging Infrastructure" are off unless the backend runs with
 > `VELXIO_I2C_TRACE=1`: they cost about 0.8 ms on every register read.
+>
+> **Since 2026-09 (i2c-model-fidelity)**: `DS1307Slave` and `DS3231Slave` are the twins of
+> `VirtualDS1307` and `VirtualDS3231` in the tab, and replay the same bus vectors,
+> `test/fixtures/i2c-vectors/ds1307.json` and `ds3231.json`. They used to drop every write and
+> to read the clock of the container, in UTC. Now:
+>
+> - The time is the tab's. The sensor record carries `epochMs` and `utcOffsetMin`, stamped when
+>   the board is run, and `TabClock` tells the tab's wall clock from the worker's with them. A
+>   difference of under a minute between the two epochs is taken as the delivery of the record
+>   and ignored.
+> - A time the sketch writes is kept and counted from, with one exception: the build time of the
+>   firmware, which is what `rtc.adjust(DateTime(F(__DATE__), F(__TIME__)))` writes. The worker
+>   finds the two strings in the image it was handed (`find_build_times`), and a clock that is
+>   set to them stays on the tab's time.
+> - DS1307: CH stops the clock, CONTROL and the 56 bytes of RAM are stored, the pointer wraps at
+>   `0x3F`. DS3231: CONTROL powers on at `0x1C` and STATUS at `0x88` (OSF set, so
+>   `lostPower()` is true until the sketch sets the time), the alarms set A1F and A2F, the
+>   temperature is two's complement and starts from the record, the pointer wraps at `0x12`.
+> - The seven time registers are latched at every START, so a burst cannot straddle a second.
 
 ---
 
@@ -321,8 +340,8 @@ updated to use the correct constants and `return 0` for ACK.
 | Class | Address | Notable registers |
 |---|---|---|
 | `BMP280Slave` | 0x76 / 0x77 | `0xD0` = chip ID (`0x58`), calibration regs, temperature/pressure raw data |
-| `DS1307Slave` | 0x68 | Timekeeping registers (seconds, minutes, hours, day, date, month, year) |
-| `DS3231Slave` | 0x68 | Same layout as DS1307 plus temperature registers |
+| `DS1307Slave` | 0x68 | Timekeeping registers (seconds, minutes, hours, day, date, month, year), CONTROL, 56 bytes of RAM |
+| `DS3231Slave` | 0x68 | Same time registers, two alarms, CONTROL, STATUS, aging offset, temperature |
 | `I2CWriteSink` | configurable | Accepts any WRITE silently (for LCD, OLED, etc.) |
 
 ---

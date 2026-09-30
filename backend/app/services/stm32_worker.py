@@ -34,7 +34,7 @@ try:
     from app.services.esp32_i2c_slaves import (
         MPU6050Slave as _MPU6050Slave, BMP280Slave as _BMP280Slave,
         DS1307Slave as _DS1307Slave, DS3231Slave as _DS3231Slave,
-        I2CWriteSink as _I2CWriteSink,
+        I2CWriteSink as _I2CWriteSink, find_build_times as _find_build_times,
     )
 except ImportError:
     import importlib.util as _ilu, pathlib as _pl, sys as _sys
@@ -46,6 +46,7 @@ except ImportError:
     _MPU6050Slave = _mod.MPU6050Slave; _BMP280Slave = _mod.BMP280Slave
     _DS1307Slave = _mod.DS1307Slave; _DS3231Slave = _mod.DS3231Slave
     _I2CWriteSink = _mod.I2CWriteSink
+    _find_build_times = _mod.find_build_times
 
 _stdout_lock = threading.Lock()
 
@@ -131,6 +132,21 @@ def main() -> None:
         _emit({'type': 'error', 'message': f'Firmware decode error: {exc}'})
         os._exit(1)
 
+    # When this firmware was built, for a clock chip the sketch sets to
+    # __DATE__ and __TIME__ (esp32_i2c_slaves, decision D7 of project
+    # i2c-model-fidelity-2026-09). Read from the ELF the first time a sketch
+    # sets a clock.
+    _build_times: list = []
+
+    def _firmware_build_times() -> tuple:
+        if not _build_times:
+            try:
+                _build_times.append(tuple(_find_build_times(fw_bytes)))
+            except Exception as e:  # noqa: BLE001
+                _log(f'build time scan failed: {e!r}')
+                _build_times.append(())
+        return _build_times[0]
+
     args_list = [b'qemu', b'-M', machine.encode(), b'-nographic',
                  b'-kernel', firmware_path.encode()]
     argc = len(args_list)
@@ -167,7 +183,11 @@ def main() -> None:
             _i2c_slaves[addr] = sl
         elif stype in ('ds1307', 'ds3231'):
             addr = int(s.get('addr', 0x68))
-            _i2c_slaves[addr] = _DS3231Slave() if stype == 'ds3231' else _DS1307Slave()
+            # The record carries the tab's clock, and the panel's temperature
+            # for the DS3231, so the first read is already what the tab's
+            # model shows.
+            _i2c_slaves[addr] = (_DS3231Slave if stype == 'ds3231' else _DS1307Slave)(
+                s, build_times=_firmware_build_times)
         elif stype in ('ssd1306', 'pcf8574'):
             addr = int(s.get('addr', 0x3C if stype == 'ssd1306' else 0x27))
             _i2c_slaves[addr] = _I2CWriteSink(addr, _emit)
@@ -365,8 +385,12 @@ def main() -> None:
                             # out stays where the record or an earlier update
                             # put it.
                             slave.update(**cmd)
-                        elif stype in ('ds3231',) and slave is not None and hasattr(slave, 'update'):
-                            slave.update(float(rec.get('temperature', 25.0)))
+                        elif stype in ('ds1307', 'ds3231') and slave is not None:
+                            # Only what this update names: the temperature
+                            # the slider moved to, or the tab's clock sent
+                            # again. This branch asked for an update() the
+                            # twin did not have, and never ran.
+                            slave.update(**cmd)
                     except Exception as e:
                         _log(f'sensor_update failed: {e!r}')
         elif c == 'sensor_detach':
