@@ -106,6 +106,15 @@ describe('the strings in an image', () => {
     expect(found).toContainEqual(at(2026, 9, 29, 23, 59, 58));
   });
 
+  it('a time right after another time', () => {
+    // Two files of one build whose __TIME__ literals the linker laid end to
+    // end: the NUL that ends the first is the character before the second.
+    expect(sorted(buildTimesInImage(bytes('Sep 29 2026\x0023:41:51\x0023:41:52\0')))).toEqual([
+      at(2026, 9, 29, 23, 41, 51),
+      at(2026, 9, 29, 23, 41, 52),
+    ]);
+  });
+
   it('what is not the strings', () => {
     for (const text of [
       '',

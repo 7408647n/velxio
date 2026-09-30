@@ -37,11 +37,13 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 
 // The strings as C lays them down: each ends its literal, so a NUL follows.
 // `__DATE__` pads the day with a space ("Sep  1 2026"). A time is not the
-// tail of something longer made of digits and colons (a MAC address); the
-// character before it is matched and not looked behind at, which an older
-// Safari cannot parse.
+// tail of something longer made of digits and colons (a MAC address). The
+// character before it is checked in the loop and not looked behind at, which
+// an older Safari cannot parse, nor matched, which would eat the NUL of a
+// time literal right before and miss the one after it.
 const DATE_LITERAL = new RegExp(`(${MONTHS.join('|')}) ([ 0-3][0-9]) ([0-9]{4})\\x00`, 'g');
-const TIME_LITERAL = /(?:^|[^0-9:])([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9])\x00/g;
+const TIME_LITERAL = /([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9])\x00/g;
+const TIME_PART = /[0-9:]/;
 
 /** Every `__DATE__` paired with every `__TIME__` found in a flash image. */
 export function buildTimesInImage(image: Uint8Array): BuildTime[] {
@@ -60,6 +62,8 @@ export function buildTimesInImage(image: Uint8Array): BuildTime[] {
   if (dates.size === 0) return [];
   const times = new Map<string, Pick<BuildTime, 'hour' | 'minute' | 'second'>>();
   for (const m of text.matchAll(TIME_LITERAL)) {
+    const at = m.index ?? 0;
+    if (at > 0 && TIME_PART.test(text[at - 1])) continue;
     times.set(`${m[1]}:${m[2]}:${m[3]}`, {
       hour: parseInt(m[1], 10),
       minute: parseInt(m[2], 10),

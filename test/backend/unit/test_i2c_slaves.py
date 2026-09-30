@@ -486,6 +486,13 @@ class TestFindBuildTimes(unittest.TestCase):
         self.assertEqual(len(find_build_times(image)), 4)
         self.assertIn((2026, 9, 29, 23, 59, 58), find_build_times(image))
 
+    def test_a_time_right_after_another_time(self):
+        """Two files of one build whose __TIME__ literals the linker laid end
+        to end: the NUL that ends the first is the byte before the second."""
+        image = b'Sep 29 2026\x0023:41:51\x0023:41:52\x00'
+        self.assertEqual(sorted(find_build_times(image)), [
+            (2026, 9, 29, 23, 41, 51), (2026, 9, 29, 23, 41, 52)])
+
     def test_what_is_not_the_strings(self):
         for image in (
             b'',
