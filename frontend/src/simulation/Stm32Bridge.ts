@@ -103,8 +103,9 @@ export class Stm32Bridge {
 
   /** I2C/SPI device write trace + display callbacks (wired by the store). */
   onI2cTrace: ((addr: number, op: string, result: number) => void) | null = null;
-  /** Full I2C write transaction (addr + bytes) for write-only devices (SSD1306). */
-  onI2cTransaction: ((addr: number, data: number[]) => void) | null = null;
+  /** Full I2C write transaction (addr + bytes) for write-only devices
+   *  (SSD1306), with the component id of the part whose record answered it. */
+  onI2cTransaction: ((addr: number, data: number[], owner?: string) => void) | null = null;
   onSpiBatch: ((bytes: Uint8Array) => void) | null = null;
 
   private socket: WebSocket | null = null;
@@ -220,7 +221,8 @@ export class Stm32Bridge {
           // them here so the frontend virtual device can replay + render.
           const addr = msg.data.addr as number;
           const data = (msg.data.data as number[]) ?? [];
-          this.onI2cTransaction?.(addr, data);
+          const owner = msg.data.owner ? String(msg.data.owner) : undefined;
+          this.onI2cTransaction?.(addr, data, owner);
           break;
         }
         case 'i2c_trace': {

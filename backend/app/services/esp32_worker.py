@@ -2994,9 +2994,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                 # 'i2c-write-sink' is the generic form: any write-only device
                 # whose rendering lives in the browser (the Grove display
                 # chips) is ACKed here and its bytes echoed as i2c_transaction.
-                default_addr = 0x3C if sensor_type == 'ssd1306' else 0x27
-                i2c_addr = int(s.get('addr', default_addr))
-                sink = _I2CWriteSink(i2c_addr, _emit)
+                sink = _I2CWriteSink.from_record(sensor_type, s, _emit)
+                i2c_addr = sink.addr
                 _i2c_add(gpio, s, sink, i2c_addr)
                 sensor_data['i2c_addr'] = i2c_addr
                 sensor_data['slave'] = sink
@@ -3316,9 +3315,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                 elif sensor_type == 'custom-chip':
                     _attach_custom_chip_sensor(gpio, cmd, sensor_data)
                 elif sensor_type in ('ssd1306', 'pcf8574', 'i2c-write-sink'):
-                    default_addr = 0x3C if sensor_type == 'ssd1306' else 0x27
-                    i2c_addr = int(cmd.get('addr', default_addr))
-                    sink = _I2CWriteSink(i2c_addr, _emit)
+                    sink = _I2CWriteSink.from_record(sensor_type, cmd, _emit)
+                    i2c_addr = sink.addr
                     _i2c_add(gpio, cmd, sink, i2c_addr)
                     sensor_data['i2c_addr'] = i2c_addr
                     sensor_data['slave'] = sink

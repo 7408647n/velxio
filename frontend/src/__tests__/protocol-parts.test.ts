@@ -1922,10 +1922,11 @@ describe('ssd1306 — ESP32 relay path', () => {
     );
   });
 
-  it('adds I2C transaction listener for addr 0x3C', () => {
+  it('adds I2C transaction listener for addr 0x3C, under its own id', () => {
     const sim = makeEsp32Sim();
     PartSimulationRegistry.get('ssd1306')!.attachEvents!(makeElement(), sim as any, noPins, 'oled-q2');
-    expect(sim.addI2CTransactionListener).toHaveBeenCalledWith(0x3c, expect.any(Function));
+    // The echo names the part, so two panels at one address are two listeners.
+    expect(sim.addI2CTransactionListener).toHaveBeenCalledWith(0x3c, expect.any(Function), 'oled-q2');
   });
 
   it('transaction data is forwarded to VirtualSSD1306 device', () => {
@@ -1948,7 +1949,7 @@ describe('ssd1306 — ESP32 relay path', () => {
     );
     cleanup();
     expect(sim.unregisterSensor).toHaveBeenCalledWith(i2cPartWorkerPin('oled-q4'));
-    expect(sim.removeI2CTransactionListener).toHaveBeenCalledWith(0x3c);
+    expect(sim.removeI2CTransactionListener).toHaveBeenCalledWith(0x3c, 'oled-q4');
   });
 
   it('a board whose engine runs in the tab gets no worker record', () => {
@@ -2297,10 +2298,10 @@ describe('pcf8574 — ESP32 relay path', () => {
     );
   });
 
-  it('adds I2C transaction listener for addr 0x27', () => {
+  it('adds I2C transaction listener for addr 0x27, under its own id', () => {
     const sim = makeEsp32Sim();
     PartSimulationRegistry.get('pcf8574')!.attachEvents!(makeElement(), sim as any, noPins, 'pcf-q2');
-    expect(sim.addI2CTransactionListener).toHaveBeenCalledWith(0x27, expect.any(Function));
+    expect(sim.addI2CTransactionListener).toHaveBeenCalledWith(0x27, expect.any(Function), 'pcf-q2');
   });
 
   it('transaction byte is forwarded to VirtualPCF8574 — onWrite fires', () => {
@@ -2330,7 +2331,7 @@ describe('pcf8574 — ESP32 relay path', () => {
     );
     cleanup();
     expect(sim.unregisterSensor).toHaveBeenCalledWith(i2cPartWorkerPin('pcf-q5'));
-    expect(sim.removeI2CTransactionListener).toHaveBeenCalledWith(0x27);
+    expect(sim.removeI2CTransactionListener).toHaveBeenCalledWith(0x27, 'pcf-q5');
   });
 });
 

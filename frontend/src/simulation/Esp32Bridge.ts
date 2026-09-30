@@ -32,7 +32,7 @@
  *     { type: 'ws2812_update', data: { channel: number, pin?: number,
  *                                        pixels: Array<{r,g,b}> | [r,g,b][] } }
  *     { type: 'i2c_event',        data: { addr: number, data: number } }
- *     { type: 'i2c_transaction',  data: { addr: number, data: number[] } }
+ *     { type: 'i2c_transaction',  data: { addr: number, data: number[], owner?: string } }
  *     { type: 'spi_event',        data: { bus: number, event: number } }
  *     { type: 'chip_net',      data: { net: string, level: 0 | 1, ts: number } }
  *     { type: 'system',        data: { event: string, ... } }
@@ -296,7 +296,9 @@ export class Esp32Bridge {
    */
   onChipFramebuffer: ((componentId: string, frame: ChipFramebufferFrame) => void) | null = null;
   onI2cEvent: ((addr: number, data: number) => void) | null = null;
-  onI2cTransaction: ((addr: number, data: number[]) => void) | null = null;
+  /** A write phase a write sink echoed, with the component id of the part
+   *  whose record answered it (absent from a worker that does not say). */
+  onI2cTransaction: ((addr: number, data: number[], owner?: string) => void) | null = null;
   /**
    * A whole batch of MOSI bytes the guest clocked, in order: the bus fabric
    * takes a block in one call (its selection cannot change inside a batch,
@@ -631,7 +633,8 @@ export class Esp32Bridge {
         case 'i2c_transaction': {
           const addr = msg.data.addr as number;
           const data = msg.data.data as number[];
-          this.onI2cTransaction?.(addr, data);
+          const owner = msg.data.owner ? String(msg.data.owner) : undefined;
+          this.onI2cTransaction?.(addr, data, owner);
           break;
         }
         case 'spi_batch': {

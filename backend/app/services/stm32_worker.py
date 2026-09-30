@@ -169,8 +169,8 @@ def main() -> None:
             addr = int(s.get('addr', 0x68))
             _i2c_slaves[addr] = _DS3231Slave() if stype == 'ds3231' else _DS1307Slave()
         elif stype in ('ssd1306', 'pcf8574'):
-            addr = int(s.get('addr', 0x3C if stype == 'ssd1306' else 0x27))
-            _i2c_slaves[addr] = _I2CWriteSink(addr, _emit)
+            sink = _I2CWriteSink.from_record(stype, s, _emit)
+            _i2c_slaves[sink.addr] = sink
     # ── Callbacks (QEMU thread) ───────────────────────────────────────────────
     def _on_pin_change(pin, value):
         if _stopped.is_set():

@@ -1407,8 +1407,13 @@ PartSimulationRegistry.register('pcf8574', {
       device: dev,
       worker: {
         type: 'pcf8574',
+        // The worker's copy answers reads from its own latch and this port.
+        props: { portState: dev.portState },
+        // Every byte of a write phase reaches the port in turn, so the last
+        // one is what the pins hold (PCF8574 datasheet, "Writing to the port":
+        // the data is latched at the acknowledge of each byte).
         echo: (data: number[]) => {
-          if (data.length > 0) dev.writeByte(data[0]);
+          for (const b of data) dev.writeByte(b);
         },
       },
     });
@@ -1516,6 +1521,7 @@ function makeI2cLcdAttach(cols: number, rows: number) {
       device: pcf,
       worker: {
         type: 'pcf8574',
+        props: { portState: LCD_BACKPACK_PORT },
         echo: (data: number[]) => {
           for (const b of data) decoder.feedPCF8574Byte(b);
         },

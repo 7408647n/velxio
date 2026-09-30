@@ -469,12 +469,56 @@ class DS3231Slave(DS1307Slave):
 # ── I2C Write Sink (relay for write-only devices: SSD1306, PCF8574) ──────────
 
 class I2CWriteSink:
-    """ACKs all I2C writes, emits complete transaction to frontend on FINISH."""
+    """ACKs all I2C writes, emits complete transaction to frontend on FINISH.
 
-    def __init__(self, addr: int, emit_fn) -> None:
+    The echo names the part it belongs to (`owner`, the component id the
+    record carries) whenever the record gave one, so the tab hands each write
+    phase to that part only: two panels at one address on the two controllers
+    of a board no longer draw each other's frames.
+
+    Without a `port` the sink is a write-only panel, which drives nothing, so
+    a read is 0xFF. With one it is the PCF8574 of an expander part or an LCD
+    backpack. That chip has no registers: every byte written goes to the port
+    latch at its acknowledge, and a read returns the pins (PCF8574 datasheet,
+    "Writing to the port" / "Reading from the port"). A latch bit of 0 drives
+    its pin low; a 1 releases it to the weak pull-up, and the pin then reads
+    what the outside drives. `port` is that outside: 0xFF when nothing pulls a
+    pin down, 0xF7 on an LCD backpack, whose backlight transistor holds P3
+    low. The tab's model (VirtualPCF8574, I2CBusManager.ts) reads the same
+    `latch & port`. hd44780_I2Cexp tells the chip from an MCP23008, and finds
+    the backpack's wiring, from these reads; against a sink that read 0xFF it
+    took the backpack for an MCP23008.
+
+    One class for both, so the workers' checks by class name (no per-event
+    log or trace for a sink) keep holding.
+    """
+
+    def __init__(self, addr: int, emit_fn, owner: str | None = None,
+                 port: int | None = None) -> None:
         self.addr  = addr
+        self.owner = owner
+        self.port  = None if port is None else port & 0xFF
+        self.latch = 0xFF   # power-on: every pin released (quasi-input)
         self._emit = emit_fn
         self._buf: list[int] = []
+
+    @staticmethod
+    def from_record(stype: str, record: dict, emit_fn) -> 'I2CWriteSink':
+        """The worker's copy of a display or an expander part, from its record.
+
+        One place for every worker that hosts these parts: the record's type
+        picks the default address and, for 'pcf8574', the port latch; its
+        `owner` goes on every echo; its `portState` is the outside of an
+        expander's pins. A static method so a worker reaches it through the
+        class it already imports.
+        """
+        addr = int(record.get('addr', 0x3C if stype == 'ssd1306' else 0x27))
+        owner = record.get('owner')
+        owner = str(owner) if owner else None
+        port = None
+        if stype == 'pcf8574':
+            port = int(record.get('portState', 0xFF)) & 0xFF
+        return I2CWriteSink(addr, emit_fn, owner, port)
 
     def handle_event(self, event: int) -> int:
         op   = event & 0xFF
@@ -483,12 +527,19 @@ class I2CWriteSink:
         if op in (I2C_START_RECV, I2C_START_SEND):
             self._buf = []; return 0
         elif op == I2C_WRITE:
-            self._buf.append(data); return 0
+            self._buf.append(data)
+            self.latch = data
+            return 0
         elif op == I2C_READ:
-            return 0xFF   # write-only device
+            if self.port is None:
+                return 0xFF   # write-only device
+            return self.latch & self.port
         else:             # I2C_FINISH — emit accumulated transaction
             if self._buf:
-                self._emit({'type': 'i2c_transaction',
-                            'addr': self.addr, 'data': list(self._buf)})
+                msg = {'type': 'i2c_transaction',
+                       'addr': self.addr, 'data': list(self._buf)}
+                if self.owner:
+                    msg['owner'] = self.owner
+                self._emit(msg)
                 self._buf = []
             return 0
