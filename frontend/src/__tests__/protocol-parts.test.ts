@@ -46,7 +46,12 @@ import type {
 } from '../simulation/buses';
 import { i2cPartWorkerPin } from '../simulation/parts/i2cPart';
 import { PinManager } from '../simulation/PinManager';
-import { MPU6050_RULES, VirtualMPU6050, parseAd0 } from '../simulation/parts/ProtocolParts';
+import {
+  MPU6050_RULES,
+  VirtualMPU6050,
+  parseAd0,
+  parseMpuVariant,
+} from '../simulation/parts/ProtocolParts';
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 
@@ -675,6 +680,30 @@ describe('mpu6050 — I2C IMU', () => {
     expect(at('gnd', { ad0: 'high' })).toEqual([false, true]);
   });
 
+  it('reads the variant property as the worker reads its record', () => {
+    const cases: Array<[unknown, string]> = [
+      ['mpu9250', 'mpu9250'],
+      ['MPU-9250', 'mpu9250'],
+      [' Mpu9250 ', 'mpu9250'],
+      ['mpu6050', 'mpu6050'],
+      ['mpu6500', 'mpu6050'],
+      [undefined, 'mpu6050'],
+      [9250, 'mpu6050'],
+    ];
+    for (const [value, die] of cases) expect(parseMpuVariant(value), String(value)).toBe(die);
+  });
+
+  it('answers as the die it is set to, and names it in its notes', () => {
+    const rig = i2cRig({ imu: HW_I2C_PINS });
+    attachImu('imu', { variant: 'MPU-9250' });
+    const heard: BusDiagnostic[] = [];
+    const off = busRegistry.onDiagnostic((d) => heard.push(d));
+    expect(rig.readReg(0x68, 0x75, 1)).toEqual([0x71]);
+    rig.readReg(0x68, 0x3b, 2);
+    off();
+    expect(heard.map((d) => d.message.split(' ')[0])).toEqual(['MPU9250']);
+  });
+
   it('reads the ad0 property as the worker reads its record', () => {
     const values = MPU_VECTORS.ad0_values;
     expect(values.length).toBeGreaterThan(10);
@@ -801,6 +830,8 @@ interface BusVector {
   driver?: string;
   /** False: the host keeps no guest time. Otherwise it stands at 0 until `advance`. */
   clock?: boolean;
+  /** The die the model is built as (the part's `variant` property). */
+  variant?: string;
   steps: VectorStep[];
 }
 
@@ -1010,7 +1041,7 @@ describe('mpu6050 — shared bus vectors', () => {
       // says `"clock": false` is a board that keeps no time.
       const clock = vector.clock === false ? undefined : new RigClock();
       const rig = i2cRig({ imu: HW_I2C_PINS }, clock);
-      attachImu();
+      attachImu('imu', vector.variant ? { variant: vector.variant } : {});
       const host = partHost(rig, 'imu');
       if (clock) host.advanceUs = (us) => clock.advanceUs(us);
       host.inputs(MPU_VECTORS.inputs);
@@ -1021,7 +1052,10 @@ describe('mpu6050 — shared bus vectors', () => {
   describe.each(flavours)('the model under a host that does not announce START, %s', (flavour) => {
     it.each(MPU_VECTORS.vectors.map((v) => [v.name, v] as const))('%s', (_name, vector) => {
       const clock = vector.clock === false ? undefined : new RigClock();
-      const host = bareHost(new VirtualMPU6050(MPU_ADDR), clock);
+      const host = bareHost(
+        new VirtualMPU6050(MPU_ADDR, parseMpuVariant(vector.variant)),
+        clock,
+      );
       host.inputs(MPU_VECTORS.inputs);
       replayVector(host, vector, flavour);
     });
@@ -2347,6 +2381,21 @@ describe('mpu6050 — ESP32 path', () => {
       'mpu6050',
       i2cPartWorkerPin('imu-q2'),
       expect.objectContaining({ addr: 0x69 }),
+    );
+  });
+
+  it('carries the variant, and the pin INT is wired to', () => {
+    const sim = makeEsp32Sim();
+    PartSimulationRegistry.get('mpu6050')!.attachEvents!(
+      makeElement({ variant: 'mpu9250' }),
+      sim as any,
+      (name: string) => (name === 'INT' ? 4 : null),
+      'imu-q3',
+    );
+    expect(sim.registerSensor).toHaveBeenCalledWith(
+      'mpu6050',
+      i2cPartWorkerPin('imu-q3'),
+      expect.objectContaining({ addr: 0x68, variant: 'mpu9250', int_pin: 4 }),
     );
   });
 

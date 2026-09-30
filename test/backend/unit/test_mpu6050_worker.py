@@ -122,6 +122,13 @@ class TestSeededFromTheRecord:
         w.sync()
         assert read_sample(w) == [-16384, *PANEL_COUNTS[1:]]
 
+    def test_the_record_picks_the_die_and_the_address(self, worker):
+        """The tab sends the variant and the address it resolved from AD0."""
+        w = worker(sensors=[record(variant='mpu9250'),
+                            {**record(), 'pin': PIN + 1, 'addr': 0x69, 'owner': 'imu2'}])
+        assert w.read_reg(0, ADDR, 0x75) == (0, 0x71)
+        assert w.read_reg(0, 0x69, 0x75) == (0, 0x68)
+
     def test_the_chip_is_asleep_until_the_sketch_wakes_it(self, worker):
         w = worker(sensors=[record(**PANEL)])
         assert w.read_reg(0, ADDR, PWR_MGMT_1) == (0, 0x40)

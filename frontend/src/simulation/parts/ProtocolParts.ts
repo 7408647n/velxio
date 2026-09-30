@@ -573,6 +573,16 @@ export const MPU6050_RULES = {
   temp_lsb_per_c: 340,
   temp_offset_c: 36.53,
   /**
+   * What another die of the family changes, selected by the part's
+   * `variant` property. The MPU-9250 (the Grove IMU 9DOF v2.0 and 10DOF
+   * bricks) answers WHO_AM_I 0x71 and reads TEMP_OUT = (T - 21) * 333.87
+   * (RM-MPU-9250A-00 rev 1.6, sections 4.22 and 4.39; PS-MPU-9250A-01 3.4.2).
+   * Its AK8963 magnetometer is not modelled.
+   */
+  variants: {
+    mpu9250: { who_am_i: 0x71, temp_lsb_per_c: 333.87, temp_offset_c: 21 },
+  },
+  /**
    * Bits a read of the register takes with it: "each bit will clear after
    * the register is read" (4.16). With INT_RD_CLEAR set in INT_PIN_CFG, a
    * read of any register clears them (4.14).
@@ -608,6 +618,20 @@ export const MPU6050_RULES = {
    */
   dmp_rom: { 0x1006: 0xa5 },
 } as const;
+
+/** The dies the model answers as: `mpu6050`, or one of MPU6050_RULES.variants. */
+export type Mpu6050Variant = 'mpu6050' | keyof typeof MPU6050_RULES.variants;
+
+/**
+ * The part's `variant` property (the worker record's too, see
+ * esp32_i2c_slaves.parse_variant): a die of MPU6050_RULES.variants, spelled
+ * with or without the dash, or the MPU-6050.
+ */
+export function parseMpuVariant(value: unknown): Mpu6050Variant {
+  if (typeof value !== 'string') return 'mpu6050';
+  const v = value.trim().toLowerCase().replace(/-/g, '');
+  return v in MPU6050_RULES.variants ? (v as Mpu6050Variant) : 'mpu6050';
+}
 
 /** Motion and temperature at the chip, under the names of the panel's sliders. */
 export interface Mpu6050Inputs {
@@ -687,6 +711,7 @@ const MPU_SIG_COND_RESET = 0x01;
 const MPU_PWR_MGMT_1 = 0x6b;
 const MPU_DEVICE_RESET = 0x80;
 const MPU_SLEEP = 0x40;
+const MPU_WHO_AM_I = 0x75;
 const MPU_CYCLE = 0x20;
 const MPU_TEMP_DIS = 0x08;
 /**
@@ -840,8 +865,19 @@ export class VirtualMPU6050 implements I2CDevice {
   private readonly dmpMem = new Uint8Array(MPU6050_RULES.dmp_banks * 256);
   private dmpUploadSaid = false;
 
-  constructor(address: number) {
+  /** WHO_AM_I and the temperature line of the die (MPU6050_RULES.variants). */
+  private readonly die: { who_am_i: number; temp_lsb_per_c: number; temp_offset_c: number };
+
+  constructor(address: number, variant: Mpu6050Variant = 'mpu6050') {
     this.address = address;
+    this.die =
+      variant === 'mpu6050'
+        ? {
+            who_am_i: MPU6050_RULES.power_on[0x75],
+            temp_lsb_per_c: MPU6050_RULES.temp_lsb_per_c,
+            temp_offset_c: MPU6050_RULES.temp_offset_c,
+          }
+        : MPU6050_RULES.variants[variant];
     this.powerOn();
   }
 
@@ -1157,6 +1193,7 @@ export class VirtualMPU6050 implements I2CDevice {
     for (const [reg, value] of Object.entries(MPU6050_RULES.power_on)) {
       this.regs[Number(reg)] = value;
     }
+    this.regs[MPU_WHO_AM_I] = this.die.who_am_i;
     this.held.fill(0);
     this.fifoEmpty();
     this.fifoLast = 0;
@@ -1275,7 +1312,7 @@ export class VirtualMPU6050 implements I2CDevice {
       inputs.accelX * accel + trim(MPU_XA_OFFS),
       inputs.accelY * accel + trim(MPU_XA_OFFS + 2),
       inputs.accelZ * accel + trim(MPU_XA_OFFS + 4),
-      (inputs.temp - MPU6050_RULES.temp_offset_c) * MPU6050_RULES.temp_lsb_per_c,
+      (inputs.temp - this.die.temp_offset_c) * this.die.temp_lsb_per_c,
       inputs.gyroX * gyro + drift(MPU_XG_OFFS_USR),
       inputs.gyroY * gyro + drift(MPU_XG_OFFS_USR + 2),
       inputs.gyroZ * gyro + drift(MPU_XG_OFFS_USR + 4),
@@ -1413,7 +1450,8 @@ PartSimulationRegistry.register('mpu6050', {
   attachEvents: (element, simulator, getPin, componentId) => {
     const el = element as any;
     const addr = mpu6050Address(el.ad0, componentId);
-    const device = new VirtualMPU6050(addr);
+    const variant = parseMpuVariant(el.variant);
+    const device = new VirtualMPU6050(addr, variant);
     // The world starts where the panel's sliders do.
     device.setInputs(getSensorControl('mpu6050')?.defaultValues ?? {});
     // A board pin, not a rail (-1) and not a net between chips.
@@ -1429,18 +1467,22 @@ PartSimulationRegistry.register('mpu6050', {
       // pin INT is wired to itself, next to the guest.
       worker: {
         type: 'mpu6050',
-        props: { ...device.getInputs(), ...(intPin !== null ? { int_pin: intPin } : {}) },
+        props: {
+          ...device.getInputs(),
+          ...(intPin !== null ? { int_pin: intPin } : {}),
+          ...(variant !== 'mpu6050' ? { variant } : {}),
+        },
       },
     });
     device.onAsleepRead = () =>
       part.report(
         'i2c-target-asleep',
-        `MPU6050 0x${addr.toString(16)} is in sleep mode: write 0x00 to PWR_MGMT_1 (0x6B) to wake it`,
+        `${variant.toUpperCase()} 0x${addr.toString(16)} is in sleep mode: write 0x00 to PWR_MGMT_1 (0x6B) to wake it`,
       );
     device.onDmpUpload = () =>
       part.report(
         'i2c-target-unmodelled',
-        `MPU6050 0x${addr.toString(16)}: the sketch loads a DMP image, but the simulator does not run the DMP, ` +
+        `${variant.toUpperCase()} 0x${addr.toString(16)}: the sketch loads a DMP image, but the simulator does not run the DMP, ` +
           'so no quaternion packets reach the FIFO. Read the accelerometer and gyroscope registers instead',
       );
     const releaseInt =

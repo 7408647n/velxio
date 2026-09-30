@@ -3026,7 +3026,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             elif sensor_type == 'mpu6050':
                 i2c_addr = _MPU6050Slave.address_of(s)
                 # On the guest's clock, the one the chips' timers run on.
-                slave = _MPU6050Slave(i2c_addr, now_ns=_guest_clock_ns)
+                slave = _MPU6050Slave(i2c_addr, now_ns=_guest_clock_ns,
+                                      variant=s.get('variant'))
                 # The record carries where the panel's sliders are, so the
                 # first read is already theirs and not the twin's own rest.
                 slave.update(**s)
@@ -3354,7 +3355,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                         pass
                 elif sensor_type == 'mpu6050':
                     i2c_addr = _MPU6050Slave.address_of(cmd)
-                    slave = _MPU6050Slave(i2c_addr, now_ns=_guest_clock_ns)
+                    slave = _MPU6050Slave(i2c_addr, now_ns=_guest_clock_ns,
+                                          variant=cmd.get('variant'))
                     slave.update(**cmd)
                     _i2c_add(gpio, cmd, slave, i2c_addr)
                     _mpu_int_attach(sensor_data, slave, cmd)

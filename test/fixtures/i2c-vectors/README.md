@@ -60,6 +60,12 @@ then 0x40. The empty string is no bytes.
 | `{ "op": "advance", "us": 1000 }` | not a bus event: the guest's clock moves on, in microseconds (decimal). A chip that samples on its own takes the samples due |
 | `{ "op": "int", "expect": "low" }` | not a bus event: what the chip's interrupt pad does now, `high`, `low`, or `z` when an open-drain pad lets go. A host that cannot see the pad skips the step |
 
+## Variants
+
+A vector with `"variant": "mpu9250"` runs on a model built as that die (the
+part's `variant` property, the worker record's `variant`); the rules table
+says what the die changes.
+
 ## Time
 
 A vector runs on a guest clock that stands at 0 and moves only at `advance`

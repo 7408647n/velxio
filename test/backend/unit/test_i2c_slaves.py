@@ -35,6 +35,7 @@ from app.services.esp32_i2c_slaves import (
     MPU6050Slave,
     MPU6050_RULES,
     parse_ad0,
+    parse_variant,
     I2C_START_RECV,
     I2C_START_SEND,
     I2C_FINISH,
@@ -785,6 +786,12 @@ class TestMPU6050Slave(unittest.TestCase):
         self.assertEqual(MPU6050Slave.address_of({'addr': 0x68, 'ad0': True}), 0x68)
         self.assertEqual(MPU6050Slave.address_of({'addr': 105}), 0x69)
 
+    def test_the_variant_is_read_as_the_tab_reads_it(self):
+        for value, die in (('mpu9250', 'mpu9250'), ('MPU-9250', 'mpu9250'), (' Mpu9250 ', 'mpu9250'),
+                           ('mpu6050', 'mpu6050'), ('mpu6500', 'mpu6050'), (None, 'mpu6050'),
+                           (9250, 'mpu6050')):
+            self.assertEqual(parse_variant(value), die, repr(value))
+
     def test_the_vectors_are_the_format_this_runner_reads(self):
         self.assertEqual(MPU_VECTORS['format'], 1)
         self.assertEqual(MPU_VECTORS['device'], 'mpu6050')
@@ -796,7 +803,7 @@ def _vector_case(vector: dict, flavour: str):
         # The guest's clock stands still until a step moves it; a vector that
         # says `"clock": false` is a host that keeps no time.
         clock = GuestClock() if vector.get('clock', True) else None
-        slave = MPU6050Slave(MPU_ADDR, now_ns=clock)
+        slave = MPU6050Slave(MPU_ADDR, now_ns=clock, variant=vector.get('variant', 'mpu6050'))
         slave.update(**MPU_VECTORS['inputs'])
         replay_vector(self, slave, vector, flavour, clock)
     case.__doc__ = f'{vector["name"]} ({flavour})'

@@ -169,7 +169,7 @@ def main() -> None:
         stype = s.get('sensor_type', '')
         if stype == 'mpu6050':
             addr = _MPU6050Slave.address_of(s)
-            sl = _MPU6050Slave(addr, now_ns=_guest_clock_ns)
+            sl = _MPU6050Slave(addr, now_ns=_guest_clock_ns, variant=s.get('variant'))
             # The record carries where the panel's sliders are, so the first
             # read is already theirs and not the twin's own rest.
             sl.update(**s)

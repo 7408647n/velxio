@@ -80,6 +80,14 @@ MPU6050_RULES = {
     # TEMP_OUT = (T - 36.53) * 340 (4.18).
     'temp_lsb_per_c': 340,
     'temp_offset_c': 36.53,
+    # What another die of the family changes, selected by the record's
+    # `variant`. The MPU-9250 (the Grove IMU 9DOF v2.0 and 10DOF bricks)
+    # answers WHO_AM_I 0x71 and reads TEMP_OUT = (T - 21) * 333.87
+    # (RM-MPU-9250A-00 rev 1.6, sections 4.22 and 4.39; PS-MPU-9250A-01
+    # 3.4.2). Its AK8963 magnetometer is not modelled.
+    'variants': {
+        'mpu9250': {'who_am_i': 0x71, 'temp_lsb_per_c': 333.87, 'temp_offset_c': 21},
+    },
     # Bits a read of the register takes with it: "each bit will clear after
     # the register is read" (4.16). With INT_RD_CLEAR set in INT_PIN_CFG, a
     # read of any register clears them (4.14).
@@ -215,6 +223,16 @@ def parse_ad0(value):
     return None
 
 
+def parse_variant(value) -> str:
+    """The `variant` property (parseMpuVariant in the tab): a die of
+    MPU6050_RULES['variants'], spelled with or without the dash, or the
+    MPU-6050."""
+    if not isinstance(value, str):
+        return 'mpu6050'
+    v = value.strip().lower().replace('-', '')
+    return v if v in MPU6050_RULES['variants'] else 'mpu6050'
+
+
 def mpu6050_address(record: dict) -> int:
     """The address a sensor record puts the chip at. The tab resolves the
     AD0 net and sends `addr`; a record without it (an older tab, a hand-made
@@ -299,8 +317,14 @@ class MPU6050Slave:
         packets.
     """
 
-    def __init__(self, addr: int = 0x68, now_ns=None):
+    def __init__(self, addr: int = 0x68, now_ns=None, variant: str = 'mpu6050'):
         self.addr       = addr
+        # WHO_AM_I and the temperature line of the die.
+        self._die = MPU6050_RULES['variants'].get(parse_variant(variant)) or {
+            'who_am_i': MPU6050_RULES['power_on'][0x75],
+            'temp_lsb_per_c': MPU6050_RULES['temp_lsb_per_c'],
+            'temp_offset_c': MPU6050_RULES['temp_offset_c'],
+        }
         # The guest's clock, in ns, as a callable: what the chip measures its
         # sample period on. A worker hands over what it reads the guest's
         # time from (QEMU_CLOCK_VIRTUAL); None is a host that keeps no time.
@@ -633,6 +657,7 @@ class MPU6050Slave:
         self.regs[:] = bytes(256)
         for reg, value in MPU6050_RULES['power_on'].items():
             self.regs[reg] = value
+        self.regs[0x75] = self._die['who_am_i']
         self._held = bytes(_MPU_SAMPLE_SIZE)
         self._fifo = bytearray()
         self._fifo_last = 0
@@ -747,7 +772,7 @@ class MPU6050Slave:
             inputs['accelX'] * accel + trim(_MPU_XA_OFFS),
             inputs['accelY'] * accel + trim(_MPU_XA_OFFS + 2),
             inputs['accelZ'] * accel + trim(_MPU_XA_OFFS + 4),
-            (inputs['temp'] - MPU6050_RULES['temp_offset_c']) * MPU6050_RULES['temp_lsb_per_c'],
+            (inputs['temp'] - self._die['temp_offset_c']) * self._die['temp_lsb_per_c'],
             inputs['gyroX'] * gyro + drift(_MPU_XG_OFFS_USR),
             inputs['gyroY'] * gyro + drift(_MPU_XG_OFFS_USR + 2),
             inputs['gyroZ'] * gyro + drift(_MPU_XG_OFFS_USR + 4),
