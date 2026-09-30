@@ -72,6 +72,21 @@ export function i2cTargetOf(device: I2CDevice): I2cTarget & { dumpRegisters?: ()
   return target;
 }
 
+/**
+ * An I2C address as a component property holds it: the property dialog stores
+ * what was typed ("0x27", "39"), a project file may carry the number. The
+ * part reads it to place its model, and the store to file the worker record
+ * of the same part before the board starts: one parser, so the two agree.
+ */
+export function parseI2cAddress(raw: unknown, fallback: number): number {
+  if (raw === undefined || raw === null) return fallback;
+  if (typeof raw === 'number' && !isNaN(raw)) return raw & 0x7f;
+  const s = String(raw).trim();
+  if (!s) return fallback;
+  const parsed = s.toLowerCase().startsWith('0x') ? parseInt(s, 16) : parseInt(s, 10);
+  return isNaN(parsed) ? fallback : parsed & 0x7f;
+}
+
 /** What a QEMU worker needs to build its own copy of the part. */
 export interface I2cPartWorkerRecord {
   /** Worker model name ('bmp280', 'ssd1306', ...). */

@@ -33,7 +33,7 @@ import {
 import { requestLine, releaseLineGap } from '../line/requestLine';
 import { VirtualDS1307, VirtualBMP280, VirtualDS3231, VirtualPCF8574 } from '../I2CBusManager';
 import type { I2CDevice } from '../I2CBusManager';
-import { attachI2cPart } from './i2cPart';
+import { attachI2cPart, parseI2cAddress } from './i2cPart';
 import { HD44780Decoder } from '../HD44780Decoder';
 import { registerSensorUpdate, unregisterSensorUpdate } from '../SensorUpdateRegistry';
 import { getSensorControl, sensorControlDefault } from '../sensorControlConfig';
@@ -1377,20 +1377,6 @@ PartSimulationRegistry.register('pcf8574', {
 });
 
 // ─── LCD1602 / LCD2004 with I2C backpack (PCF8574 + HD44780) ────────────────
-
-/**
- * Common parser for an I2C address property coming from a wokwi-element
- * (the metadata exposes `i2cAddress` as a text control; users type
- * "0x27", "39", or just the raw number).
- */
-function parseI2cAddress(raw: unknown, fallback: number): number {
-  if (raw === undefined || raw === null) return fallback;
-  if (typeof raw === 'number' && !isNaN(raw)) return raw & 0x7f;
-  const s = String(raw).trim();
-  if (!s) return fallback;
-  const parsed = s.toLowerCase().startsWith('0x') ? parseInt(s, 16) : parseInt(s, 10);
-  return isNaN(parsed) ? fallback : parsed & 0x7f;
-}
 
 /**
  * Build a part attach function for an LCD with an I2C backpack.  The

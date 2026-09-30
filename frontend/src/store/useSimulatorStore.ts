@@ -94,7 +94,7 @@ import {
 import { RemoteI2cLane } from '../simulation/buses/remoteI2c';
 import { RemoteUartLane } from '../simulation/buses/remoteUart';
 import { remotePullLane, type RemotePullLane } from '../simulation/buses/remotePulls';
-import { i2cPartWorkerPin } from '../simulation/parts/i2cPart';
+import { i2cPartWorkerPin, parseI2cAddress } from '../simulation/parts/i2cPart';
 import {
   loadSdBusChip,
   SdSpiCard,
@@ -121,17 +121,22 @@ const SENSOR_COMPONENT_MAP = SINGLE_WIRE_SENSOR_MODELS;
 // (i2cPartWorkerPin), not by a GPIO, and carries the component as its owner:
 // the bus map the tab sends names the controller each owner is wired to.
 // `addrProp` is the component property that overrides the default address.
-const I2C_SENSOR_MAP: Record<
-  string,
-  {
-    sensorType: string;
-    defaultAddr: number;
-    addrProp?: string; // property key that holds the I2C address (e.g. 'address')
-    addrIsBool?: boolean; // true when addrProp is a boolean flag (e.g. AD0 → 0x68/0x69)
-    addrBoolHigh?: number; // address when the boolean flag is truthy
-    propertyKeys?: string[]; // additional sensor values to forward (e.g. temperature, pressure)
-  }
-> = {
+interface I2cSensorDef {
+  sensorType: string;
+  defaultAddr: number;
+  /**
+   * Property keys that hold the I2C address, the first one set wins. The
+   * keys, and their order, are those the part itself reads.
+   */
+  addrProp?: string | string[];
+  /** The addresses the chip can be strapped to. Any other value is the default. */
+  addrs?: number[];
+  addrIsBool?: boolean; // true when addrProp is a boolean flag (e.g. AD0 → 0x68/0x69)
+  addrBoolHigh?: number; // address when the boolean flag is truthy
+  propertyKeys?: string[]; // additional sensor values to forward (e.g. temperature, pressure)
+}
+
+const I2C_SENSOR_MAP: Record<string, I2cSensorDef> = {
   mpu6050: {
     sensorType: 'mpu6050',
     defaultAddr: 0x68,
@@ -142,7 +147,11 @@ const I2C_SENSOR_MAP: Record<
   bmp280: {
     sensorType: 'bmp280',
     defaultAddr: 0x76,
-    addrProp: 'address',
+    // As the part (ProtocolParts, 'bmp280'): `i2cAddress` is the name a
+    // Grove brick sets, and SDO selects one of two addresses. Read as
+    // `address` only, this record said 0x76 for a part that answers at 0x77.
+    addrProp: ['i2cAddress', 'address'],
+    addrs: [0x76, 0x77],
     propertyKeys: ['temperature', 'pressure'],
   },
   ds1307: { sensorType: 'ds1307', defaultAddr: 0x68 },
@@ -150,6 +159,28 @@ const I2C_SENSOR_MAP: Record<
   ssd1306: { sensorType: 'ssd1306', defaultAddr: 0x3c },
   pcf8574: { sensorType: 'pcf8574', defaultAddr: 0x27, addrProp: 'i2cAddress' },
 };
+
+/**
+ * The address in the worker record of an I2C sensor, from the properties of
+ * its component. It has to be the address the part puts its own record at:
+ * the two are one record in the worker, keyed by the part's slot.
+ */
+export function i2cSensorAddress(
+  metadataId: string,
+  properties: Record<string, unknown>,
+): number | null {
+  const def = I2C_SENSOR_MAP[metadataId];
+  if (!def) return null;
+  const keys = ([] as string[]).concat(def.addrProp ?? []);
+  const raw = keys.map((key) => properties[key]).find((v) => v !== undefined && v !== null);
+  if (def.addrIsBool) {
+    // Boolean flag (e.g. AD0 on MPU-6050): truthy → high address
+    const high = raw === true || raw === 'true' || raw === '1';
+    return high ? (def.addrBoolHigh ?? def.defaultAddr) : def.defaultAddr;
+  }
+  const addr = parseI2cAddress(raw, def.defaultAddr);
+  return def.addrs && !def.addrs.includes(addr) ? def.defaultAddr : addr;
+}
 
 // ── Legacy type aliases (keep external consumers working) ──────────────────
 /**
@@ -3131,27 +3162,7 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
           for (const comp of workerI2c ? components : []) {
             const i2cDef = I2C_SENSOR_MAP[comp.metadataId];
             if (!i2cDef) continue;
-            // Resolve I2C address from component property or use default
-            let addr = i2cDef.defaultAddr;
-            if (i2cDef.addrProp) {
-              const rawAddr = comp.properties[i2cDef.addrProp];
-              if (rawAddr !== undefined) {
-                if (i2cDef.addrIsBool) {
-                  // Boolean flag (e.g. AD0 on MPU-6050): truthy → high address
-                  if (rawAddr === true || rawAddr === 'true' || rawAddr === '1') {
-                    addr = i2cDef.addrBoolHigh ?? i2cDef.defaultAddr;
-                  }
-                } else {
-                  const parsed =
-                    typeof rawAddr === 'string'
-                      ? rawAddr.startsWith('0x')
-                        ? parseInt(rawAddr, 16)
-                        : parseInt(rawAddr, 10)
-                      : Number(rawAddr);
-                  if (!isNaN(parsed)) addr = parsed;
-                }
-              }
-            }
+            const addr = i2cSensorAddress(comp.metadataId, comp.properties) ?? i2cDef.defaultAddr;
             const props: Record<string, unknown> = {
               sensor_type: i2cDef.sensorType,
               pin: i2cPartWorkerPin(comp.id),
@@ -3242,25 +3253,7 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
           for (const comp of components) {
             const i2cDef = I2C_SENSOR_MAP[comp.metadataId];
             if (!i2cDef) continue;
-            let addr = i2cDef.defaultAddr;
-            if (i2cDef.addrProp) {
-              const rawAddr = comp.properties[i2cDef.addrProp];
-              if (rawAddr !== undefined) {
-                if (i2cDef.addrIsBool) {
-                  if (rawAddr === true || rawAddr === 'true' || rawAddr === '1') {
-                    addr = i2cDef.addrBoolHigh ?? i2cDef.defaultAddr;
-                  }
-                } else {
-                  const parsed =
-                    typeof rawAddr === 'string'
-                      ? rawAddr.startsWith('0x')
-                        ? parseInt(rawAddr, 16)
-                        : parseInt(rawAddr, 10)
-                      : Number(rawAddr);
-                  if (!isNaN(parsed)) addr = parsed;
-                }
-              }
-            }
+            const addr = i2cSensorAddress(comp.metadataId, comp.properties) ?? i2cDef.defaultAddr;
             const props: Record<string, unknown> = {
               sensor_type: i2cDef.sensorType,
               pin: i2cPartWorkerPin(comp.id),
