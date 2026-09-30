@@ -335,6 +335,11 @@ What `attachI2cPart` does with it:
   burst is one sample. Both are optional, and a host that cannot say where a
   read begins does not call `start`: a model that latches must also do it on
   the first `readByte` after a `writeByte` or a `stop`;
+- a model that defines `setClock(clock)` is handed the guest clock of the
+  board it was placed on, and `null` when it leaves the bus. It is for a chip
+  that does something on its own between two transactions; measure on it and
+  never on `performance.now()`. `clock.clockHz()` is 0 where there is no
+  time to read, and the model then counts the events it is sent;
 - on a board whose guest runs in a worker, sends
   `registerSensor(type, chipVirtualPin(componentId), { ...props, addr, owner })`
   so the worker's own copy answers the guest, starting from the values in

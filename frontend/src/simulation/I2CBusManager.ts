@@ -22,7 +22,12 @@
  */
 
 import type { AVRTWI, TWIEventHandler } from 'avr8js';
-import type { I2cControllerPort, I2cRouting, I2cTransactionHandler } from './buses/types';
+import type {
+  GuestClock,
+  I2cControllerPort,
+  I2cRouting,
+  I2cTransactionHandler,
+} from './buses/types';
 
 // ── Virtual I2C device interface ────────────────────────────────────────────
 
@@ -50,6 +55,12 @@ export interface I2CDevice {
    * the run that ended is, such as a note the monitor of that run was given.
    */
   boardReset?(): void;
+  /**
+   * Optional: the guest's clock of the board the device is wired to, or null
+   * when it is on no bus (I2cTarget.setClock). A chip that samples on its own
+   * measures its periods on it. clockHz() 0 means the host keeps no time.
+   */
+  setClock?(clock: GuestClock | null): void;
   /**
    * Optional snapshot of the device's 256-byte register state. A host that
    * answers a guest from a copy of the part (the Raspberry Pi relay) uses it

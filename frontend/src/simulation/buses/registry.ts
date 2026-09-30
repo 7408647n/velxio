@@ -627,12 +627,16 @@ export class BusRegistry {
       fabric.i2cMembershipChanged(bus);
     }
     e.key = key;
+    // A chip has one clock, as it has one crystal: on two boards' buses it
+    // keeps the time of the board `resolve` names.
+    e.target.setClock?.(e.placements[0].fabric.targetClock);
   }
 
   private unplaceI2c(e: I2cEntry): void {
     const gone = e.placements;
     e.placements = [];
     e.key = '';
+    if (gone.length > 0) e.target.setClock?.(null);
     for (const { bus, fabric } of gone) {
       bus.remove(e.desc.owner);
       fabric.i2cMembershipChanged(bus);

@@ -693,6 +693,7 @@ interface I2cTarget {
   read(): number;                                   // the next byte the controller clocks out
   stop(): void;                                     // once per STOP the target took part in
   boardReset?(): void;
+  setClock?(clock: GuestClock | null): void;        // the board's clock, when placed; null when it leaves
   readonly mayNak?: boolean;                        // start() or write() may return false while present
 }
 ```
@@ -702,10 +703,23 @@ for the Raspberry Pi relay, which ACKs writes itself for every target that
 does not say it may refuse them, and asks the tab only for the ones that do
 (a user's custom chip).
 
+`setClock` is for a chip that does something between two transactions: the
+MPU-6050 takes a sample every period, sets DATA_RDY, fills its FIFO and pulses
+INT whether the sketch talks to it or not. The registry hands it the clock of
+the board its SDA and SCL reach (`BoardBusFabric.targetClock`) when it places
+it, and `null` when it leaves the bus. It is the guest's time, in the cycles
+of `clockHz()`, never the browser's: a sketch that waits 40 ms finds 40 ms of
+samples however slowly the emulator ran them. The object reads the engine
+bound at the moment of each call, so it is safe to keep across a new Run; a
+value read from it is not, because the guest's counter starts again on a
+reset (`boardReset()` says when). `clockHz()` is 0 on a board that keeps no
+time the tab can read (no engine bound, a guest in a backend worker), and the
+chip then has to make do with the events it is sent.
+
 Most parts do not implement `I2cTarget` by hand: `attachI2cPart`
 (`parts/i2cPart.ts`) adapts the register-file `I2CDevice` shape the parts
-already have (`writeByte`, `readByte`, `stop`, and the optional `start` and
-`boardReset`) and, on a QEMU board, also
+already have (`writeByte`, `readByte`, `stop`, and the optional `start`,
+`boardReset` and `setClock`) and, on a QEMU board, also
 files the worker record the guest is answered from. The
 [part author guide](./board-buses-part-authoring.md#an-i2c-target) shows it.
 

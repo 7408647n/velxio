@@ -713,6 +713,22 @@ class TestMPU6050Slave(unittest.TestCase):
         result = i2c_read_seq(m, 0x6B, 1)
         self.assertEqual(result[0], 0x01)
 
+    def test_the_guest_clock_is_not_read_before_the_chip_samples(self):
+        """A worker builds the twin, and hands it the panel's values, before
+        QEMU is initialised: the guest's clock does not exist yet. A chip that
+        is asleep takes no sample, so it has no reason to ask the time."""
+        asked = []
+
+        def now_ns() -> int:
+            asked.append(1)
+            return 0
+
+        mpu = MPU6050Slave(0x68, now_ns=now_ns)
+        mpu.update(accelX=0.5, temp=30)
+        mpu.dump_registers()
+        self.assertEqual(i2c_read_seq(mpu, 0x75, 1), [0x68])
+        self.assertEqual(asked, [])
+
     def test_rules_are_the_table_the_shared_vectors_carry(self):
         """The twin and the tab model work from one table of facts, and the
         vectors hold the copy both are compared with."""

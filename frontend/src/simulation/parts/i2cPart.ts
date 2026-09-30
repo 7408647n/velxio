@@ -38,6 +38,8 @@ import { hostsChipsInWorker } from '../customChips/simulatorBridges';
  *
  * A model that has to know where a read begins hears every START itself
  * (`start`): the MPU-6050 answers a burst from the sample it latched there.
+ * One that does something between two transactions is handed the clock of
+ * the board it was placed on (`setClock`).
  */
 export function i2cTargetOf(device: I2CDevice): I2cTarget & { dumpRegisters?: () => Uint8Array } {
   let open = false;
@@ -64,6 +66,10 @@ export function i2cTargetOf(device: I2CDevice): I2cTarget & { dumpRegisters?: ()
       device.boardReset?.();
     },
   };
+  // Only a model that keeps time asks for the clock.
+  if (typeof device.setClock === 'function') {
+    target.setClock = (clock) => device.setClock!(clock);
+  }
   // A board whose guest reads the bus from somewhere else (the Pi relay)
   // answers a register file from a copy instead of a round trip per byte.
   if (typeof device.dumpRegisters === 'function') {

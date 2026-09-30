@@ -140,8 +140,14 @@ class MPU6050Slave:
       - Asleep, the block holds what it held when the chip fell asleep.
     """
 
-    def __init__(self, addr: int = 0x68):
+    def __init__(self, addr: int = 0x68, now_ns=None):
         self.addr       = addr
+        # The guest's clock, in ns, as a callable: what the chip measures its
+        # sample period on. A worker hands over what it reads the guest's
+        # time from (QEMU_CLOCK_VIRTUAL); None is a host that keeps no time.
+        # It is never the host's clock: a guest that waits 40 ms has to find
+        # 40 ms of samples however slowly the emulator ran them.
+        self._now_ns    = now_ns
         self.regs       = bytearray(256)
         self.reg_ptr    = 0
         self.first_byte = True
