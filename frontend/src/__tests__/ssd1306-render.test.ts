@@ -134,6 +134,15 @@ function sendCommandStream(device: any, cmds: number[]) {
   device.stop();
 }
 
+/**
+ * What every driver's init leaves the panel in before it draws: display on
+ * (it powers up off, datasheet 8.5), with the segment re-map and COM scan
+ * direction that show the RAM upright on a module (0xA1, 0xC8).
+ */
+function panelOn(device: any) {
+  sendCommandStream(device, [0xaf, 0xa1, 0xc8]);
+}
+
 function sendDataStream(device: any, data: number[]) {
   device.writeByte(0x40); // control byte: GDDRAM data
   for (const b of data) device.writeByte(b);
@@ -171,6 +180,7 @@ describe('SSD1306 — ImageData rendering (syncElement fix)', () => {
     const sim = makeSim();
     PartSimulationRegistry.get('ssd1306')!.attachEvents!(el, sim as any, () => null, 'oled');
     const device = sim._devices[0];
+    panelOn(device);
 
     // Set horizontal addressing, col 0–127, page 0–7
     sendCommandStream(device, [
@@ -205,6 +215,7 @@ describe('SSD1306 — ImageData rendering (syncElement fix)', () => {
     const sim = makeSim();
     PartSimulationRegistry.get('ssd1306')!.attachEvents!(el, sim as any, () => null, 'oled');
     const device = sim._devices[0];
+    panelOn(device);
 
     sendCommandStream(device, [0x20, 0x00, 0x21, 0x00, 0x7f, 0x22, 0x00, 0x07]);
     // 0x01 → only bit 0 set → only row 0 of page 0 is lit; row 1 is off
@@ -228,6 +239,7 @@ describe('SSD1306 — ImageData rendering (syncElement fix)', () => {
     const sim = makeSim();
     PartSimulationRegistry.get('ssd1306')!.attachEvents!(el, sim as any, () => null, 'oled');
     const device = sim._devices[0];
+    panelOn(device);
 
     // Page-addressing setCursor: page 1, column 8 (col high nibble = 0x10,
     // col low nibble = 0x08). No 0x20 — relies on the power-on page-mode
@@ -258,6 +270,7 @@ describe('SSD1306 — ImageData rendering (syncElement fix)', () => {
     const sim = makeSim();
     PartSimulationRegistry.get('ssd1306')!.attachEvents!(el, sim as any, () => null, 'oled');
     const device = sim._devices[0];
+    panelOn(device);
 
     sendCommandStream(device, [0x20, 0x00, 0x21, 0x00, 0x7f, 0x22, 0x00, 0x07]);
 
@@ -343,3 +356,155 @@ describe('SSD1306 — ImageData rendering (syncElement fix)', () => {
     expect(el.redraw).toHaveBeenCalled();
   });
 });
+
+// ─── The panel commands (item ssd1306cmd, datasheet rev 1.1 section 10) ──────
+
+describe('SSD1306 — what the glass shows', () => {
+  function panel() {
+    const el = makeOLEDElement();
+    const sim = makeSim();
+    PartSimulationRegistry.get('ssd1306')!.attachEvents!(el, sim as any, () => null, 'oled');
+    const device = sim._devices[0];
+    const lit = () => {
+      const on: string[] = [];
+      const d = el.imageData.data;
+      for (let y = 0; y < 64; y++) for (let x = 0; x < 128; x++) if (d[(y * 128 + x) * 4] !== 0) on.push(`${x},${y}`);
+      return on;
+    };
+    return { el, device, lit };
+  }
+  const column = (x: number, y0: number, n = 8) => Array.from({ length: n }, (_, i) => `${x},${y0 + i}`);
+
+  it('powers up dark, and at the reset re-map and scan shows the RAM turned 180 degrees', () => {
+    const { device, lit } = panel();
+    // Page addressing at reset: column 0 of page 0.
+    sendDataStream(device, [0xff]);
+    expect(lit()).toEqual([]);
+    // Display on, nothing else: SEG0 and COM0 are the far corner of the glass.
+    sendCommandStream(device, [0xaf]);
+    expect(lit()).toEqual(column(127, 56));
+  });
+
+  it('display off keeps the RAM: on again shows the same picture', () => {
+    const { device, lit } = panel();
+    panelOn(device);
+    sendDataStream(device, [0x0f]);
+    const shown = lit();
+    expect(shown).toEqual(column(0, 0, 4));
+    sendCommandStream(device, [0xae]);
+    expect(lit()).toEqual([]);
+    sendCommandStream(device, [0xaf]);
+    expect(lit()).toEqual(shown);
+  });
+
+  it('inverse lights the zeros and entire display on lights everything, until A6 / A4', () => {
+    const { device, lit } = panel();
+    panelOn(device);
+    sendDataStream(device, [0xff]);
+    sendCommandStream(device, [0xa7]);
+    expect(lit().length).toBe(128 * 64 - 8);
+    expect(lit()).not.toContain('0,0');
+    sendCommandStream(device, [0xa6, 0xa5]);
+    expect(lit().length).toBe(128 * 64);
+    sendCommandStream(device, [0xa4]);
+    expect(lit()).toEqual(column(0, 0));
+    // Entire display on does not light a panel that is off.
+    sendCommandStream(device, [0xa5, 0xae]);
+    expect(lit()).toEqual([]);
+  });
+
+  it('contrast dims the lit colour below the reset value, and keeps it from there up', () => {
+    const { el, device } = panel();
+    panelOn(device);
+    sendDataStream(device, [0x01]);
+    const rgb = () => Array.from(el.imageData.data.slice(0, 3));
+    expect(rgb()).toEqual([200, 230, 255]);
+    for (const [c, want] of [
+      [0x00, [60, 69, 77]],
+      [0x40, [131, 150, 166]],
+      [0x7f, [200, 230, 255]],
+      [0xcf, [200, 230, 255]],
+      [0xff, [200, 230, 255]],
+    ] as const) {
+      sendCommandStream(device, [0x81, c]);
+      expect(rgb()).toEqual(want);
+    }
+  });
+
+  it('start line and display offset move the picture up, wrapping round (Tables 10-1, 10-2)', () => {
+    const { device, lit } = panel();
+    panelOn(device);
+    sendCommandStream(device, [0xb1]); // page 1: RAM rows 8-15
+    sendDataStream(device, [0xff]);
+    sendCommandStream(device, [0x48]); // start line 8
+    expect(lit()).toEqual(column(0, 0));
+    sendCommandStream(device, [0x40, 0xd3, 0x10]); // offset 16 (COM16 to COM0)
+    expect(lit()).toEqual(column(0, 56));
+    sendCommandStream(device, [0xd3, 0x30]); // 64 - 16: the other way
+    expect(lit()).toEqual(column(0, 24));
+    // Scanning up, COM0 is the bottom row of the glass: the same offset
+    // moves the flipped picture (RAM rows 8-15 on rows 48-55) down, round.
+    sendCommandStream(device, [0xd3, 0x10, 0xc0]);
+    expect(lit()).toEqual(column(0, 0));
+  });
+
+  it('vertical addressing fills a column of the page window before the next column, then wraps', () => {
+    const { device, lit } = panel();
+    panelOn(device);
+    sendCommandStream(device, [0x20, 0x01, 0x21, 10, 11, 0x22, 2, 3]);
+    sendDataStream(device, [0x01, 0x02, 0x04, 0x08, 0x10]);
+    // (10, p2) (10, p3) (11, p2) (11, p3), then back to (10, p2), whose 0x01
+    // the fifth byte replaces.
+    expect(lit()).toEqual(['10,20', '10,25', '11,18', '11,27'].sort(byRow));
+  });
+
+  it('horizontal addressing wraps inside the column and page window', () => {
+    const { device, lit } = panel();
+    panelOn(device);
+    sendCommandStream(device, [0x20, 0x00, 0x21, 126, 127, 0x22, 6, 7]);
+    sendDataStream(device, [0x01, 0x01, 0x01, 0x01, 0x80]);
+    // (126, p6) (127, p6) (126, p7) (127, p7), then back to (126, p6).
+    expect(lit()).toEqual(['127,48', '126,55', '126,56', '127,56'].sort(byRow));
+  });
+
+  it('page addressing stays on its page when the column wraps', () => {
+    const { device, lit } = panel();
+    panelOn(device);
+    sendCommandStream(device, [0xb3, 0x17, 0x0f]); // page 3, column 127
+    sendDataStream(device, [0x01, 0x01]);
+    expect(lit()).toEqual(['0,24', '127,24']);
+  });
+
+  it('re-attaching the part (a wire edit, a new program) keeps the panel on, as the module stays powered', () => {
+    const el = makeOLEDElement();
+    const sim = makeSim();
+    const logic = PartSimulationRegistry.get('ssd1306')!;
+    const detach = logic.attachEvents!(el, sim as any, () => null, 'oled')!;
+    panelOn(sim._devices[0]);
+    sendCommandStream(sim._devices[0], [0x81, 0x00]);
+    detach();
+    logic.attachEvents!(el, sim as any, () => null, 'oled');
+    // No init after the re-attach: the display() of the sketch's loop.
+    sendDataStream(sim._devices[0], [0x01]);
+    expect(Array.from(el.imageData.data.slice(0, 3))).toEqual([60, 69, 77]);
+  });
+
+  it('scroll setup parameters are not taken for commands', () => {
+    const { device, lit } = panel();
+    panelOn(device);
+    sendCommandStream(device, [0xb0, 0x12, 0x00]); // page 0, column 32
+    // Right scroll of pages 0-7: its 0x07 parameters used to set the column.
+    sendCommandStream(device, [0x26, 0x00, 0x00, 0x07, 0x07, 0x00, 0xff]);
+    // Vertical scroll area: 64 rows, a 0x40 parameter (start line 0).
+    sendCommandStream(device, [0x48, 0xa3, 0x00, 0x40]);
+    sendDataStream(device, [0x01]);
+    expect(lit()).toEqual(['32,56']);
+  });
+});
+
+/** Order "x,y" strings the way lit() lists them: row by row, then by column. */
+function byRow(a: string, b: string): number {
+  const [ax, ay] = a.split(',').map(Number);
+  const [bx, by] = b.split(',').map(Number);
+  return ay - by || ax - bx;
+}

@@ -456,8 +456,9 @@ describe('ssd1306 — I2C device', () => {
     const imageData = { width: 128, height: 64, data: new Uint8ClampedArray(128 * 64 * 4) };
     const el = makeElement({ imageData, redraw: vi.fn() });
     PartSimulationRegistry.get('ssd1306')!.attachEvents!(el, makeI2CSim() as any, noPins, 'oled');
-    // Command stream: column 0-127, page 0-7.
-    expect(rig.write(0x3c, [0x00, 0x21, 0x00, 0x7f, 0x22, 0x00, 0x07])).not.toContain(false);
+    // Command stream: display on, upright (0xAF, 0xA1, 0xC8, as every
+    // driver's init leaves it; the panel powers up off), column 0-127, page 0-7.
+    expect(rig.write(0x3c, [0x00, 0xaf, 0xa1, 0xc8, 0x21, 0x00, 0x7f, 0x22, 0x00, 0x07])).not.toContain(false);
     // Data stream: column 0 of page 0 = 0xAB (bits 0, 1, 3, 5, 7 lit).
     rig.write(0x3c, [0x40, 0xab]);
     // The panel paints on the next animation frame.
@@ -537,9 +538,16 @@ describe('ssd1306 — protocol auto-detect', () => {
       return n;
     };
     try {
+      let setDc: (pin: number, high: boolean) => void = () => {};
       const sim = {
         ...makeSPISim(),
-        pinManager: { onPinChange: vi.fn().mockReturnValue(() => {}), peekPinState: () => true },
+        pinManager: {
+          onPinChange: vi.fn((_pin: number, cb: (pin: number, high: boolean) => void) => {
+            setDc = cb;
+            return () => {};
+          }),
+          peekPinState: () => true,
+        },
       };
       const cleanup = PartSimulationRegistry.get('ssd1306')!.attachEvents!(
         el,
@@ -547,6 +555,14 @@ describe('ssd1306 — protocol auto-detect', () => {
         pinMap({ CS: 5, DC: 9 }),
         'oled-spi',
       )!;
+      // The panel powers up off (datasheet 8.5): switch it on, upright, the
+      // way every driver's init does, then back to pixel data.
+      rig.write(5, false);
+      setDc(9, false);
+      rig.send([0xaf, 0xa1, 0xc8]);
+      setDc(9, true);
+      flush();
+      expect(lit()).toBe(0);
       // Somebody else's traffic, clocked while the panel is deselected. A
       // write-only panel drives no MISO either: the line keeps its idle level.
       rig.write(5, true);
@@ -560,6 +576,51 @@ describe('ssd1306 — protocol auto-detect', () => {
       expect(lit()).toBe(16);
       cleanup();
       expect(busRegistry.placement('oled-spi')).toBeNull();
+    } finally {
+      rig.dispose();
+    }
+  });
+
+  it('over SPI a command alone repaints: invert shows on the next frame without a data byte', () => {
+    const rig = spiRig('oled-spi', { CLK: RIG_SCK, DATA: RIG_MOSI, CS: 5 });
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb));
+    const flush = () => {
+      for (const cb of frames.splice(0, frames.length)) cb(0);
+    };
+    const el = makeElement({
+      imageData: { width: 128, height: 64, data: new Uint8ClampedArray(128 * 64 * 4) },
+      redraw: vi.fn(),
+    });
+    const lit = () => {
+      const px = (el as unknown as { imageData: { data: Uint8ClampedArray } }).imageData.data;
+      let n = 0;
+      for (let i = 0; i < px.length; i += 4) if (px[i] !== 0) n++;
+      return n;
+    };
+    try {
+      let setDc: (pin: number, high: boolean) => void = () => {};
+      const sim = {
+        ...makeSPISim(),
+        pinManager: {
+          onPinChange: vi.fn((_pin: number, cb: (pin: number, high: boolean) => void) => {
+            setDc = cb;
+            return () => {};
+          }),
+          peekPinState: () => false,
+        },
+      };
+      PartSimulationRegistry.get('ssd1306')!.attachEvents!(el, sim as any, pinMap({ CS: 5, DC: 9 }), 'oled-spi');
+      rig.write(5, false);
+      rig.send([0xaf, 0xa1, 0xc8]);
+      setDc(9, true);
+      rig.send([0xff]);
+      flush();
+      expect(lit()).toBe(8);
+      setDc(9, false);
+      rig.send([0xa7]);
+      flush();
+      expect(lit()).toBe(128 * 64 - 8);
     } finally {
       rig.dispose();
     }
