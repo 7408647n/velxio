@@ -46,6 +46,7 @@ import type { SerialLink } from '../store/serialWire';
 import { MicroPythonSession, type MpyProgram } from './micropythonSession';
 import { getProBoard } from '../lib/proBoardRegistry';
 import { sensorRecordOwnsPin as recordOwnsPin } from './sensorModels';
+import { withHostClock } from './parts/hostClock';
 import type { LineSupport } from './line/LineHost';
 import { recordPartGap } from './line/requestLine';
 import { generateUUID } from '../utils/uuid';
@@ -481,7 +482,8 @@ export class Esp32Bridge {
           // boot.
           bus_map: this.startBusMap(),
           ...(this._pendingFirmware ? { firmware_b64: this._pendingFirmware } : {}),
-          sensors: this._pendingSensors,
+          // A clock chip's record says the tab's time as of this start.
+          sensors: withHostClock(this._pendingSensors),
           wifi_enabled: this.wifiEnabled,
         },
       });

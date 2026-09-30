@@ -30,6 +30,7 @@ import { generateUUID } from '../utils/uuid';
 import type { LineSupport } from './line/LineHost';
 import { recordPartGap } from './line/requestLine';
 import { sensorRecordOwnsPin as recordOwnsPin } from './sensorModels';
+import { withHostClock } from './parts/hostClock';
 
 const API_BASE = (): string => {
   // The desktop shell injects the sidecar URL at runtime (random port) via
@@ -145,7 +146,8 @@ export class Stm32Bridge {
         type: 'start_stm32',
         data: {
           board: this.boardKind,
-          sensors: this._pendingSensors,
+          // A clock chip's record says the tab's time as of this start.
+          sensors: withHostClock(this._pendingSensors),
           // Who is on the SPI bus, with the firmware rather than after it:
           // the guest can clock its first byte before a later command would
           // arrive (project board-buses-2026-09, F4).

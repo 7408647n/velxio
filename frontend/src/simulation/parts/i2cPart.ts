@@ -24,6 +24,10 @@ import type { I2CDevice } from '../I2CBusManager';
 import { chipVirtualPin } from '../customChips/chipVirtualPin';
 import { hostsChipsInWorker } from '../customChips/simulatorBridges';
 
+// The bridges stamp the clock too, and import it from where nothing else comes
+// with it.
+export { hostClockRecord, withHostClock } from './hostClock';
+
 /**
  * A register-file part as a bus target.
  *
@@ -116,22 +120,6 @@ export interface I2cPartHandle {
  */
 export function i2cPartWorkerPin(componentId: string): number {
   return chipVirtualPin(componentId);
-}
-
-/**
- * The tab's clock for a worker's copy of a part that keeps the time: the
- * epoch as the browser counts it, and how far its time zone is from UTC, in
- * minutes east. The worker's own clock is the server's, in the server's zone;
- * with these in its record the copy shows the hour the tab's model shows.
- *
- * A record is filed when the part attaches and sent when the board runs,
- * which can be much later, so the store stamps it again at Run
- * (I2C_SENSOR_MAP, `hostClock`). What is left between the stamp and the
- * worker reading it is the delivery, and the worker allows for that.
- */
-export function hostClockRecord(): { epochMs: number; utcOffsetMin: number } {
-  const now = new Date();
-  return { epochMs: now.getTime(), utcOffsetMin: -now.getTimezoneOffset() };
 }
 
 /**

@@ -88,7 +88,7 @@ vi.stubGlobal('WebSocket', MockWebSocket);
 vi.stubGlobal('requestAnimationFrame', (_cb: FrameRequestCallback) => 1);
 vi.stubGlobal('cancelAnimationFrame', vi.fn());
 
-import { useSimulatorStore, getEsp32Bridge } from '../store/useSimulatorStore';
+import { useSimulatorStore, getEsp32Bridge, getStm32Bridge } from '../store/useSimulatorStore';
 import { hostClockRecord, i2cPartWorkerPin } from '../simulation/parts/i2cPart';
 
 const BOARD = 'esp32';
@@ -180,6 +180,58 @@ describe('the record of a clock chip', () => {
       expect(records[0].epochMs).toBe(RUN.getTime());
     });
   }
+
+  // A part that is the DS1307 under another name (pro's Grove DS1307 is an
+  // alias of it) files the DS1307's record when it attaches, and the store
+  // knows nothing of it. Its stamp used to be the one of the attach, so the
+  // worker's copy ran behind by the time from the attach to the Run.
+  it('a part that is a clock chip under another name is stamped as of the Run', () => {
+    const s = useSimulatorStore.getState();
+    s.setComponents([
+      { id: 'rtc1', metadataId: 'grove-rtc-ds1307', x: 0, y: 0, properties: {} },
+    ] as never);
+    getEsp32Bridge(BOARD)!.sendSensorAttach('ds1307', i2cPartWorkerPin('rtc1'), {
+      ...hostClockRecord(),
+      addr: 0x68,
+      owner: 'rtc1',
+    });
+    vi.setSystemTime(RUN);
+    const records = run().filter((r) => r.owner === 'rtc1');
+    expect(records).toEqual([
+      expect.objectContaining({
+        sensor_type: 'ds1307',
+        epochMs: RUN.getTime(),
+        utcOffsetMin: -RUN.getTimezoneOffset(),
+      }),
+    ]);
+  });
+
+  it('STM32: a clock chip under another name is stamped as of the Run', () => {
+    const s = useSimulatorStore.getState();
+    const bp = s.addBoard('stm32-bluepill' as never, 100, 100);
+    s.setComponents([
+      { id: 'rtc1', metadataId: 'grove-rtc-ds1307', x: 0, y: 0, properties: {} },
+    ] as never);
+    const bridge = getStm32Bridge(bp)!;
+    bridge.sendSensorAttach('ds3231', i2cPartWorkerPin('rtc1'), {
+      ...hostClockRecord(),
+      temperature: 21,
+      addr: 0x68,
+      owner: 'rtc1',
+    });
+    vi.setSystemTime(RUN);
+    useSimulatorStore.getState().startBoard(bp);
+    const socket = (bridge as unknown as { socket: MockWebSocket }).socket;
+    socket.open();
+    const start = socket.messages.find((m) => m.type === 'start_stm32');
+    expect(start, 'start_stm32 was sent').toBeDefined();
+    const records = (start!.data.sensors as Array<Record<string, unknown>>).filter(
+      (r) => r.owner === 'rtc1',
+    );
+    expect(records).toEqual([
+      expect.objectContaining({ sensor_type: 'ds3231', temperature: 21, epochMs: RUN.getTime() }),
+    ]);
+  });
 
   it('ds3231: the record carries the temperature of the project with the clock', () => {
     place('ds3231', { temperature: '31.75' });

@@ -94,7 +94,7 @@ import {
 import { RemoteI2cLane } from '../simulation/buses/remoteI2c';
 import { RemoteUartLane } from '../simulation/buses/remoteUart';
 import { remotePullLane, type RemotePullLane } from '../simulation/buses/remotePulls';
-import { hostClockRecord, i2cPartWorkerPin } from '../simulation/parts/i2cPart';
+import { i2cPartWorkerPin } from '../simulation/parts/i2cPart';
 import {
   loadSdBusChip,
   SdSpiCard,
@@ -130,7 +130,6 @@ const I2C_SENSOR_MAP: Record<
     addrIsBool?: boolean; // true when addrProp is a boolean flag (e.g. AD0 → 0x68/0x69)
     addrBoolHigh?: number; // address when the boolean flag is truthy
     propertyKeys?: string[]; // additional sensor values to forward (e.g. temperature, pressure)
-    hostClock?: boolean; // a clock chip: the record carries the tab's clock, stamped at Run
   }
 > = {
   mpu6050: {
@@ -146,13 +145,8 @@ const I2C_SENSOR_MAP: Record<
     addrProp: 'address',
     propertyKeys: ['temperature', 'pressure'],
   },
-  ds1307: { sensorType: 'ds1307', defaultAddr: 0x68, hostClock: true },
-  ds3231: {
-    sensorType: 'ds3231',
-    defaultAddr: 0x68,
-    propertyKeys: ['temperature'],
-    hostClock: true,
-  },
+  ds1307: { sensorType: 'ds1307', defaultAddr: 0x68 },
+  ds3231: { sensorType: 'ds3231', defaultAddr: 0x68, propertyKeys: ['temperature'] },
   ssd1306: { sensorType: 'ssd1306', defaultAddr: 0x3c },
   pcf8574: { sensorType: 'pcf8574', defaultAddr: 0x27, addrProp: 'i2cAddress' },
 };
@@ -3168,7 +3162,6 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
               const val = comp.properties[key];
               if (val !== undefined) props[key] = typeof val === 'string' ? parseFloat(val) : val;
             }
-            if (i2cDef.hostClock) Object.assign(props, hostClockRecord());
             sensors.push(props);
           }
 
@@ -3278,7 +3271,6 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
               const val = comp.properties[key];
               if (val !== undefined) props[key] = typeof val === 'string' ? parseFloat(val) : val;
             }
-            if (i2cDef.hostClock) Object.assign(props, hostClockRecord());
             sensors.push(props);
           }
           stm32Bridge.setSensors(sensors);
