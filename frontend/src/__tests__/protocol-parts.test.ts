@@ -38,13 +38,20 @@ import { busRegistry } from '../simulation/buses';
 import type {
   BoardPins,
   BusDiagnostic,
+  GuestClock,
   I2cControllerPort,
   I2cTransactionHandler,
   NetResolver,
   SpiControllerPort,
 } from '../simulation/buses';
 import { i2cPartWorkerPin } from '../simulation/parts/i2cPart';
-import { MPU6050_RULES, VirtualMPU6050 } from '../simulation/parts/ProtocolParts';
+import { PinManager } from '../simulation/PinManager';
+import {
+  MPU6050_RULES,
+  VirtualMPU6050,
+  parseAd0,
+  parseMpuVariant,
+} from '../simulation/parts/ProtocolParts';
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 
@@ -243,7 +250,47 @@ interface I2cRig {
   dispose(): void;
 }
 
-function i2cRig(wiring: Record<string, Record<string, RigPin>>): I2cRig {
+/**
+ * The guest's clock as a test moves it: 16 MHz, like an Uno. Timers run when
+ * the time they wait for is reached, in order, as an engine runs them between
+ * two instructions.
+ */
+class RigClock implements GuestClock {
+  cycles = 0;
+  readonly hz = 16_000_000;
+  private timers: Array<{ at: number; cb: () => void }> = [];
+  now(): number {
+    return this.cycles;
+  }
+  clockHz(): number {
+    return this.hz;
+  }
+  scheduleEdge(): void {}
+  at(atCycle: number, cb: () => void): () => void {
+    const t = { at: atCycle, cb };
+    this.timers.push(t);
+    return () => {
+      this.timers = this.timers.filter((x) => x !== t);
+    };
+  }
+  /** Move the guest `us` microseconds on, firing every timer on the way. */
+  advanceUs(us: number): void {
+    const end = this.cycles + Math.round(us * 16);
+    for (;;) {
+      const due = this.timers.filter((t) => t.at <= end).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      this.timers = this.timers.filter((t) => t !== due);
+      this.cycles = Math.max(this.cycles, due.at);
+      due.cb();
+    }
+    this.cycles = end;
+  }
+  pending(): number {
+    return this.timers.length;
+  }
+}
+
+function i2cRig(wiring: Record<string, Record<string, RigPin>>, clock?: GuestClock): I2cRig {
   let handler: I2cTransactionHandler | null = null;
   const port: I2cControllerPort = {
     bus: 'i2c',
@@ -274,6 +321,7 @@ function i2cRig(wiring: Record<string, Record<string, RigPin>>): I2cRig {
     setResetHandler: (h) => {
       onReset = h;
     },
+    ...(clock ? { clock } : {}),
   });
   const bus = () => handler!;
   return {
@@ -615,6 +663,58 @@ describe('mpu6050 — I2C IMU', () => {
     expect([rig.ack(0x68), rig.ack(0x69)]).toEqual([false, true]);
   });
 
+  it('follows the AD0 net: tied to a supply 0x69, to ground or left floating 0x68', () => {
+    const at = (ad0?: RigPin, props: Record<string, unknown> = {}) => {
+      const rig = i2cRig({ imu: { ...HW_I2C_PINS, ...(ad0 !== undefined ? { AD0: ad0 } : {}) } });
+      const off = attachImu('imu', props);
+      const answer = [rig.ack(0x68), rig.ack(0x69)];
+      off();
+      rig.dispose();
+      return answer;
+    };
+    expect(at('vcc')).toEqual([false, true]);
+    expect(at('gnd')).toEqual([true, false]);
+    expect(at()).toEqual([true, false]);
+    // A GPIO that drives it is read as low: the address is picked at attach.
+    expect(at(7)).toEqual([true, false]);
+    // The property overrides the wiring, either way.
+    expect(at('vcc', { ad0: 'false' })).toEqual([true, false]);
+    expect(at('gnd', { ad0: 'high' })).toEqual([false, true]);
+  });
+
+  it('reads the variant property as the worker reads its record', () => {
+    const cases: Array<[unknown, string]> = [
+      ['mpu9250', 'mpu9250'],
+      ['MPU-9250', 'mpu9250'],
+      [' Mpu9250 ', 'mpu9250'],
+      ['mpu6050', 'mpu6050'],
+      ['mpu6500', 'mpu6050'],
+      [undefined, 'mpu6050'],
+      [9250, 'mpu6050'],
+    ];
+    for (const [value, die] of cases) expect(parseMpuVariant(value), String(value)).toBe(die);
+  });
+
+  it('answers as the die it is set to, and names it in its notes', () => {
+    const rig = i2cRig({ imu: HW_I2C_PINS });
+    attachImu('imu', { variant: 'MPU-9250' });
+    const heard: BusDiagnostic[] = [];
+    const off = busRegistry.onDiagnostic((d) => heard.push(d));
+    expect(rig.readReg(0x68, 0x75, 1)).toEqual([0x71]);
+    rig.readReg(0x68, 0x3b, 2);
+    off();
+    expect(heard.map((d) => d.message.split(' ')[0])).toEqual(['MPU9250']);
+  });
+
+  it('reads the ad0 property as the worker reads its record', () => {
+    const values = MPU_VECTORS.ad0_values;
+    expect(values.length).toBeGreaterThan(10);
+    for (const [value, forced] of values) {
+      const want = forced === null ? null : forced === '69';
+      expect(parseAd0(value), JSON.stringify(value)).toBe(want);
+    }
+  });
+
   it('WHO_AM_I register (0x75) returns 0x68', () => {
     const rig = i2cRig({ imu: HW_I2C_PINS });
     attachImu();
@@ -723,17 +823,23 @@ interface VectorStep {
   rw?: string;
   at?: string;
   values?: Record<string, number>;
+  us?: number;
 }
 
 interface BusVector {
   name: string;
   spec: string;
   driver?: string;
+  /** False: the host keeps no guest time. Otherwise it stands at 0 until `advance`. */
+  clock?: boolean;
+  /** The die the model is built as (the part's `variant` property). */
+  variant?: string;
   steps: VectorStep[];
 }
 
 interface BusVectorFile {
   address: string;
+  ad0_values: Array<[unknown, string | null]>;
   rules: Record<string, unknown>;
   inputs: Record<string, number>;
   vectors: BusVector[];
@@ -769,6 +875,10 @@ interface VectorHost {
   stop(): void;
   inputs(values: Record<string, number>): void;
   dump(): Uint8Array;
+  /** What the INT pad does; a host that cannot see it skips the step. */
+  intPad?(): string;
+  /** Move the guest's time on. */
+  advanceUs?(us: number): void;
 }
 
 /** The part on the rig's bus, as a board whose firmware runs in the tab reaches it. */
@@ -796,8 +906,11 @@ function partHost(rig: I2cRig, id: string): VectorHost {
  * (the overlay's PartI2cTarget). The model then latches on the first byte
  * read after a write or a STOP.
  */
-function bareHost(dev: VirtualMPU6050): VectorHost {
+function bareHost(dev: VirtualMPU6050, clock?: RigClock): VectorHost {
+  if (clock) dev.setClock(clock);
   return {
+    intPad: () => dev.intPad(),
+    advanceUs: clock ? (us) => clock.advanceUs(us) : undefined,
     start: (read) => {
       if (!read) dev.stop();
       return true;
@@ -869,6 +982,13 @@ function replayVector(host: VectorHost, vector: BusVector, flavour: BusFlavour):
         got = Array.from(host.dump().slice(at, at + hexBytes(step.expect!).length));
         break;
       }
+      case 'advance':
+        expect(host.advanceUs, `step ${i}: time moves in a vector with no clock`).toBeDefined();
+        host.advanceUs!(step.us!);
+        break;
+      case 'int':
+        if (host.intPad) expect(host.intPad(), `step ${i} ${JSON.stringify(step)}`).toBe(step.expect);
+        break;
       default:
         throw new Error(`step ${i}: unknown op "${step.op}"`);
     }
@@ -879,20 +999,33 @@ function replayVector(host: VectorHost, vector: BusVector, flavour: BusFlavour):
   });
 }
 
+/**
+ * A model's rules table as the vectors write it: a table keyed by register
+ * has hexadecimal keys and bytes, the ranges of registers are hexadecimal
+ * pairs, and everything else is a plain number or list.
+ */
+function rulesAsJson(rules: object): Record<string, unknown> {
+  const hex = (n: number) => hexText([n]);
+  const value = (v: unknown): unknown => {
+    if (Array.isArray(v)) {
+      if (v.length > 0 && v.every(Array.isArray)) return v.map(([a, b]) => [hex(a), hex(b)]);
+      return v.map(value);
+    }
+    if (v !== null && typeof v === 'object') {
+      const entries = Object.entries(v);
+      if (entries.every(([k]) => /^\d+$/.test(k))) {
+        return Object.fromEntries(entries.map(([k, x]) => [hex(Number(k)), hex(x as number)]));
+      }
+      return Object.fromEntries(entries.map(([k, x]) => [k, value(x)]));
+    }
+    return v;
+  };
+  return Object.fromEntries(Object.entries(rules).map(([k, v]) => [k, value(v)]));
+}
+
 describe('mpu6050 — the rules table', () => {
   it('is the table the shared vectors carry', () => {
-    const hex = (n: number) => hexText([n]);
-    const pairs = (o: Record<string, number>) =>
-      Object.fromEntries(Object.entries(o).map(([reg, v]) => [hex(Number(reg)), hex(v)]));
-    expect({
-      power_on: pairs(MPU6050_RULES.power_on),
-      read_only: MPU6050_RULES.read_only.map(([first, last]) => [hex(first), hex(last)]),
-      self_clearing: pairs(MPU6050_RULES.self_clearing),
-      accel_lsb_per_g: [...MPU6050_RULES.accel_lsb_per_g],
-      gyro_lsb_per_dps: [...MPU6050_RULES.gyro_lsb_per_dps],
-      temp_lsb_per_c: MPU6050_RULES.temp_lsb_per_c,
-      temp_offset_c: MPU6050_RULES.temp_offset_c,
-    }).toEqual(MPU_VECTORS.rules);
+    expect(rulesAsJson(MPU6050_RULES)).toEqual(MPU_VECTORS.rules);
   });
 
   it('starts every vector from the values the panel starts from', () => {
@@ -906,9 +1039,13 @@ describe('mpu6050 — shared bus vectors', () => {
 
   describe.each(flavours)('the part on the bus fabric, %s', (flavour) => {
     it.each(MPU_VECTORS.vectors.map((v) => [v.name, v] as const))('%s', (_name, vector) => {
-      const rig = i2cRig({ imu: HW_I2C_PINS });
-      attachImu();
+      // The guest's clock stands still until a step moves it; a vector that
+      // says `"clock": false` is a board that keeps no time.
+      const clock = vector.clock === false ? undefined : new RigClock();
+      const rig = i2cRig({ imu: HW_I2C_PINS }, clock);
+      attachImu('imu', vector.variant ? { variant: vector.variant } : {});
       const host = partHost(rig, 'imu');
+      if (clock) host.advanceUs = (us) => clock.advanceUs(us);
       host.inputs(MPU_VECTORS.inputs);
       replayVector(host, vector, flavour);
     });
@@ -916,7 +1053,11 @@ describe('mpu6050 — shared bus vectors', () => {
 
   describe.each(flavours)('the model under a host that does not announce START, %s', (flavour) => {
     it.each(MPU_VECTORS.vectors.map((v) => [v.name, v] as const))('%s', (_name, vector) => {
-      const host = bareHost(new VirtualMPU6050(MPU_ADDR));
+      const clock = vector.clock === false ? undefined : new RigClock();
+      const host = bareHost(
+        new VirtualMPU6050(MPU_ADDR, parseMpuVariant(vector.variant)),
+        clock,
+      );
       host.inputs(MPU_VECTORS.inputs);
       replayVector(host, vector, flavour);
     });
@@ -1216,6 +1357,218 @@ describe('mpu6050 — driver traces', () => {
 });
 
 // ─── mpu6050: reading it asleep says so, once per run ────────────────────────
+
+describe('mpu6050 — the INT pin on the board', () => {
+  // The pad's level reaches the board pin INT is wired to, on the guest's
+  // clock: a timer at each sample, one at the end of each 50 us pulse, and
+  // none at all while no interrupt is enabled.
+  const INT_PIN = 2;
+  const setup = () => {
+    const clock = new RigClock();
+    const rig = i2cRig({ imu: HW_I2C_PINS }, clock);
+    const pinManager = new PinManager();
+    const edges: Array<[boolean, number]> = [];
+    const sim = {
+      setPinState: (pin: number, level: boolean) => {
+        if (pin === INT_PIN) edges.push([level, clock.cycles / 16]);
+      },
+      pinManager,
+    };
+    const dispose = PartSimulationRegistry.get('mpu6050')!.attachEvents!(
+      makeElement(),
+      sim as any,
+      (name) => (name === 'INT' ? INT_PIN : null),
+      'imu',
+    );
+    return { clock, rig, edges, dispose };
+  };
+
+  it('pulses for 50 us at every sample of the rate the sketch selected', () => {
+    const { clock, rig, edges } = setup();
+    rig.write(0x68, [0x19, 0x07]); // 1 kHz
+    rig.write(0x68, [0x38, 0x01]); // DATA_RDY_EN
+    expect(clock.pending()).toBe(0);
+    wakeImu(rig);
+    edges.length = 0;
+    clock.advanceUs(2500);
+    expect(edges).toEqual([
+      [true, 1000],
+      [false, 1050],
+      [true, 2000],
+      [false, 2050],
+    ]);
+  });
+
+  it('holds a latched interrupt until INT_STATUS is read, active low when INT_LEVEL says so', () => {
+    const { clock, rig, edges } = setup();
+    rig.write(0x68, [0x19, 0x07]);
+    rig.write(0x68, [0x37, 0xa0]); // INT_LEVEL (active low) + LATCH_INT_EN
+    rig.write(0x68, [0x38, 0x01]);
+    wakeImu(rig);
+    edges.length = 0;
+    clock.advanceUs(3500);
+    expect(edges).toEqual([[false, 1000]]);
+    // Nothing is armed while the line waits for the sketch.
+    expect(clock.pending()).toBe(0);
+    expect(rig.readReg(0x68, 0x3a, 1)).toEqual([0x01]);
+    expect(edges.at(-1)).toEqual([true, 3500]);
+  });
+
+  it('arms nothing while no interrupt is enabled, and lets go of the pin when it leaves', () => {
+    const { clock, rig, dispose } = setup();
+    wakeImu(rig);
+    clock.advanceUs(5000);
+    expect(clock.pending()).toBe(0);
+    rig.write(0x68, [0x38, 0x01]);
+    expect(clock.pending()).toBe(1);
+    dispose();
+    expect(clock.pending()).toBe(0);
+  });
+});
+
+describe('mpu6050 — a DMP image is uploaded', () => {
+  // The memory port works, the DMP does not run: a DMP sketch gets no
+  // packets, and its monitor says why once per run.
+  const listeners: Array<() => void> = [];
+  afterEach(() => {
+    for (const off of listeners.splice(0)) off();
+  });
+
+  it('tells the monitor once, and again on the next run', () => {
+    const rig = i2cRig({ imu: HW_I2C_PINS });
+    attachImu();
+    const heard: BusDiagnostic[] = [];
+    listeners.push(
+      busRegistry.onDiagnostic((d) => {
+        if (d.code === 'i2c-target-unmodelled') heard.push(d);
+      }),
+    );
+    // Reading the revision byte is not an upload.
+    rig.write(0x68, [0x6d, 0x70]);
+    rig.write(0x68, [0x6e, 0x06]);
+    expect(rig.readReg(0x68, 0x6f, 1)).toEqual([0xa5]);
+    expect(heard).toEqual([]);
+    rig.write(0x68, [0x6d, 0x00, 0x00]);
+    rig.write(0x68, [0x6f, 0xfb, 0x00, 0x00, 0x3e]);
+    rig.write(0x68, [0x6f, 0x00, 0x03]);
+    expect(heard.map((d) => [d.boardId, d.owners, d.message.split(':')[0]])).toEqual([
+      [RIG_BOARD, ['imu'], 'MPU6050 0x68'],
+    ]);
+    expect(heard[0].message).toMatch(/does not run the DMP/);
+    rig.reset();
+    rig.write(0x68, [0x6f, 0x01]);
+    expect(heard).toHaveLength(2);
+  });
+});
+
+describe('mpu6050 — offset calibration converges', () => {
+  // i2cdevlib MPU6050_Base::PID(), which CalibrateAccel() and
+  // CalibrateGyro() run (jrowberg/i2cdevlib master MPU6050.cpp:3290-3370;
+  // Electronic Cats 1.4.5 is the same loop), ported line by line: a PI loop
+  // that writes the offset registers until the outputs read zero, and
+  // gravity on Z. With inert offsets it printed '*' forever unless the panel
+  // sat exactly at rest.
+  const int16 = (v: number) => (v << 16) >> 16;
+  const round = (v: number) => Math.sign(v) * Math.round(Math.abs(v));
+
+  function pid(rig: I2cRig, readAddress: number, kP: number, kI: number, loops: number): string {
+    const readWord = (reg: number) => {
+      const [h, l] = rig.readReg(0x68, reg, 2)!;
+      return int16((h << 8) | l);
+    };
+    const writeWord = (reg: number, v: number) => rig.write(0x68, [reg, (v >> 8) & 0xff, v & 0xff]);
+    const saveAddress = readAddress === 0x3b ? 0x06 : 0x13;
+    const shift = 2;
+    const bitZero: number[] = [];
+    const iTerm: number[] = [];
+    let out = '>';
+    // 16384 >> AFS_SEL in i2cdevlib; Electronic Cats 1.4.5 has 32768 there,
+    // which drives Z to the top of the scale on any part.
+    const gravity = 16384 >> ((rig.readReg(0x68, 0x1c, 1)![0] >> 3) & 3);
+    for (let i = 0; i < 3; i++) {
+      const data = readWord(saveAddress + i * shift);
+      if (saveAddress !== 0x13) {
+        bitZero[i] = data & 1;
+        iTerm[i] = data * 8;
+      } else iTerm[i] = data * 4;
+    }
+    let guard = 0;
+    for (let L = 0; L < loops; L++) {
+      let eSample = 0;
+      for (let c = 0; c < 100; c++) {
+        if (++guard > 20_000) throw new Error(`no convergence: ${out}`);
+        let eSum = 0;
+        for (let i = 0; i < 3; i++) {
+          let reading = readWord(readAddress + i * 2);
+          if (readAddress === 0x3b && i === 2) reading -= gravity;
+          const error = -reading;
+          eSum += Math.abs(reading);
+          const pTerm = kP * error;
+          iTerm[i] += error * 0.001 * kI;
+          let data: number;
+          if (saveAddress !== 0x13) {
+            data = int16(round((pTerm + iTerm[i]) / 8));
+            data = int16((data & 0xfffe) | bitZero[i]);
+          } else data = int16(round((pTerm + iTerm[i]) / 4));
+          writeWord(saveAddress + i * shift, data);
+        }
+        if (c === 99 && eSum > 1000) {
+          c = 0;
+          out += '*';
+        }
+        if (eSum * (readAddress === 0x3b ? 0.05 : 1) < 5) eSample++;
+        if (eSum < 100 && c > 10 && eSample >= 10) break;
+      }
+      out += '.';
+      kP *= 0.75;
+      kI *= 0.75;
+      for (let i = 0; i < 3; i++) {
+        let data: number;
+        if (saveAddress !== 0x13) {
+          data = int16(round(iTerm[i] / 8));
+          data = int16((data & 0xfffe) | bitZero[i]);
+        } else data = int16(round(iTerm[i] / 4));
+        writeWord(saveAddress + i * shift, data);
+      }
+    }
+    return out;
+  }
+
+  it('CalibrateAccel(6) and CalibrateGyro(6) null a tilted, drifting chip', () => {
+    const rig = i2cRig({ imu: HW_I2C_PINS });
+    attachImu();
+    dispatchSensorUpdate('imu', {
+      accelX: 0.03,
+      accelY: -0.02,
+      accelZ: 1.01,
+      gyroX: 2,
+      gyroY: -1.5,
+      gyroZ: 0.7,
+    });
+    wakeImu(rig);
+    // x = (100 - map(6, 1, 5, 20, 0)) * .01 = 1.05
+    // A '*' is a round of 100 that ended still off by more than 1000 counts,
+    // as real parts print at the start; one that never settles prints them
+    // forever.
+    expect(pid(rig, 0x3b, 0.3 * 1.05, 20 * 1.05, 6)).toMatch(/^>\*{0,3}\.{6}$/);
+    expect(pid(rig, 0x43, 0.3 * 1.05, 90 * 1.05, 6)).toMatch(/^>\*{0,3}\.{6}$/);
+    const words = (reg: number, n: number) => {
+      const b = rig.readReg(0x68, reg, n * 2)!;
+      return Array.from({ length: n }, (_, i) => int16((b[2 * i] << 8) | b[2 * i + 1]));
+    };
+    const [ax, ay, az] = words(0x3b, 3);
+    const [gx, gy, gz] = words(0x43, 3);
+    // Within what the loop itself calls done: a summed error under 100
+    // counts of accelerometer (1/1024 g a step, bit 0 being the revision)
+    // and under 5 of gyro.
+    expect(Math.abs(ax) + Math.abs(ay) + Math.abs(az - 16384)).toBeLessThan(100);
+    expect(Math.abs(gx) + Math.abs(gy) + Math.abs(gz)).toBeLessThan(5);
+    // The revision bits of the trims are where the factory left them.
+    expect(rig.readReg(0x68, 0x06, 6)!.filter((_, i) => i % 2 === 1).map((b) => b & 1)).toEqual([
+      0, 1, 0,
+    ]);
+  });
+});
 
 describe('mpu6050 — read while asleep', () => {
   const NOTE = 'MPU6050 0x68 is in sleep mode: write 0x00 to PWR_MGMT_1 (0x6B) to wake it';
@@ -2043,6 +2396,21 @@ describe('mpu6050 — ESP32 path', () => {
       'mpu6050',
       i2cPartWorkerPin('imu-q2'),
       expect.objectContaining({ addr: 0x69 }),
+    );
+  });
+
+  it('carries the variant, and the pin INT is wired to', () => {
+    const sim = makeEsp32Sim();
+    PartSimulationRegistry.get('mpu6050')!.attachEvents!(
+      makeElement({ variant: 'mpu9250' }),
+      sim as any,
+      (name: string) => (name === 'INT' ? 4 : null),
+      'imu-q3',
+    );
+    expect(sim.registerSensor).toHaveBeenCalledWith(
+      'mpu6050',
+      i2cPartWorkerPin('imu-q3'),
+      expect.objectContaining({ addr: 0x68, variant: 'mpu9250', int_pin: 4 }),
     );
   });
 

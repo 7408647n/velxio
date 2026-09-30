@@ -131,6 +131,23 @@ export class BoardBusFabric {
     return this.binding?.clock ?? null;
   }
 
+  /**
+   * The guest's clock as a chip on one of this board's buses is handed it
+   * (I2cTarget.setClock): one object for the life of the fabric, which reads
+   * the engine bound at the moment of each call. A part is placed when the
+   * circuit says so, which is often before the engine binds, and an engine
+   * binds again on every Run; a chip that kept the binding's own clock would
+   * keep the one of a run that is over. With no engine, or one that offers
+   * no clock, there is no time: now() stands at 0 and clockHz() is 0, the
+   * way the chip runtime and the ESP32 ports already say it.
+   */
+  readonly targetClock: GuestClock = {
+    now: () => this.clock?.now() ?? 0,
+    clockHz: () => this.clock?.clockHz() ?? 0,
+    scheduleEdge: (pin, level, atCycle) => this.clock?.scheduleEdge(pin, level, atCycle),
+    at: (atCycle, cb) => this.clock?.at(atCycle, cb) ?? (() => {}),
+  };
+
   // ── Engine binding ────────────────────────────────────────────────────────
 
   bind(binding: EngineBinding | null): void {

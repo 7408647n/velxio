@@ -221,6 +221,15 @@ export class BusRegistry {
     this.netlistChanged();
   }
 
+  /**
+   * Where a part's pin lands in the circuit as it stands: a board pin, a
+   * rail, a net between chips, or nothing. For a part that reads a strap at
+   * attach time (the MPU-6050's AD0 picks its address).
+   */
+  resolvePin(componentId: string, pinName: string): ResolvedPin {
+    return this.resolver.resolve({ kind: 'component', componentId, pinName });
+  }
+
   /** The circuit changed (wires, components, boards): recompute membership. */
   netlistChanged(): void {
     const present = new Set(this.resolver.boards());
@@ -627,12 +636,16 @@ export class BusRegistry {
       fabric.i2cMembershipChanged(bus);
     }
     e.key = key;
+    // A chip has one clock, as it has one crystal: on two boards' buses it
+    // keeps the time of the board `resolve` names.
+    e.target.setClock?.(e.placements[0].fabric.targetClock);
   }
 
   private unplaceI2c(e: I2cEntry): void {
     const gone = e.placements;
     e.placements = [];
     e.key = '';
+    if (gone.length > 0) e.target.setClock?.(null);
     for (const { bus, fabric } of gone) {
       bus.remove(e.desc.owner);
       fabric.i2cMembershipChanged(bus);

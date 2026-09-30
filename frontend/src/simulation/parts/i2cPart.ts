@@ -42,6 +42,8 @@ export { hostClockRecord, withHostClock } from './hostClock';
  *
  * A model that has to know where a read begins hears every START itself
  * (`start`): the MPU-6050 answers a burst from the sample it latched there.
+ * One that does something between two transactions is handed the clock of
+ * the board it was placed on (`setClock`).
  */
 export function i2cTargetOf(device: I2CDevice): I2cTarget & { dumpRegisters?: () => Uint8Array } {
   let open = false;
@@ -68,6 +70,10 @@ export function i2cTargetOf(device: I2CDevice): I2cTarget & { dumpRegisters?: ()
       device.boardReset?.();
     },
   };
+  // Only a model that keeps time asks for the clock.
+  if (typeof device.setClock === 'function') {
+    target.setClock = (clock) => device.setClock!(clock);
+  }
   // A board whose guest reads the bus from somewhere else (the Pi relay)
   // answers a register file from a copy instead of a round trip per byte.
   if (typeof device.dumpRegisters === 'function') {
@@ -116,6 +122,12 @@ export interface I2cPartOptions {
 }
 
 export interface I2cPartHandle {
+  /**
+   * True when the guest is answered by the worker's copy of the part. What
+   * the chip does to the board besides answering the bus (an interrupt pin)
+   * is then the worker's to do, next to the guest, and not this tab's.
+   */
+  readonly remote: boolean;
   /** Forward live values to the worker's copy (a no-op in the tab). */
   updateWorker(values: Record<string, unknown>): void;
   /**
@@ -188,6 +200,7 @@ export function attachI2cPart(opts: I2cPartOptions): I2cPartHandle {
   }
 
   return {
+    remote: workerPin !== null,
     updateWorker: (values) => {
       if (workerPin !== null) sim!.updateSensor?.(workerPin, values);
     },

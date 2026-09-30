@@ -20,8 +20,11 @@
  *   is left in this file drives pins from host time and is fine with that.
  */
 
-import { PartSimulationRegistry } from './PartSimulationRegistry';
-import { attachSpiDevice, type SpiDevice } from '../buses';
+import { PartSimulationRegistry, type AnySimulator } from './PartSimulationRegistry';
+import { attachSpiDevice, busRegistry, type SpiDevice } from '../buses';
+import { setBoardPinDrive, type BoardPinHost } from '../customChips/busNets';
+import { HIGHZ_DRIVE, Strength, type Drive } from '../customChips/busLogic';
+import { isSyntheticChipPin } from '../customChips/syntheticPins';
 import {
   loadSdBusChip,
   SdSpiCard,
@@ -33,6 +36,7 @@ import {
 import { requestLine, releaseLineGap } from '../line/requestLine';
 import { VirtualDS1307, VirtualBMP280, VirtualDS3231, VirtualPCF8574 } from '../I2CBusManager';
 import type { I2CDevice, RtcDateTime } from '../I2CBusManager';
+import type { GuestClock } from '../buses/types';
 import { buildTimesOfPrograms } from '../firmwareBuildTime';
 import { attachI2cPart, hostClockRecord, parseI2cAddress } from './i2cPart';
 import { HD44780Decoder } from '../HD44780Decoder';
@@ -571,8 +575,24 @@ PartSimulationRegistry.register('ds1307', {
  * those of the register map, RM-MPU-6000A-00 rev 4.2.
  */
 export const MPU6050_RULES = {
-  /** Every register powers on at 0x00 but these: asleep, and its id (section 3). */
-  power_on: { 0x6b: 0x40, 0x75: 0x68 },
+  /**
+   * Every register powers on at 0x00 but these: the factory trims, asleep,
+   * and its id (section 3; AN-OFFS 7.2).
+   */
+  power_on: {
+    // The accelerometer's factory trims (OTP): not zero on any part, and the
+    // low bit of each low byte is not a trim but the product revision, which
+    // InvenSense's eMPL mpu_init() reads (bit 0 of 0x07, 0x09, 0x0B; 2 is a
+    // part at full sensitivity, 0 fails with -6). AN-OFFS section 7.2.
+    0x06: 0xfa,
+    0x07: 0x38,
+    0x08: 0x04,
+    0x09: 0xb3,
+    0x0a: 0x05,
+    0x0b: 0xdc,
+    0x6b: 0x40,
+    0x75: 0x68,
+  },
   /**
    * Inclusive ranges a write leaves as they are: I2C_MST_STATUS, INT_STATUS,
    * the sample block with the external sensor data behind it, FIFO_COUNT
@@ -601,10 +621,82 @@ export const MPU6050_RULES = {
    */
   accel_lsb_per_g: [16384, 8192, 4096, 2048],
   gyro_lsb_per_dps: [131, 65.5, 32.8, 16.4],
+  /**
+   * What one count of the offset registers weighs. The gyro offsets
+   * XG/YG/ZG_OFFS_USR (0x13-0x18) are in the +-1000 deg/s format, 32.8 per
+   * deg/s (AN-OFFS 6.2). The accelerometer trims (0x06-0x0B) at 2048 per g,
+   * the +-16 g format, bit 0 left out: the application note says +-8 g, but
+   * the calibrations that converge on real parts write in +-16 g units
+   * (i2cdevlib PID(): reading at +-2 g / 8; Luis Rodenas' MPU6050_calibration
+   * the same), and at +-8 g their loop gain would be 2 and never settle.
+   * Decision O3, pending a bench measurement. An offset counts from the
+   * factory trim, so the chip at power-on reads the panel's values.
+   */
+  gyro_offset_lsb_per_dps: 32.8,
+  accel_offset_lsb_per_g: 2048,
   /** TEMP_OUT = (T - 36.53) * 340 (4.18). */
   temp_lsb_per_c: 340,
   temp_offset_c: 36.53,
+  /**
+   * What another die of the family changes, selected by the part's
+   * `variant` property. The MPU-9250 (the Grove IMU 9DOF v2.0 and 10DOF
+   * bricks) answers WHO_AM_I 0x71 and reads TEMP_OUT = (T - 21) * 333.87
+   * (RM-MPU-9250A-00 rev 1.6, sections 4.22 and 4.39; PS-MPU-9250A-01 3.4.2).
+   * Its AK8963 magnetometer is not modelled.
+   */
+  variants: {
+    mpu9250: { who_am_i: 0x71, temp_lsb_per_c: 333.87, temp_offset_c: 21 },
+  },
+  /**
+   * Bits a read of the register takes with it: "each bit will clear after
+   * the register is read" (4.16). With INT_RD_CLEAR set in INT_PIN_CFG, a
+   * read of any register clears them (4.14).
+   */
+  clear_on_read: { 0x3a: 0xff },
+  /**
+   * The gyroscope output rate the sample rate is divided from, in Hz: 8 kHz
+   * with the low-pass filter off (DLPF_CFG 0 or 7), 1 kHz with it on.
+   * Sample rate = rate / (1 + SMPLRT_DIV) (4.2, 4.3).
+   */
+  gyro_rate_hz: { dlpf_off: 8000, dlpf_on: 1000 },
+  /**
+   * With CYCLE set (and SLEEP clear) the chip wakes at LP_WAKE_CTRL
+   * (PWR_MGMT_2 bits 7:6) to take one sample and sleeps between (4.28, 4.29).
+   */
+  cycle_rate_hz: [1.25, 5, 20, 40],
+  /** How long INT stays active per interrupt with LATCH_INT_EN clear (4.14). */
+  int_pulse_us: 50,
+  /** Bytes the FIFO holds; past that the oldest go and FIFO_OFLOW_INT is set (4.31, PS 7.17). */
+  fifo_size: 1024,
+  /**
+   * The DMP memory behind BANK_SEL (0x6D), MEM_START_ADDR (0x6E) and MEM_R_W
+   * (0x6F): 32 banks of 256 bytes, the bank field of BANK_SEL being 5 bits
+   * (i2cdevlib setMemoryBank, InvenSense eMPL mpu_write_mem). Undocumented
+   * in the register map.
+   */
+  dmp_banks: 32,
+  /**
+   * DMP memory that is not zero at power-on, by bank * 256 + address: the
+   * hardware revision i2cdevlib's dmpInitialize() reads at user bank 16,
+   * byte 6. Parts report 0xA5 or 0x4D there (jrowberg/i2cdevlib issues 246
+   * and 371); 0xA5 is the one in its MotionApps comments.
+   */
+  dmp_rom: { 0x1006: 0xa5 },
 } as const;
+
+/** The dies the model answers as: `mpu6050`, or one of MPU6050_RULES.variants. */
+export type Mpu6050Variant = 'mpu6050' | keyof typeof MPU6050_RULES.variants;
+
+/**
+ * The part's `variant` property (the worker record's too, see
+ * esp32_i2c_slaves.parse_variant): a die of MPU6050_RULES.variants, spelled
+ * with or without the dash, or the MPU-6050.
+ */
+export function parseMpuVariant(value: unknown): Mpu6050Variant {
+  if (typeof value !== 'string') return 'mpu6050';
+  const v = value.trim().toLowerCase().replace(/-/g, '');
+  return v in MPU6050_RULES.variants ? (v as Mpu6050Variant) : 'mpu6050';
+}
 
 /** Motion and temperature at the chip, under the names of the panel's sliders. */
 export interface Mpu6050Inputs {
@@ -630,8 +722,52 @@ const MPU6050_INPUT_KEYS = [
   'temp',
 ] as const;
 
+/** XA_OFFS_H: three signed words, X, Y, Z, of accelerometer trim. */
+const MPU_XA_OFFS = 0x06;
+/** XG_OFFS_USR_H: three signed words, X, Y, Z, of gyro offset. */
+const MPU_XG_OFFS_USR = 0x13;
+const MPU_SMPLRT_DIV = 0x19;
+const MPU_CONFIG = 0x1a;
 const MPU_GYRO_CONFIG = 0x1b;
 const MPU_ACCEL_CONFIG = 0x1c;
+const MPU_INT_PIN_CFG = 0x37;
+/** Active low, against active high. */
+const MPU_INT_LEVEL = 0x80;
+/** Open drain, against push-pull. */
+const MPU_INT_OPEN = 0x40;
+/** Held until the interrupt is cleared, against a pulse. */
+const MPU_LATCH_INT_EN = 0x20;
+const MPU_INT_RD_CLEAR = 0x10;
+const MPU_INT_ENABLE = 0x38;
+const MPU_INT_STATUS = 0x3a;
+const MPU_DATA_RDY_INT = 0x01;
+const MPU_FIFO_OFLOW_INT = 0x10;
+/** The interrupt sources the model raises, as bits of INT_ENABLE and INT_STATUS. */
+const MPU_INT_SOURCES = MPU_DATA_RDY_INT | MPU_FIFO_OFLOW_INT;
+const MPU_FIFO_EN = 0x23;
+/**
+ * The FIFO_EN bits in the order their data enters the FIFO, which is the
+ * order of the registers (4.6, 4.31): ACCEL (0x3B-0x40), TEMP, XG, YG, ZG, as
+ * [bit, offset in the sample block, bytes]. SLV0-2 push the external sensor
+ * data of the auxiliary master, which the model has none of.
+ */
+const MPU_FIFO_SOURCES: ReadonlyArray<readonly [number, number, number]> = [
+  [0x08, 0, 6],
+  [0x80, 6, 2],
+  [0x40, 8, 2],
+  [0x20, 10, 2],
+  [0x10, 12, 2],
+];
+const MPU_FIFO_COUNT_H = 0x72;
+const MPU_FIFO_COUNT_L = 0x73;
+const MPU_FIFO_R_W = 0x74;
+/** USER_CTRL: the FIFO takes samples, and the trigger that empties it (4.27). */
+const MPU_USER_FIFO_EN = 0x40;
+const MPU_FIFO_RESET = 0x04;
+/** The DMP memory port: bank, address in the bank, and the byte there. */
+const MPU_BANK_SEL = 0x6d;
+const MPU_MEM_START_ADDR = 0x6e;
+const MPU_MEM_R_W = 0x6f;
 /** ACCEL_XOUT_H to GYRO_ZOUT_L: three axes, the die temperature, three axes. */
 const MPU_SAMPLE_FIRST = 0x3b;
 const MPU_SAMPLE_LAST = 0x48;
@@ -640,13 +776,55 @@ const MPU_SIG_COND_RESET = 0x01;
 const MPU_PWR_MGMT_1 = 0x6b;
 const MPU_DEVICE_RESET = 0x80;
 const MPU_SLEEP = 0x40;
+const MPU_WHO_AM_I = 0x75;
+const MPU_CYCLE = 0x20;
+const MPU_TEMP_DIS = 0x08;
+/**
+ * PWR_MGMT_2: LP_WAKE_CTRL in bits 7:6, then STBY_XA, YA, ZA, XG, YG, ZG
+ * (4.29). The standby bits as the fields of the sample block they freeze
+ * (ax, ay, az, temp, gx, gy, gz: bit n is field n).
+ */
+const MPU_PWR_MGMT_2 = 0x6c;
+const MPU_STBY_FIELDS: ReadonlyArray<readonly [number, number]> = [
+  [0x20, 0x01],
+  [0x10, 0x02],
+  [0x08, 0x04],
+  [0x04, 0x10],
+  [0x02, 0x20],
+  [0x01, 0x40],
+];
+const MPU_TEMP_FIELD = 0x08;
+const MPU_ALL_FIELDS = 0x7f;
 
+/** The accelerometer trims as words, by the register of their high byte. */
+const MPU_FACTORY_TRIM: Record<number, number> = {};
+for (const at of [MPU_XA_OFFS, MPU_XA_OFFS + 2, MPU_XA_OFFS + 4]) {
+  const p = MPU6050_RULES.power_on as Record<number, number>;
+  MPU_FACTORY_TRIM[at] = (((p[at] ?? 0) << 8) | (p[at + 1] ?? 0)) << 16 >> 16;
+}
 const MPU_READ_ONLY = new Uint8Array(256);
 for (const [first, last] of MPU6050_RULES.read_only) MPU_READ_ONLY.fill(1, first, last + 1);
 const MPU_SELF_CLEARING = new Uint8Array(256);
 for (const [reg, mask] of Object.entries(MPU6050_RULES.self_clearing)) {
   MPU_SELF_CLEARING[Number(reg)] = mask;
 }
+/**
+ * Registers the pointer stays on after each byte: FIFO_R_W reads and writes
+ * the FIFO, one byte per access (4.31).
+ */
+const MPU_POINTER_STAYS = new Uint8Array(256);
+MPU_POINTER_STAYS[MPU_FIFO_R_W] = 1;
+// MEM_R_W moves the memory address instead, so a DMP upload bursts into the
+// memory and not over FIFO_COUNT and WHO_AM_I behind it.
+MPU_POINTER_STAYS[MPU_MEM_R_W] = 1;
+const MPU_CLEAR_ON_READ = new Uint8Array(256);
+for (const [reg, mask] of Object.entries(MPU6050_RULES.clear_on_read)) {
+  MPU_CLEAR_ON_READ[Number(reg)] = mask;
+}
+const MPU_INT_PULSE_NS = MPU6050_RULES.int_pulse_us * 1000;
+
+/** What the INT pad does to its line: it drives it, or lets go of it (open drain). */
+export type Mpu6050IntPad = 'high' | 'low' | 'z';
 
 /**
  * A physical value as the counts of a 16-bit output register. Half a count
@@ -673,12 +851,40 @@ function mpuCounts(value: number): number {
  *    and from the full-scale ranges the sketch selected, when a read begins.
  *    The whole burst is answered from that one sample (4.17), so a slider
  *    moving while it is read cannot mix two instants.
- *  - Asleep, the block holds what it held when the chip fell asleep.
+ *  - Asleep, the block holds what it held when the chip fell asleep. So does
+ *    an axis in standby (PWR_MGMT_2) and the temperature with TEMP_DIS; in
+ *    CYCLE mode the block moves only at each wake-up, at LP_WAKE_CTRL.
+ *  - Awake, it takes a sample every sample period of the guest's time
+ *    (setClock), whether the sketch talks to it or not. Each one sets
+ *    DATA_RDY_INT, which a read of INT_STATUS clears, and with DATA_RDY_EN
+ *    set moves the INT pad the way INT_PIN_CFG says. Nothing runs in the
+ *    background for it: the samples due are counted when the chip is next
+ *    looked at, from the time that has passed. On a board that keeps no time
+ *    one period passes per register pointer the sketch writes, so a driver
+ *    that waits for DATA_RDY still finds it.
+ *  - With USER_CTRL.FIFO_EN set, each sample also pushes the sources FIFO_EN
+ *    selects into a 1024-byte FIFO, in register order. FIFO_COUNT is latched
+ *    when its high byte is read, and FIFO_R_W pops a byte per read without
+ *    moving the pointer (an empty FIFO repeats the last one), so the FIFO
+ *    calibrations of FastIMU and Kris Winer average real packets instead of
+ *    dividing by a count of zero.
+ *  - BANK_SEL, MEM_START_ADDR and MEM_R_W reach 32 banks of DMP memory, the
+ *    address advancing within its bank and the pointer staying on MEM_R_W,
+ *    with the ROM byte i2cdevlib reads as the hardware revision. The DMP
+ *    itself does not run: an image written there produces no packets, and
+ *    the monitor is told once per run (onDmpUpload).
  */
 export class VirtualMPU6050 implements I2CDevice {
   address: number;
   /** The sample block was read while the chip sleeps, for the first time in this run. */
   onAsleepRead: (() => void) | null = null;
+  /** The sketch wrote to the DMP memory, for the first time in this run. */
+  onDmpUpload: (() => void) | null = null;
+  /**
+   * What the INT pad does, or the time it moves next, may have changed: the
+   * host that drives the pin reads intPad() and intWakeNs() again.
+   */
+  onIntChange: (() => void) | null = null;
 
   private readonly regs = new Uint8Array(256);
   private readonly inputs: Mpu6050Inputs = {
@@ -692,21 +898,70 @@ export class VirtualMPU6050 implements I2CDevice {
   };
   /** The sample the read in progress is answered from. */
   private readonly sample = new Uint8Array(MPU_SAMPLE_LAST - MPU_SAMPLE_FIRST + 1);
-  /** What the block held when SLEEP was set; zeros after power-on and reset. */
-  private readonly lastAwake = new Uint8Array(MPU_SAMPLE_LAST - MPU_SAMPLE_FIRST + 1);
+  /**
+   * What the fields that do not sample hold: the block as it was when SLEEP,
+   * a standby bit or TEMP_DIS stopped them, or at the last CYCLE wake-up.
+   * Zeros after power-on and reset.
+   */
+  private readonly held = new Uint8Array(MPU_SAMPLE_LAST - MPU_SAMPLE_FIRST + 1);
   /** No START was heard for the read that comes next: latch on its first byte. */
   private latchDue = true;
   private asleepReadSaid = false;
   private regPtr = 0;
   private firstByte = true;
+  private clock: GuestClock | null = null;
+  /**
+   * The guest time the sample periods are counted from, in ns: when the chip
+   * woke up, or its rate changed. Null until the chip is next looked at.
+   */
+  private epochNs: number | null = null;
+  /** Samples taken since the epoch. */
+  private taken = 0;
+  /** The period `taken` was counted with. */
+  private periodNs = 0;
+  /** Where the INT pulse of the last sample ends; null when there is none. */
+  private pulseEndNs: number | null = null;
+  /** The FIFO: a ring of fifo_size bytes, `fifoCount` of them from `fifoHead`. */
+  private readonly fifo = new Uint8Array(MPU6050_RULES.fifo_size);
+  private fifoHead = 0;
+  private fifoCount = 0;
+  /** What an empty FIFO answers: the byte read last (4.31). */
+  private fifoLast = 0;
+  private readonly dmpMem = new Uint8Array(MPU6050_RULES.dmp_banks * 256);
+  private dmpUploadSaid = false;
 
-  constructor(address: number) {
+  /** WHO_AM_I and the temperature line of the die (MPU6050_RULES.variants). */
+  private readonly die: { who_am_i: number; temp_lsb_per_c: number; temp_offset_c: number };
+
+  constructor(address: number, variant: Mpu6050Variant = 'mpu6050') {
     this.address = address;
+    this.die =
+      variant === 'mpu6050'
+        ? {
+            who_am_i: MPU6050_RULES.power_on[0x75],
+            temp_lsb_per_c: MPU6050_RULES.temp_lsb_per_c,
+            temp_offset_c: MPU6050_RULES.temp_offset_c,
+          }
+        : MPU6050_RULES.variants[variant];
     this.powerOn();
+  }
+
+  /** The clock of the board the chip is on, or null when it is on no bus. */
+  setClock(clock: GuestClock | null): void {
+    this.clock = clock;
+    this.restartSampling();
+    this.onIntChange?.();
+  }
+
+  /** For the host that times the INT pin: the clock the chip keeps. */
+  get guestClock(): GuestClock | null {
+    return this.clock;
   }
 
   /** The panel moved. Only the values it names change. */
   setInputs(values: Record<string, unknown>): void {
+    // The samples due until now were taken of the world as it was.
+    this.sync();
     for (const key of MPU6050_INPUT_KEYS) {
       const v = values[key];
       if (typeof v === 'number' && Number.isFinite(v)) this.inputs[key] = v;
@@ -718,7 +973,9 @@ export class VirtualMPU6050 implements I2CDevice {
   }
 
   start(read: boolean): void {
+    this.sync();
     if (read) this.latch();
+    this.onIntChange?.();
   }
 
   writeByte(value: number): boolean {
@@ -728,24 +985,37 @@ export class VirtualMPU6050 implements I2CDevice {
     if (this.firstByte) {
       this.regPtr = value & 0xff;
       this.firstByte = false;
+      // Every register access starts with a pointer, on every host and in
+      // both ways a repeated START is delivered: where there is no time to
+      // read, this is the chip's tick.
+      if (this.nowNs() === null) this.tick();
+      else this.sync();
       return true;
     }
+    this.sync();
     const reg = this.regPtr;
-    this.regPtr = (reg + 1) & 0xff;
+    this.regPtr = MPU_POINTER_STAYS[reg] ? reg : (reg + 1) & 0xff;
     this.writeRegister(reg, value & 0xff);
+    this.onIntChange?.();
     return true;
   }
 
   readByte(): number {
+    this.sync();
     if (this.latchDue) this.latch();
     const reg = this.regPtr;
-    this.regPtr = (reg + 1) & 0xff;
-    if (reg < MPU_SAMPLE_FIRST || reg > MPU_SAMPLE_LAST) return this.regs[reg];
-    if (this.asleep && !this.asleepReadSaid) {
-      this.asleepReadSaid = true;
-      this.onAsleepRead?.();
+    this.regPtr = MPU_POINTER_STAYS[reg] ? reg : (reg + 1) & 0xff;
+    const value = this.readRegister(reg);
+    // What the read takes with it goes at the read, not at the STOP: QEMU
+    // ends a transfer before a repeated START, and a driver may never send
+    // one (section "Principles" of the project's design).
+    const cleared =
+      (this.regs[MPU_INT_PIN_CFG] & MPU_INT_RD_CLEAR) !== 0 ? 0xff : MPU_CLEAR_ON_READ[reg];
+    if (cleared !== 0 && (this.regs[MPU_INT_STATUS] & cleared) !== 0) {
+      this.regs[MPU_INT_STATUS] &= ~cleared;
+      this.onIntChange?.();
     }
-    return this.sample[reg - MPU_SAMPLE_FIRST];
+    return value;
   }
 
   /**
@@ -757,25 +1027,230 @@ export class VirtualMPU6050 implements I2CDevice {
     this.latchDue = true;
   }
 
-  /** A new run reads a chip that is still asleep: its monitor is told as well. */
+  /**
+   * A new run reads a chip that is still asleep: its monitor is told as well.
+   * The chip kept its supply and goes on sampling, but the guest's counter
+   * started again, so the periods are counted from where it stands now.
+   */
   boardReset(): void {
     this.asleepReadSaid = false;
+    this.dmpUploadSaid = false;
+    this.restartSampling();
+    this.onIntChange?.();
   }
 
   /**
    * The registers as a read would find them now: the sample block encoded
    * from the panel's values (or what a sleeping chip holds), and no trigger
    * bit. A host that answers its guest from a copy (the Raspberry Pi relay)
-   * mirrors this.
+   * mirrors this. Nothing is cleared by it: it is not a read on the bus.
    */
   dumpRegisters(): Uint8Array {
+    this.sync();
     const out = this.regs.slice();
-    out.set(this.asleep ? this.lastAwake : this.encode(), MPU_SAMPLE_FIRST);
+    out.set(this.output(), MPU_SAMPLE_FIRST);
+    // The count as it stands, not as a read of the high byte last latched it.
+    out[MPU_FIFO_COUNT_H] = this.fifoCount >> 8;
+    out[MPU_FIFO_COUNT_L] = this.fifoCount & 0xff;
     return out;
+  }
+
+  /**
+   * What the INT pad does at this instant. Active is high or low by
+   * INT_LEVEL; an open-drain pad (INT_OPEN) only ever pulls low, and lets go
+   * where a push-pull one would drive high (4.14).
+   */
+  intPad(): Mpu6050IntPad {
+    this.sync();
+    const cfg = this.regs[MPU_INT_PIN_CFG];
+    const high = this.intActive() !== ((cfg & MPU_INT_LEVEL) !== 0);
+    if (!high) return 'low';
+    return (cfg & MPU_INT_OPEN) !== 0 ? 'z' : 'high';
+  }
+
+  /**
+   * The guest time, in ns, at which the pad moves next with nobody touching
+   * the chip: the end of the pulse under way, or the next sample that will
+   * raise an enabled interrupt. Null when nothing is due: a latched
+   * interrupt waits for the sketch, and so does a board with no clock.
+   */
+  intWakeNs(): number | null {
+    // Asleep, nothing moves: no sample, and going to sleep ended any pulse.
+    if (!this.sampling) return null;
+    this.sync();
+    const now = this.nowNs();
+    if (now === null) return null;
+    if (this.latched) {
+      if (this.intActive()) return null;
+    } else if (this.pulseEndNs !== null && now < this.pulseEndNs) {
+      return this.pulseEndNs;
+    }
+    if (!this.sampling || this.epochNs === null) return null;
+    if ((this.regs[MPU_INT_ENABLE] & MPU_INT_SOURCES) === 0) return null;
+    return this.epochNs + (this.taken + 1) * this.periodNs;
   }
 
   private get asleep(): boolean {
     return (this.regs[MPU_PWR_MGMT_1] & MPU_SLEEP) !== 0;
+  }
+
+  /** Whether the chip takes samples: not while it sleeps. */
+  private get sampling(): boolean {
+    return !this.asleep;
+  }
+
+  /** LATCH_INT_EN: INT is held until the interrupt is cleared, not pulsed. */
+  private get latched(): boolean {
+    return (this.regs[MPU_INT_PIN_CFG] & MPU_LATCH_INT_EN) !== 0;
+  }
+
+  /** Whether the chip signals an interrupt on INT at this instant. */
+  private intActive(): boolean {
+    if (this.latched) {
+      return (this.regs[MPU_INT_STATUS] & this.regs[MPU_INT_ENABLE] & MPU_INT_SOURCES) !== 0;
+    }
+    const now = this.nowNs();
+    return this.pulseEndNs !== null && now !== null && now < this.pulseEndNs;
+  }
+
+  /** The guest's time in ns, or null on a board that keeps none. */
+  private nowNs(): number | null {
+    const clock = this.clock;
+    if (!clock) return null;
+    const hz = clock.clockHz();
+    if (!(hz > 0)) return null;
+    // Multiplied first: a whole number of ns comes out whole, so a period
+    // ends on the cycle it ends on and not one float step either side.
+    return (clock.now() * 1e9) / hz;
+  }
+
+  /** The sample period the registers select, in ns (4.2). */
+  private samplePeriodNs(): number {
+    if (this.cycling) {
+      return 1e9 / MPU6050_RULES.cycle_rate_hz[this.regs[MPU_PWR_MGMT_2] >> 6];
+    }
+    const dlpf = this.regs[MPU_CONFIG] & 0x07;
+    const rate =
+      dlpf === 0 || dlpf === 7
+        ? MPU6050_RULES.gyro_rate_hz.dlpf_off
+        : MPU6050_RULES.gyro_rate_hz.dlpf_on;
+    return ((1 + this.regs[MPU_SMPLRT_DIV]) * 1e9) / rate;
+  }
+
+  /**
+   * The sample periods are counted from this instant: the chip woke up, its
+   * rate changed, or the clock it measures on did. Where the time cannot be
+   * read yet, from the next look at the chip.
+   */
+  private restartSampling(): void {
+    this.epochNs = this.sampling ? this.nowNs() : null;
+    this.taken = 0;
+    this.periodNs = this.samplePeriodNs();
+    this.pulseEndNs = null;
+  }
+
+  /**
+   * Take the samples that came due since the chip was last looked at. It is
+   * called before anything reads or changes what a sample depends on, so
+   * every sample is taken of the registers and the world of its own instant.
+   */
+  private sync(): void {
+    if (!this.sampling) return;
+    const now = this.nowNs();
+    if (now === null) {
+      // No time to measure on: the periods are the ticks of writeByte.
+      this.epochNs = null;
+      return;
+    }
+    const period = this.periodNs;
+    if (this.epochNs === null || now < this.epochNs) {
+      // A clock that was not there when the chip woke, or one that started
+      // again: the first sample is one period from here.
+      this.epochNs = now;
+      this.taken = 0;
+      return;
+    }
+    const due = Math.floor((now - this.epochNs) / period);
+    if (due <= this.taken) return;
+    const n = due - this.taken;
+    this.taken = due;
+    this.sampled(n, this.epochNs + due * period);
+  }
+
+  /** One sample period passed, on a board where nothing measures it. */
+  private tick(): void {
+    if (this.sampling) this.sampled(1, null);
+  }
+
+  /** `n` samples were taken, the last of them at `atNs` of the guest's time. */
+  private sampled(n: number, atNs: number | null): void {
+    // A CYCLE wake-up samples what is not in standby, and holds it until the next.
+    if (this.cycling) {
+      const live = this.encode();
+      const stby = this.standbyFields();
+      for (let f = 0; f < 7; f++) {
+        if (!(stby & (1 << f))) this.held.set(live.subarray(2 * f, 2 * f + 2), 2 * f);
+      }
+    }
+    let events = MPU_DATA_RDY_INT;
+    if (this.fifoSamples(n)) events |= MPU_FIFO_OFLOW_INT;
+    // Only an enabled source raises its status bit. The register map does
+    // not say whether a disabled one latches (4.15, 4.16), and every driver
+    // that polls DATA_RDY enables it first: FastIMU and Kris Winer write
+    // INT_ENABLE = 0x01. A driver that never enables it reads 0 there, as
+    // it did before the chip kept time.
+    const raised = this.regs[MPU_INT_ENABLE] & MPU_INT_SOURCES & events;
+    if (raised === 0) return;
+    this.regs[MPU_INT_STATUS] |= raised;
+    // A pulse has a length only where there is a clock to measure it on.
+    if (atNs !== null && !this.latched) this.pulseEndNs = atNs + MPU_INT_PULSE_NS;
+  }
+
+  /**
+   * Push `n` samples of the sources FIFO_EN selects, while USER_CTRL lets
+   * the FIFO take them. Returns whether bytes were lost to a full FIFO.
+   * The samples of one call are of one instant, so only as many as can
+   * still be in the FIFO afterwards are pushed.
+   */
+  private fifoSamples(n: number): boolean {
+    if ((this.regs[MPU_USER_CTRL] & MPU_USER_FIFO_EN) === 0) return false;
+    const sources = this.regs[MPU_FIFO_EN];
+    if (sources === 0) return false;
+    const block = this.output();
+    const packet: number[] = [];
+    for (const [bit, at, len] of MPU_FIFO_SOURCES) {
+      if (sources & bit) for (let i = 0; i < len; i++) packet.push(block[at + i]);
+    }
+    if (packet.length === 0) return false;
+    const size = this.fifo.length;
+    const lost = this.fifoCount + n * packet.length > size;
+    const pushes = Math.min(n, Math.ceil(size / packet.length) + 1);
+    for (let k = 0; k < pushes; k++) for (const b of packet) this.fifoPush(b);
+    return lost;
+  }
+
+  /** One byte into the FIFO; when it is full the oldest goes (4.31). */
+  private fifoPush(value: number): void {
+    const size = this.fifo.length;
+    if (this.fifoCount === size) {
+      this.fifoHead = (this.fifoHead + 1) % size;
+      this.fifoCount--;
+    }
+    this.fifo[(this.fifoHead + this.fifoCount) % size] = value;
+    this.fifoCount++;
+  }
+
+  private fifoPop(): number {
+    if (this.fifoCount === 0) return this.fifoLast;
+    this.fifoLast = this.fifo[this.fifoHead];
+    this.fifoHead = (this.fifoHead + 1) % this.fifo.length;
+    this.fifoCount--;
+    return this.fifoLast;
+  }
+
+  private fifoEmpty(): void {
+    this.fifoHead = 0;
+    this.fifoCount = 0;
   }
 
   private powerOn(): void {
@@ -783,7 +1258,40 @@ export class VirtualMPU6050 implements I2CDevice {
     for (const [reg, value] of Object.entries(MPU6050_RULES.power_on)) {
       this.regs[Number(reg)] = value;
     }
-    this.lastAwake.fill(0);
+    this.regs[MPU_WHO_AM_I] = this.die.who_am_i;
+    this.held.fill(0);
+    this.fifoEmpty();
+    this.fifoLast = 0;
+    this.dmpMem.fill(0);
+    for (const [at, value] of Object.entries(MPU6050_RULES.dmp_rom)) this.dmpMem[Number(at)] = value;
+    this.restartSampling();
+  }
+
+  /**
+   * Where MEM_R_W reads or writes, and the address moved on past it. The
+   * address wraps within its bank: eMPL refuses to cross one and i2cdevlib
+   * selects the next bank itself.
+   */
+  private dmpCell(): number {
+    const at = ((this.regs[MPU_BANK_SEL] & 0x1f) << 8) | this.regs[MPU_MEM_START_ADDR];
+    this.regs[MPU_MEM_START_ADDR] = (this.regs[MPU_MEM_START_ADDR] + 1) & 0xff;
+    return at % this.dmpMem.length;
+  }
+
+  private readRegister(reg: number): number {
+    if (reg === MPU_FIFO_COUNT_H) {
+      // Both bytes are latched when the high one is read (4.30).
+      this.regs[MPU_FIFO_COUNT_H] = this.fifoCount >> 8;
+      this.regs[MPU_FIFO_COUNT_L] = this.fifoCount & 0xff;
+    }
+    if (reg === MPU_FIFO_R_W) return this.fifoPop();
+    if (reg === MPU_MEM_R_W) return this.dmpMem[this.dmpCell()];
+    if (reg < MPU_SAMPLE_FIRST || reg > MPU_SAMPLE_LAST) return this.regs[reg];
+    if (this.asleep && !this.asleepReadSaid) {
+      this.asleepReadSaid = true;
+      this.onAsleepRead?.();
+    }
+    return this.sample[reg - MPU_SAMPLE_FIRST];
   }
 
   private writeRegister(reg: number, value: number): void {
@@ -796,32 +1304,83 @@ export class VirtualMPU6050 implements I2CDevice {
     }
     // SIG_COND_RESET clears the sensor registers too (4.27), which shows on a
     // sleeping chip; one that is awake has a new sample by the next read.
-    if (reg === MPU_USER_CTRL && (value & MPU_SIG_COND_RESET) !== 0) this.lastAwake.fill(0);
-    const stored = value & ~MPU_SELF_CLEARING[reg] & 0xff;
-    // The chip sampled until now, so what it holds asleep is this instant.
-    if (reg === MPU_PWR_MGMT_1 && (stored & MPU_SLEEP) !== 0 && !this.asleep) {
-      this.lastAwake.set(this.encode());
+    if (reg === MPU_USER_CTRL && (value & MPU_SIG_COND_RESET) !== 0) this.held.fill(0);
+    // FIFO_RESET empties it whether or not it is enabled: the register map
+    // says "while FIFO_EN equals 0", and i2cdevlib resets it enabled and
+    // counts on it (MotionApps resetFIFO).
+    if (reg === MPU_USER_CTRL && (value & MPU_FIFO_RESET) !== 0) this.fifoEmpty();
+    if (reg === MPU_FIFO_R_W) {
+      this.fifoPush(value);
+      return;
     }
+    if (reg === MPU_MEM_R_W) {
+      this.dmpMem[this.dmpCell()] = value;
+      if (!this.dmpUploadSaid) {
+        this.dmpUploadSaid = true;
+        this.onDmpUpload?.();
+      }
+      return;
+    }
+    const stored = value & ~MPU_SELF_CLEARING[reg] & 0xff;
+    // What sampled until now holds this instant from here on if the write
+    // stops it; what did not keeps what it held.
+    if (reg === MPU_PWR_MGMT_1 || reg === MPU_PWR_MGMT_2) this.held.set(this.output());
+    const sampled = this.sampling;
     this.regs[reg] = stored;
+    // Waking up, or another rate: the first sample is one period from here.
+    if (this.sampling !== sampled || this.samplePeriodNs() !== this.periodNs) {
+      this.restartSampling();
+    }
   }
 
   private latch(): void {
-    this.sample.set(this.asleep ? this.lastAwake : this.encode());
+    this.sample.set(this.output());
     this.latchDue = false;
+  }
+
+  /** CYCLE with SLEEP clear: one sample per wake-up (4.28). */
+  private get cycling(): boolean {
+    return (this.regs[MPU_PWR_MGMT_1] & (MPU_CYCLE | MPU_SLEEP)) === MPU_CYCLE;
+  }
+
+  /** The fields of the sample block that are not sampling, as bits (ax = bit 0). */
+  private standbyFields(): number {
+    let fields = 0;
+    const stby = this.regs[MPU_PWR_MGMT_2];
+    for (const [bit, field] of MPU_STBY_FIELDS) if (stby & bit) fields |= field;
+    if (this.regs[MPU_PWR_MGMT_1] & MPU_TEMP_DIS) fields |= MPU_TEMP_FIELD;
+    return fields;
+  }
+
+  /** The sample block as the chip's registers hold it now. */
+  private output(): Uint8Array {
+    const frozen = this.asleep || this.cycling ? MPU_ALL_FIELDS : this.standbyFields();
+    if (frozen === MPU_ALL_FIELDS) return this.held.slice();
+    const out = this.encode();
+    for (let f = 0; f < 7; f++) {
+      if (frozen & (1 << f)) out.set(this.held.subarray(2 * f, 2 * f + 2), 2 * f);
+    }
+    return out;
   }
 
   private encode(): Uint8Array {
     const { inputs, regs } = this;
     const accel = MPU6050_RULES.accel_lsb_per_g[(regs[MPU_ACCEL_CONFIG] >> 3) & 3];
     const gyro = MPU6050_RULES.gyro_lsb_per_dps[(regs[MPU_GYRO_CONFIG] >> 3) & 3];
+    // Offsets act before the output registers, the FIFO and the DMP (AN-OFFS 4).
+    const word = (reg: number) => ((regs[reg] << 8) | regs[reg + 1]) << 16 >> 16;
+    const trim = (reg: number) =>
+      (((word(reg) & ~1) - (MPU_FACTORY_TRIM[reg] & ~1)) * accel) /
+      MPU6050_RULES.accel_offset_lsb_per_g;
+    const drift = (reg: number) => (word(reg) * gyro) / MPU6050_RULES.gyro_offset_lsb_per_dps;
     const block = [
-      inputs.accelX * accel,
-      inputs.accelY * accel,
-      inputs.accelZ * accel,
-      (inputs.temp - MPU6050_RULES.temp_offset_c) * MPU6050_RULES.temp_lsb_per_c,
-      inputs.gyroX * gyro,
-      inputs.gyroY * gyro,
-      inputs.gyroZ * gyro,
+      inputs.accelX * accel + trim(MPU_XA_OFFS),
+      inputs.accelY * accel + trim(MPU_XA_OFFS + 2),
+      inputs.accelZ * accel + trim(MPU_XA_OFFS + 4),
+      (inputs.temp - this.die.temp_offset_c) * this.die.temp_lsb_per_c,
+      inputs.gyroX * gyro + drift(MPU_XG_OFFS_USR),
+      inputs.gyroY * gyro + drift(MPU_XG_OFFS_USR + 2),
+      inputs.gyroZ * gyro + drift(MPU_XG_OFFS_USR + 4),
     ];
     const out = new Uint8Array(block.length * 2);
     block.forEach((value, i) => {
@@ -833,27 +1392,168 @@ export class VirtualMPU6050 implements I2CDevice {
   }
 }
 
+/**
+ * The `ad0` property as a level: true (high), false (low), or null when it
+ * says nothing and the AD0 net decides. The worker's copy reads a record the
+ * same way (esp32_i2c_slaves.parse_ad0), and both are held to the cases of
+ * test/fixtures/i2c-vectors/mpu6050.json.
+ */
+export function parseAd0(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1 ? true : value === 0 ? false : null;
+  if (typeof value !== 'string') return null;
+  const v = value.trim().toLowerCase();
+  if (['1', 'true', 'high', 'on', 'vcc'].includes(v)) return true;
+  if (['0', 'false', 'low', 'off', 'gnd'].includes(v)) return false;
+  return null;
+}
+
+/**
+ * The address the chip answers at: b110100 and the level of AD0 (PS 9.2).
+ * The `ad0` property overrides the wiring; otherwise AD0 tied to a supply is
+ * high and anything else is low: tied to ground, or floating, which the
+ * module's pull-down makes low (the GY-521 has a 4.7k to ground). A GPIO
+ * that drives AD0 is read as low: the address is chosen when the part
+ * attaches, not followed while the sketch runs.
+ */
+export function mpu6050Address(ad0Property: unknown, componentId: string | undefined): number {
+  const forced = parseAd0(ad0Property);
+  if (forced !== null) return forced ? 0x69 : 0x68;
+  if (!componentId) return 0x68;
+  const net = busRegistry.resolvePin(componentId, 'AD0');
+  return net.kind === 'rail' && net.rail === 'vcc' ? 0x69 : 0x68;
+}
+
+/**
+ * The MPU-6050's INT pad on the board pin it is wired to.
+ *
+ * The model says what the pad does and when it moves next; this puts it on
+ * the wire. The pad is one driver of the pin's net (busNets), so an
+ * open-drain INT that lets go leaves the line to the pull the sketch enabled,
+ * and the level reaches the guest's input register and its pin interrupt.
+ * The pin moves on the guest's clock: a timer at the next sample, and one at
+ * the end of each 50 us pulse, which run between two instructions at their
+ * cycle. While no interrupt is enabled nothing is armed at all.
+ */
+function hostMpu6050Int(
+  device: VirtualMPU6050,
+  simulator: AnySimulator,
+  pin: number,
+  componentId: string,
+): () => void {
+  const host = simulator.pinManager as unknown as BoardPinHost | undefined;
+  const sink = (level: boolean) => {
+    try {
+      simulator.setPinState(pin, level);
+    } catch {
+      /* the board is not up yet */
+    }
+  };
+  const driverId = `${componentId}::INT`;
+  const onNet = !!host && typeof host.triggerPinChange === 'function';
+  const put = (pad: Mpu6050IntPad): void => {
+    if (onNet) {
+      const drive: Drive =
+        pad === 'z' ? HIGHZ_DRIVE : { value: pad === 'high' ? 1 : 0, strength: Strength.STRONG };
+      setBoardPinDrive(host!, pin, driverId, drive, sink);
+    } else if (pad !== 'z') {
+      // A board with no pin nets: the level goes straight to the guest.
+      sink(pad === 'high');
+    }
+  };
+
+  let last: Mpu6050IntPad | null = null;
+  let cancel: (() => void) | null = null;
+  let armedAt = -1;
+  let disposed = false;
+  const disarm = (): void => {
+    cancel?.();
+    cancel = null;
+    armedAt = -1;
+  };
+  // Called on every byte the sketch moves: the timer already armed for the
+  // same instant stays, so a burst read costs no timer churn.
+  const refresh = (): void => {
+    if (disposed) return;
+    const pad = device.intPad();
+    if (pad !== last) {
+      last = pad;
+      put(pad);
+    }
+    const wake = device.intWakeNs();
+    const clock = device.guestClock;
+    const hz = clock?.clockHz() ?? 0;
+    if (wake === null || !clock || !(hz > 0)) {
+      disarm();
+      return;
+    }
+    // The first cycle at or past the instant, and never the cycle we are on:
+    // the timer that fires has to find the instant behind it, or it would
+    // arm itself for the same one again.
+    const at = Math.max(Math.ceil((wake * hz) / 1e9), clock.now() + 1);
+    if (cancel && at === armedAt) return;
+    disarm();
+    armedAt = at;
+    cancel = clock.at(at, () => {
+      cancel = null;
+      armedAt = -1;
+      refresh();
+    });
+  };
+  device.onIntChange = refresh;
+  refresh();
+
+  return () => {
+    disposed = true;
+    disarm();
+    device.onIntChange = null;
+    if (onNet) setBoardPinDrive(host!, pin, driverId, HIGHZ_DRIVE, sink);
+  };
+}
+
 PartSimulationRegistry.register('mpu6050', {
-  attachEvents: (element, simulator, _getPin, componentId) => {
+  attachEvents: (element, simulator, getPin, componentId) => {
     const el = element as any;
-    // Respect AD0 pin: `el.ad0 = true` → address 0x69, else 0x68
-    const addr = el.ad0 === true || el.ad0 === 'true' ? 0x69 : 0x68;
-    const device = new VirtualMPU6050(addr);
+    const addr = mpu6050Address(el.ad0, componentId);
+    const variant = parseMpuVariant(el.variant);
+    const device = new VirtualMPU6050(addr, variant);
     // The world starts where the panel's sliders do.
     device.setInputs(getSensorControl('mpu6050')?.defaultValues ?? {});
+    // A board pin, not a rail (-1) and not a net between chips.
+    const wiredInt = getPin('INT');
+    const intPin =
+      wiredInt !== null && wiredInt >= 0 && !isSyntheticChipPin(wiredInt) ? wiredInt : null;
     const part = attachI2cPart({
       simulator,
       componentId,
       device,
       // The worker's copy starts from the same values, under the names its
-      // sensor updates use, and not from defaults of its own.
-      worker: { type: 'mpu6050', props: { ...device.getInputs() } },
+      // sensor updates use, and not from defaults of its own. It drives the
+      // pin INT is wired to itself, next to the guest.
+      worker: {
+        type: 'mpu6050',
+        props: {
+          ...device.getInputs(),
+          ...(intPin !== null ? { int_pin: intPin } : {}),
+          ...(variant !== 'mpu6050' ? { variant } : {}),
+        },
+      },
     });
     device.onAsleepRead = () =>
       part.report(
         'i2c-target-asleep',
-        `MPU6050 0x${addr.toString(16)} is in sleep mode: write 0x00 to PWR_MGMT_1 (0x6B) to wake it`,
+        `${variant.toUpperCase()} 0x${addr.toString(16)} is in sleep mode: write 0x00 to PWR_MGMT_1 (0x6B) to wake it`,
       );
+    device.onDmpUpload = () =>
+      part.report(
+        'i2c-target-unmodelled',
+        `${variant.toUpperCase()} 0x${addr.toString(16)}: the sketch loads a DMP image, but the simulator does not run the DMP, ` +
+          'so no quaternion packets reach the FIFO. Read the accelerometer and gyroscope registers instead',
+      );
+    const releaseInt =
+      intPin !== null && !part.remote
+        ? hostMpu6050Int(device, simulator, intPin, componentId)
+        : null;
 
     registerSensorUpdate(componentId, (values) => {
       // The worker's copy answers a QEMU board; this one answers every board
@@ -863,6 +1563,7 @@ PartSimulationRegistry.register('mpu6050', {
     });
 
     return () => {
+      releaseInt?.();
       part.dispose();
       unregisterSensorUpdate(componentId);
     };

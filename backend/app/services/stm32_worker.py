@@ -115,6 +115,19 @@ def main() -> None:
 
     lib.qemu_picsimlab_set_pin.restype = None
     lib.qemu_picsimlab_set_pin.argtypes = [ctypes.c_int, ctypes.c_int]
+    # The guest's own clock, for the parts that keep time (the MPU-6050's
+    # sample period). A libqemu that does not export it leaves them without
+    # one, and they count the events they are sent instead.
+    try:
+        _qemu_clock_get_ns = lib.qemu_clock_get_ns
+        _qemu_clock_get_ns.restype = ctypes.c_int64
+        _qemu_clock_get_ns.argtypes = [ctypes.c_int]
+        _QEMU_CLOCK_VIRTUAL = 1  # enum QEMUClockType, qemu/timer.h
+
+        def _guest_clock_ns() -> int:
+            return int(_qemu_clock_get_ns(_QEMU_CLOCK_VIRTUAL))
+    except AttributeError:
+        _guest_clock_ns = None
     try:
         _shutdown_request = lib.qemu_system_shutdown_request
         _shutdown_request.restype = None
@@ -171,7 +184,8 @@ def main() -> None:
         """Instantiate the right I2C/SPI slave for a sensor descriptor."""
         stype = s.get('sensor_type', '')
         if stype == 'mpu6050':
-            addr = int(s.get('addr', 0x68)); sl = _MPU6050Slave(addr)
+            addr = _MPU6050Slave.address_of(s)
+            sl = _MPU6050Slave(addr, now_ns=_guest_clock_ns, variant=s.get('variant'))
             # The record carries where the panel's sliders are, so the first
             # read is already theirs and not the twin's own rest.
             sl.update(**s)

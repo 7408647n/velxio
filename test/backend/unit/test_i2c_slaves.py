@@ -42,6 +42,8 @@ from app.services.esp32_i2c_slaves import (
     MPU6050_RULES,
     TabClock,
     find_build_times,
+    parse_ad0,
+    parse_variant,
     I2C_START_RECV,
     I2C_START_SEND,
     I2C_FINISH,
@@ -800,15 +802,47 @@ def i2c_write_reg(slave, reg: int, *values: int) -> None:
     slave.handle_event(I2C_FINISH)
 
 
+def rules_as_json(rules: dict) -> dict:
+    """A model's rules table as the vectors write it: a table keyed by
+    register has hexadecimal keys and bytes, the ranges of registers are
+    hexadecimal pairs, and everything else is a plain number or list."""
+    def value(v):
+        if isinstance(v, dict):
+            if all(isinstance(k, int) for k in v):
+                return {f'{k:02X}': f'{x:02X}' for k, x in v.items()}
+            return {k: value(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            if v and all(isinstance(x, (list, tuple)) for x in v):
+                return [[f'{a:02X}', f'{b:02X}'] for a, b in v]
+            return [value(x) for x in v]
+        return v
+    return {name: value(v) for name, v in rules.items()}
+
+
 def int16(hi: int, lo: int) -> int:
     raw = (hi << 8) | lo
     return raw - 0x10000 if raw & 0x8000 else raw
 
 
+class GuestClock:
+    """The guest's time as a vector moves it (`advance`), in whole ns: what a
+    worker hands the twin as now_ns."""
+
+    def __init__(self) -> None:
+        self.ns = 0
+
+    def __call__(self) -> int:
+        return self.ns
+
+    def advance_us(self, us: float) -> None:
+        self.ns += round(us * 1000)
+
+
 def replay_vector(case: unittest.TestCase, slave, vector: dict, flavour: str,
                   clock=None) -> None:
-    """One vector against one model, as QEMU's events. `clock` is the host's
-    clock of a model that has one, for the vector to move."""
+    """One vector against one model, as QEMU's events. `clock` is the model's
+    clock for the vector to move: the host's (`clock` steps, a chip that keeps
+    the time) or the guest's (`advance` steps, a chip that samples on its own)."""
     is_open = False
 
     def start(read: bool) -> None:
@@ -865,6 +899,12 @@ def replay_vector(case: unittest.TestCase, slave, vector: dict, flavour: str,
         elif op == 'dump':
             at = int(step['at'], 16)
             got = slave.dump_registers()[at:at + len(hex_bytes(step['expect']))]
+        elif op == 'advance':
+            if clock is None:
+                case.fail(f'step {i}: time moves in a vector that has no clock')
+            clock.advance_us(step['us'])
+        elif op == 'int':
+            case.assertEqual(slave.int_pad(), step['expect'], f'step {i} {json.dumps(step)}')
         else:
             case.fail(f'step {i}: unknown op "{op}"')
         if got is not None:
@@ -1085,21 +1125,44 @@ class TestMPU6050Slave(unittest.TestCase):
         result = i2c_read_seq(m, 0x6B, 1)
         self.assertEqual(result[0], 0x01)
 
+    def test_the_guest_clock_is_not_read_before_the_chip_samples(self):
+        """A worker builds the twin, and hands it the panel's values, before
+        QEMU is initialised: the guest's clock does not exist yet. A chip that
+        is asleep takes no sample, so it has no reason to ask the time."""
+        asked = []
+
+        def now_ns() -> int:
+            asked.append(1)
+            return 0
+
+        mpu = MPU6050Slave(0x68, now_ns=now_ns)
+        mpu.update(accelX=0.5, temp=30)
+        mpu.dump_registers()
+        self.assertEqual(i2c_read_seq(mpu, 0x75, 1), [0x68])
+        self.assertEqual(asked, [])
+
     def test_rules_are_the_table_the_shared_vectors_carry(self):
         """The twin and the tab model work from one table of facts, and the
         vectors hold the copy both are compared with."""
-        def pairs(table: dict) -> dict:
-            return {f'{reg:02X}': f'{value:02X}' for reg, value in table.items()}
-        self.assertEqual({
-            'power_on': pairs(MPU6050_RULES['power_on']),
-            'read_only': [[f'{first:02X}', f'{last:02X}']
-                          for first, last in MPU6050_RULES['read_only']],
-            'self_clearing': pairs(MPU6050_RULES['self_clearing']),
-            'accel_lsb_per_g': list(MPU6050_RULES['accel_lsb_per_g']),
-            'gyro_lsb_per_dps': list(MPU6050_RULES['gyro_lsb_per_dps']),
-            'temp_lsb_per_c': MPU6050_RULES['temp_lsb_per_c'],
-            'temp_offset_c': MPU6050_RULES['temp_offset_c'],
-        }, MPU_VECTORS['rules'])
+        self.assertEqual(rules_as_json(MPU6050_RULES), MPU_VECTORS['rules'])
+
+    def test_ad0_is_read_as_the_tab_reads_it(self):
+        """One parser for the part's property and the worker's record."""
+        for value, forced in MPU_VECTORS['ad0_values']:
+            want = None if forced is None else forced == '69'
+            self.assertEqual(parse_ad0(value), want, repr(value))
+            record = {'ad0': value}
+            self.assertEqual(MPU6050Slave.address_of(record),
+                             0x69 if want else 0x68, repr(value))
+        # The tab's resolved address wins over the property.
+        self.assertEqual(MPU6050Slave.address_of({'addr': 0x68, 'ad0': True}), 0x68)
+        self.assertEqual(MPU6050Slave.address_of({'addr': 105}), 0x69)
+
+    def test_the_variant_is_read_as_the_tab_reads_it(self):
+        for value, die in (('mpu9250', 'mpu9250'), ('MPU-9250', 'mpu9250'), (' Mpu9250 ', 'mpu9250'),
+                           ('mpu6050', 'mpu6050'), ('mpu6500', 'mpu6050'), (None, 'mpu6050'),
+                           (9250, 'mpu6050')):
+            self.assertEqual(parse_variant(value), die, repr(value))
 
     def test_the_vectors_are_the_format_this_runner_reads(self):
         self.assertEqual(MPU_VECTORS['format'], 1)
@@ -1109,9 +1172,12 @@ class TestMPU6050Slave(unittest.TestCase):
 
 def _vector_case(vector: dict, flavour: str):
     def case(self):
-        slave = MPU6050Slave(MPU_ADDR)
+        # The guest's clock stands still until a step moves it; a vector that
+        # says `"clock": false` is a host that keeps no time.
+        clock = GuestClock() if vector.get('clock', True) else None
+        slave = MPU6050Slave(MPU_ADDR, now_ns=clock, variant=vector.get('variant', 'mpu6050'))
         slave.update(**MPU_VECTORS['inputs'])
-        replay_vector(self, slave, vector, flavour)
+        replay_vector(self, slave, vector, flavour, clock)
     case.__doc__ = f'{vector["name"]} ({flavour})'
     return case
 

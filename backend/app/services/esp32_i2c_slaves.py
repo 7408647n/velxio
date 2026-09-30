@@ -22,6 +22,7 @@ ACK convention (matches QEMU i2c core):
 
 import math as _math
 import re as _re
+import threading as _threading
 import time as _time
 
 
@@ -42,8 +43,14 @@ I2C_READ       = 0x06   # firmware requesting a byte; return the data byte
 # test/fixtures/i2c-vectors/mpu6050.json, which the tests hold both copies
 # against. Sections are those of the register map, RM-MPU-6000A-00 rev 4.2.
 MPU6050_RULES = {
-    # Every register powers on at 0x00 but these: asleep, and its id (section 3).
-    'power_on': {0x6B: 0x40, 0x75: 0x68},
+    # Every register powers on at 0x00 but these: the factory trims, asleep,
+    # and its id (section 3; AN-OFFS 7.2). The accelerometer's factory trims
+    # (OTP) are not zero on any part, and the low bit of each low byte is not
+    # a trim but the product revision, which InvenSense's eMPL mpu_init()
+    # reads (bit 0 of 0x07, 0x09, 0x0B; 2 is a part at full sensitivity, 0
+    # fails with -6).
+    'power_on': {0x06: 0xFA, 0x07: 0x38, 0x08: 0x04, 0x09: 0xB3, 0x0A: 0x05, 0x0B: 0xDC,
+                 0x6B: 0x40, 0x75: 0x68},
     # Inclusive ranges a write leaves as they are: I2C_MST_STATUS, INT_STATUS,
     # the sample block with the external sensor data behind it, FIFO_COUNT
     # and WHO_AM_I (sections 4.13, 4.16 to 4.20, 4.30 and 4.32).
@@ -60,9 +67,54 @@ MPU6050_RULES = {
     # drivers divide by 32.8 and 16.4.
     'accel_lsb_per_g': (16384, 8192, 4096, 2048),
     'gyro_lsb_per_dps': (131, 65.5, 32.8, 16.4),
+    # What one count of the offset registers weighs. The gyro offsets
+    # XG/YG/ZG_OFFS_USR (0x13-0x18) are in the +-1000 deg/s format, 32.8 per
+    # deg/s (AN-OFFS 6.2). The accelerometer trims (0x06-0x0B) at 2048 per g,
+    # the +-16 g format, bit 0 left out: the application note says +-8 g, but
+    # the calibrations that converge on real parts write in +-16 g units
+    # (i2cdevlib PID(): reading at +-2 g / 8; Luis Rodenas'
+    # MPU6050_calibration the same), and at +-8 g their loop gain would be 2
+    # and never settle. Decision O3, pending a bench measurement. An offset
+    # counts from the factory trim, so the chip at power-on reads the panel.
+    'gyro_offset_lsb_per_dps': 32.8,
+    'accel_offset_lsb_per_g': 2048,
     # TEMP_OUT = (T - 36.53) * 340 (4.18).
     'temp_lsb_per_c': 340,
     'temp_offset_c': 36.53,
+    # What another die of the family changes, selected by the record's
+    # `variant`. The MPU-9250 (the Grove IMU 9DOF v2.0 and 10DOF bricks)
+    # answers WHO_AM_I 0x71 and reads TEMP_OUT = (T - 21) * 333.87
+    # (RM-MPU-9250A-00 rev 1.6, sections 4.22 and 4.39; PS-MPU-9250A-01
+    # 3.4.2). Its AK8963 magnetometer is not modelled.
+    'variants': {
+        'mpu9250': {'who_am_i': 0x71, 'temp_lsb_per_c': 333.87, 'temp_offset_c': 21},
+    },
+    # Bits a read of the register takes with it: "each bit will clear after
+    # the register is read" (4.16). With INT_RD_CLEAR set in INT_PIN_CFG, a
+    # read of any register clears them (4.14).
+    'clear_on_read': {0x3A: 0xFF},
+    # The gyroscope output rate the sample rate is divided from, in Hz: 8 kHz
+    # with the low-pass filter off (DLPF_CFG 0 or 7), 1 kHz with it on.
+    # Sample rate = rate / (1 + SMPLRT_DIV) (4.2, 4.3).
+    'gyro_rate_hz': {'dlpf_off': 8000, 'dlpf_on': 1000},
+    # With CYCLE set (and SLEEP clear) the chip wakes at LP_WAKE_CTRL
+    # (PWR_MGMT_2 bits 7:6) to take one sample and sleeps between (4.28, 4.29).
+    'cycle_rate_hz': (1.25, 5, 20, 40),
+    # How long INT stays active per interrupt with LATCH_INT_EN clear (4.14).
+    'int_pulse_us': 50,
+    # Bytes the FIFO holds; past that the oldest go and FIFO_OFLOW_INT is set
+    # (4.31, PS 7.17).
+    'fifo_size': 1024,
+    # The DMP memory behind BANK_SEL (0x6D), MEM_START_ADDR (0x6E) and
+    # MEM_R_W (0x6F): 32 banks of 256 bytes, the bank field of BANK_SEL being
+    # 5 bits (i2cdevlib setMemoryBank, InvenSense eMPL mpu_write_mem).
+    # Undocumented in the register map.
+    'dmp_banks': 32,
+    # DMP memory that is not zero at power-on, by bank * 256 + address: the
+    # hardware revision i2cdevlib's dmpInitialize() reads at user bank 16,
+    # byte 6. Parts report 0xA5 or 0x4D there (jrowberg/i2cdevlib issues 246
+    # and 371); 0xA5 is the one in its MotionApps comments.
+    'dmp_rom': {0x1006: 0xA5},
 }
 
 # Motion and temperature at the chip, under the names of the panel's sliders
@@ -81,8 +133,39 @@ _MPU_INPUT_NAMES = {
     'gyro_x': 'gyroX', 'gyro_y': 'gyroY', 'gyro_z': 'gyroZ',
 }
 
+_MPU_XA_OFFS        = 0x06   # three signed words of accelerometer trim
+_MPU_XG_OFFS_USR    = 0x13   # three signed words of gyro offset
+_MPU_SMPLRT_DIV     = 0x19
+_MPU_CONFIG         = 0x1A
 _MPU_GYRO_CONFIG    = 0x1B
 _MPU_ACCEL_CONFIG   = 0x1C
+_MPU_INT_PIN_CFG    = 0x37
+_MPU_INT_LEVEL      = 0x80   # active low, against active high
+_MPU_INT_OPEN       = 0x40   # open drain, against push-pull
+_MPU_LATCH_INT_EN   = 0x20   # held until cleared, against a pulse
+_MPU_INT_RD_CLEAR   = 0x10
+_MPU_INT_ENABLE     = 0x38
+_MPU_INT_STATUS     = 0x3A
+_MPU_DATA_RDY_INT   = 0x01
+_MPU_FIFO_OFLOW_INT = 0x10
+# The interrupt sources the model raises, as bits of INT_ENABLE and INT_STATUS.
+_MPU_INT_SOURCES    = _MPU_DATA_RDY_INT | _MPU_FIFO_OFLOW_INT
+_MPU_FIFO_EN        = 0x23
+# The FIFO_EN bits in the order their data enters the FIFO, which is the
+# order of the registers (4.6, 4.31): ACCEL (0x3B-0x40), TEMP, XG, YG, ZG, as
+# (bit, offset in the sample block, bytes). SLV0-2 push the external sensor
+# data of the auxiliary master, which the model has none of.
+_MPU_FIFO_SOURCES   = ((0x08, 0, 6), (0x80, 6, 2), (0x40, 8, 2), (0x20, 10, 2), (0x10, 12, 2))
+_MPU_FIFO_COUNT_H   = 0x72
+_MPU_FIFO_COUNT_L   = 0x73
+_MPU_FIFO_R_W       = 0x74
+# USER_CTRL: the FIFO takes samples, and the trigger that empties it (4.27).
+_MPU_USER_FIFO_EN   = 0x40
+_MPU_FIFO_RESET     = 0x04
+# The DMP memory port: bank, address in the bank, and the byte there.
+_MPU_BANK_SEL       = 0x6D
+_MPU_MEM_START_ADDR = 0x6E
+_MPU_MEM_R_W        = 0x6F
 # ACCEL_XOUT_H to GYRO_ZOUT_L: three axes, the die temperature, three axes.
 _MPU_SAMPLE_FIRST   = 0x3B
 _MPU_SAMPLE_LAST    = 0x48
@@ -92,6 +175,16 @@ _MPU_SIG_COND_RESET = 0x01
 _MPU_PWR_MGMT_1     = 0x6B
 _MPU_DEVICE_RESET   = 0x80
 _MPU_SLEEP          = 0x40
+_MPU_CYCLE          = 0x20
+_MPU_TEMP_DIS       = 0x08
+# PWR_MGMT_2: LP_WAKE_CTRL in bits 7:6, then STBY_XA, YA, ZA, XG, YG, ZG
+# (4.29). The standby bits as the fields of the sample block they freeze
+# (ax, ay, az, temp, gx, gy, gz: bit n is field n).
+_MPU_PWR_MGMT_2     = 0x6C
+_MPU_STBY_FIELDS    = ((0x20, 0x01), (0x10, 0x02), (0x08, 0x04),
+                       (0x04, 0x10), (0x02, 0x20), (0x01, 0x40))
+_MPU_TEMP_FIELD     = 0x08
+_MPU_ALL_FIELDS     = 0x7F
 
 _MPU_READ_ONLY = bytearray(256)
 for _first, _last in MPU6050_RULES['read_only']:
@@ -99,6 +192,69 @@ for _first, _last in MPU6050_RULES['read_only']:
 _MPU_SELF_CLEARING = bytearray(256)
 for _reg, _mask in MPU6050_RULES['self_clearing'].items():
     _MPU_SELF_CLEARING[_reg] = _mask
+# Registers the pointer stays on after each byte: FIFO_R_W reads and writes
+# the FIFO, one byte per access (4.31).
+_MPU_POINTER_STAYS = bytearray(256)
+_MPU_POINTER_STAYS[_MPU_FIFO_R_W] = 1
+# MEM_R_W moves the memory address instead, so a DMP upload bursts into the
+# memory and not over FIFO_COUNT and WHO_AM_I behind it.
+_MPU_POINTER_STAYS[_MPU_MEM_R_W] = 1
+_MPU_CLEAR_ON_READ = bytearray(256)
+for _reg, _mask in MPU6050_RULES['clear_on_read'].items():
+    _MPU_CLEAR_ON_READ[_reg] = _mask
+_MPU_INT_PULSE_NS = MPU6050_RULES['int_pulse_us'] * 1000
+
+
+def parse_ad0(value):
+    """The `ad0` property as a level: True (high), False (low), or None when
+    it says nothing and the AD0 net decides. parseAd0 in the tab's model
+    reads the property the same way; both are held to the cases of
+    test/fixtures/i2c-vectors/mpu6050.json."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return True if value == 1 else False if value == 0 else None
+    if not isinstance(value, str):
+        return None
+    v = value.strip().lower()
+    if v in ('1', 'true', 'high', 'on', 'vcc'):
+        return True
+    if v in ('0', 'false', 'low', 'off', 'gnd'):
+        return False
+    return None
+
+
+def parse_variant(value) -> str:
+    """The `variant` property (parseMpuVariant in the tab): a die of
+    MPU6050_RULES['variants'], spelled with or without the dash, or the
+    MPU-6050."""
+    if not isinstance(value, str):
+        return 'mpu6050'
+    v = value.strip().lower().replace('-', '')
+    return v if v in MPU6050_RULES['variants'] else 'mpu6050'
+
+
+def mpu6050_address(record: dict) -> int:
+    """The address a sensor record puts the chip at. The tab resolves the
+    AD0 net and sends `addr`; a record without it (an older tab, a hand-made
+    config) is read by its `ad0` property, low when that says nothing."""
+    addr = record.get('addr')
+    if addr is not None:
+        return int(addr) & 0x7F
+    return 0x69 if parse_ad0(record.get('ad0')) else 0x68
+
+
+def _mpu_word(regs, reg: int) -> int:
+    """The signed big-endian word at `reg`."""
+    raw = (regs[reg] << 8) | regs[reg + 1]
+    return raw - 0x10000 if raw & 0x8000 else raw
+
+
+# The accelerometer trims as words, by the register of their high byte.
+_MPU_FACTORY_TRIM = {
+    at: _mpu_word([MPU6050_RULES['power_on'].get(r, 0) for r in range(256)], at)
+    for at in (_MPU_XA_OFFS, _MPU_XA_OFFS + 2, _MPU_XA_OFFS + 4)
+}
 
 
 def _mpu_counts(value: float) -> int:
@@ -138,11 +294,44 @@ class MPU6050Slave:
         and from the full-scale ranges the sketch selected, when a read
         begins. The whole burst is answered from that one sample (4.17), so a
         slider moving while it is read cannot mix two instants.
-      - Asleep, the block holds what it held when the chip fell asleep.
+      - Asleep, the block holds what it held when the chip fell asleep. So
+        does an axis in standby (PWR_MGMT_2) and the temperature with
+        TEMP_DIS; in CYCLE mode the block moves only at each wake-up, at
+        LP_WAKE_CTRL.
+      - Awake, it takes a sample every sample period of the guest's time
+        (now_ns), whether the sketch talks to it or not. Each one sets
+        DATA_RDY_INT when DATA_RDY_EN is set, which a read of INT_STATUS
+        clears, and moves the INT pad the way INT_PIN_CFG says (int_pad,
+        int_wake_ns). Nothing runs in the background for it: the samples due
+        are counted when the chip is next looked at, from the time that has
+        passed. With no clock (a libqemu that does not export it) one period
+        passes per register pointer the sketch writes, so a driver that waits
+        for DATA_RDY still finds it.
+      - With USER_CTRL.FIFO_EN set, each sample also pushes the sources
+        FIFO_EN selects into a 1024-byte FIFO, in register order. FIFO_COUNT
+        is latched when its high byte is read, and FIFO_R_W pops a byte per
+        read without moving the pointer (an empty FIFO repeats the last one).
+      - BANK_SEL, MEM_START_ADDR and MEM_R_W reach 32 banks of DMP memory,
+        the address advancing within its bank and the pointer staying on
+        MEM_R_W, with the ROM byte i2cdevlib reads as the hardware revision.
+        The DMP itself does not run: an image written there produces no
+        packets.
     """
 
-    def __init__(self, addr: int = 0x68):
+    def __init__(self, addr: int = 0x68, now_ns=None, variant: str = 'mpu6050'):
         self.addr       = addr
+        # WHO_AM_I and the temperature line of the die.
+        self._die = MPU6050_RULES['variants'].get(parse_variant(variant)) or {
+            'who_am_i': MPU6050_RULES['power_on'][0x75],
+            'temp_lsb_per_c': MPU6050_RULES['temp_lsb_per_c'],
+            'temp_offset_c': MPU6050_RULES['temp_offset_c'],
+        }
+        # The guest's clock, in ns, as a callable: what the chip measures its
+        # sample period on. A worker hands over what it reads the guest's
+        # time from (QEMU_CLOCK_VIRTUAL); None is a host that keeps no time.
+        # It is never the host's clock: a guest that waits 40 ms has to find
+        # 40 ms of samples however slowly the emulator ran them.
+        self._now_ns    = now_ns
         self.regs       = bytearray(256)
         self.reg_ptr    = 0
         self.first_byte = True
@@ -151,13 +340,47 @@ class MPU6050Slave:
         self._inputs = dict(MPU6050_INPUTS)
         # The sample the read in progress is answered from.
         self._sample = bytes(_MPU_SAMPLE_SIZE)
-        # What the block held when SLEEP was set; zeros after power-on and reset.
-        self._last_awake = bytes(_MPU_SAMPLE_SIZE)
+        # What the fields that do not sample hold: the block as it was when
+        # SLEEP, a standby bit or TEMP_DIS stopped them, or at the last CYCLE
+        # wake-up. Zeros after power-on and reset.
+        self._held = bytes(_MPU_SAMPLE_SIZE)
         # No START was heard for the read that comes next: latch on its first byte.
         self._latch_due = True
+        # Called when what the INT pad does, or the time it moves next, may
+        # have changed: the worker that drives the pin reads int_pad() and
+        # int_wake_ns() again.
+        self.on_int_change = None
+        # The guest time the sample periods are counted from, in ns: when the
+        # chip woke up or its rate changed. None until the chip is next
+        # looked at.
+        self._epoch_ns = None
+        self._taken = 0           # samples since the epoch
+        self._period_ns = 0.0     # the period _taken was counted with
+        self._pulse_end_ns = None # where the INT pulse of the last sample ends
+        self._fifo = bytearray()
+        self._fifo_last = 0       # what an empty FIFO answers: the byte read last
+        self._dmp_mem = bytearray(MPU6050_RULES['dmp_banks'] * 256)
+        # The panel moves on the worker's command thread and QEMU's thread
+        # runs the bus: the samples due are taken of the world before a move,
+        # under one lock with the bus events.
+        self._lock = _threading.RLock()
         self._power_on()
 
+    @staticmethod
+    def address_of(record: dict) -> int:
+        """The address a worker's sensor record puts the chip at (see
+        mpu6050_address)."""
+        return mpu6050_address(record)
+
     def handle_event(self, event: int) -> int:
+        with self._lock:
+            result = self._handle_event(event)
+        cb = self.on_int_change
+        if cb is not None and (event & 0xFF) != I2C_FINISH:
+            cb()
+        return result
+
+    def _handle_event(self, event: int) -> int:
         op   = event & 0xFF          # low byte = operation type
         data = (event >> 8) & 0xFF   # high byte = data byte (for WRITE)
 
@@ -165,6 +388,7 @@ class MPU6050Slave:
             # reg_ptr is NOT reset here — a write-then-read (repeated START)
             # relies on reg_ptr having been set by the preceding WRITE phase.
             self.first_byte = True
+            self._sync()
             if op == I2C_START_RECV:
                 self._latch()
             return 0   # ACK (0 = success in QEMU convention)
@@ -175,20 +399,34 @@ class MPU6050Slave:
                 # First byte after START is the register address pointer
                 self.reg_ptr    = data
                 self.first_byte = False
+                # Every register access starts with a pointer, on every host
+                # and in both ways a repeated START is delivered: where there
+                # is no time to read, this is the chip's tick.
+                if self._now_ns is None:
+                    self._tick()
+                else:
+                    self._sync()
             else:
+                self._sync()
                 reg = self.reg_ptr
-                self.reg_ptr = (reg + 1) & 0xFF
+                self.reg_ptr = reg if _MPU_POINTER_STAYS[reg] else (reg + 1) & 0xFF
                 self._write_register(reg, data)
             return 0   # ACK
 
         elif op == I2C_READ:
+            self._sync()
             if self._latch_due:
                 self._latch()
             reg = self.reg_ptr
-            self.reg_ptr = (reg + 1) & 0xFF
-            if _MPU_SAMPLE_FIRST <= reg <= _MPU_SAMPLE_LAST:
-                return self._sample[reg - _MPU_SAMPLE_FIRST]
-            return self.regs[reg]
+            self.reg_ptr = reg if _MPU_POINTER_STAYS[reg] else (reg + 1) & 0xFF
+            value = self._read_register(reg)
+            # What the read takes with it goes at the read, not at the FINISH:
+            # QEMU ends a transfer before a repeated START.
+            cleared = (0xFF if self.regs[_MPU_INT_PIN_CFG] & _MPU_INT_RD_CLEAR
+                       else _MPU_CLEAR_ON_READ[reg])
+            if cleared:
+                self.regs[_MPU_INT_STATUS] &= ~cleared & 0xFF
+            return value
 
         else:                         # I2C_FINISH, I2C_NACK, unknown
             # The pointer survives: i2cdevlib writes it in one transaction and
@@ -207,6 +445,12 @@ class MPU6050Slave:
         g and degrees per second, temp in degrees Celsius); whatever else the
         record carries, and anything that is not a finite number, is left out.
         """
+        with self._lock:
+            # The samples due until now were taken of the world as it was.
+            self._sync()
+            self._set_inputs(inputs)
+
+    def _set_inputs(self, inputs: dict) -> None:
         changed = dict(self._inputs)
         for name, value in inputs.items():
             key = _MPU_INPUT_NAMES.get(name)
@@ -226,20 +470,223 @@ class MPU6050Slave:
     def dump_registers(self) -> bytearray:
         """The registers as a read would find them now: the sample block
         encoded from the panel's values (or what a sleeping chip holds), and
-        no trigger bit."""
-        out = bytearray(self.regs)
-        out[_MPU_SAMPLE_FIRST:_MPU_SAMPLE_LAST + 1] = (
-            self._last_awake if self._asleep() else self._encode())
-        return out
+        no trigger bit. Nothing is cleared by it: it is not a read on the bus."""
+        with self._lock:
+            self._sync()
+            out = bytearray(self.regs)
+            out[_MPU_SAMPLE_FIRST:_MPU_SAMPLE_LAST + 1] = self._output()
+            # The count as it stands, not as a read of the high byte last
+            # latched it.
+            out[_MPU_FIFO_COUNT_H] = len(self._fifo) >> 8
+            out[_MPU_FIFO_COUNT_L] = len(self._fifo) & 0xFF
+            return out
+
+    def board_reset(self) -> None:
+        """The MCU was reset: the chip kept its supply and goes on sampling,
+        but the guest's clock started again, so the periods are counted from
+        where it stands now."""
+        with self._lock:
+            self._restart_sampling()
+
+    def int_pad(self) -> str:
+        """What the INT pad does at this instant: 'high', 'low', or 'z' when
+        an open-drain pad lets go. Active is high or low by INT_LEVEL; an
+        open-drain pad (INT_OPEN) only ever pulls low (4.14)."""
+        with self._lock:
+            self._sync()
+            cfg = self.regs[_MPU_INT_PIN_CFG]
+            high = self._int_active() != bool(cfg & _MPU_INT_LEVEL)
+            if not high:
+                return 'low'
+            return 'z' if cfg & _MPU_INT_OPEN else 'high'
+
+    def int_wake_ns(self):
+        """The guest time, in ns, at which the pad moves next with nobody
+        touching the chip: the end of the pulse under way, or the next sample
+        that raises an enabled interrupt. None when nothing is due: a latched
+        interrupt waits for the sketch, and so does a chip with no clock."""
+        with self._lock:
+            # Asleep, nothing moves: no sample, and going to sleep ended any
+            # pulse. The clock is not asked either (see _restart_sampling).
+            if self._asleep():
+                return None
+            self._sync()
+            now = self._now()
+            if now is None:
+                return None
+            if self._latched():
+                if self._int_active():
+                    return None
+            elif self._pulse_end_ns is not None and now < self._pulse_end_ns:
+                return self._pulse_end_ns
+            if self._epoch_ns is None:
+                return None
+            if not self.regs[_MPU_INT_ENABLE] & _MPU_INT_SOURCES:
+                return None
+            return self._epoch_ns + (self._taken + 1) * self._period_ns
 
     def _asleep(self) -> bool:
         return (self.regs[_MPU_PWR_MGMT_1] & _MPU_SLEEP) != 0
+
+    def _latched(self) -> bool:
+        return bool(self.regs[_MPU_INT_PIN_CFG] & _MPU_LATCH_INT_EN)
+
+    def _int_active(self) -> bool:
+        if self._latched():
+            return bool(self.regs[_MPU_INT_STATUS] & self.regs[_MPU_INT_ENABLE]
+                        & _MPU_INT_SOURCES)
+        now = self._now()
+        return (self._pulse_end_ns is not None and now is not None
+                and now < self._pulse_end_ns)
+
+    def _now(self):
+        """The guest's time in ns, or None where the host keeps none."""
+        if self._now_ns is None:
+            return None
+        return self._now_ns()
+
+    def _sample_period_ns(self) -> float:
+        """The sample period the registers select, in ns (4.2)."""
+        if self._cycling():
+            return 1e9 / MPU6050_RULES['cycle_rate_hz'][self.regs[_MPU_PWR_MGMT_2] >> 6]
+        dlpf = self.regs[_MPU_CONFIG] & 0x07
+        rate = MPU6050_RULES['gyro_rate_hz']['dlpf_off' if dlpf in (0, 7) else 'dlpf_on']
+        return (1 + self.regs[_MPU_SMPLRT_DIV]) * 1e9 / rate
+
+    def _restart_sampling(self) -> None:
+        """The sample periods are counted from this instant: the chip woke
+        up, its rate changed, or its clock started again. Where the time
+        cannot be read yet, from the next look at the chip."""
+        # Asleep, the clock is not asked at all: a worker builds the twin
+        # before QEMU is initialised.
+        self._epoch_ns = None if self._asleep() else self._now()
+        self._taken = 0
+        self._period_ns = self._sample_period_ns()
+        self._pulse_end_ns = None
+
+    def _sync(self) -> None:
+        """Take the samples that came due since the chip was last looked at.
+        Called before anything reads or changes what a sample depends on, so
+        every sample is taken of the registers and the world of its instant."""
+        if self._asleep():
+            return
+        now = self._now()
+        if now is None:
+            self._epoch_ns = None
+            return
+        if self._epoch_ns is None or now < self._epoch_ns:
+            # A clock that was not there when the chip woke, or one that
+            # started again: the first sample is one period from here.
+            self._epoch_ns = now
+            self._taken = 0
+            return
+        due = int((now - self._epoch_ns) // self._period_ns)
+        if due <= self._taken:
+            return
+        n = due - self._taken
+        self._taken = due
+        self._sampled(n, self._epoch_ns + due * self._period_ns)
+
+    def _tick(self) -> None:
+        """One sample period passed, on a host where nothing measures it."""
+        if not self._asleep():
+            self._sampled(1, None)
+
+    def _sampled(self, n: int, at_ns) -> None:
+        """`n` samples were taken, the last of them at `at_ns` of the guest's
+        time. Only an enabled source raises its status bit: the register map
+        does not say whether a disabled one latches (4.15, 4.16), and every
+        driver that polls DATA_RDY enables it first."""
+        # A CYCLE wake-up samples what is not in standby, and holds it until
+        # the next.
+        if self._cycling():
+            live = self._encode()
+            stby = self._standby_fields()
+            held = bytearray(self._held)
+            for f in range(7):
+                if not stby & (1 << f):
+                    held[2 * f:2 * f + 2] = live[2 * f:2 * f + 2]
+            self._held = bytes(held)
+        events = _MPU_DATA_RDY_INT
+        if self._fifo_samples(n):
+            events |= _MPU_FIFO_OFLOW_INT
+        raised = self.regs[_MPU_INT_ENABLE] & _MPU_INT_SOURCES & events
+        if not raised:
+            return
+        self.regs[_MPU_INT_STATUS] |= raised
+        # A pulse has a length only where there is a clock to measure it on.
+        if at_ns is not None and not self._latched():
+            self._pulse_end_ns = at_ns + _MPU_INT_PULSE_NS
+
+    def _fifo_samples(self, n: int) -> bool:
+        """Push `n` samples of the sources FIFO_EN selects, while USER_CTRL
+        lets the FIFO take them. Returns whether bytes were lost to a full
+        FIFO. The samples of one call are of one instant, so only as many as
+        can still be in the FIFO afterwards are pushed."""
+        if not self.regs[_MPU_USER_CTRL] & _MPU_USER_FIFO_EN:
+            return False
+        sources = self.regs[_MPU_FIFO_EN]
+        if not sources:
+            return False
+        block = self._output()
+        packet = bytearray()
+        for bit, at, size in _MPU_FIFO_SOURCES:
+            if sources & bit:
+                packet += block[at:at + size]
+        if not packet:
+            return False
+        cap = MPU6050_RULES['fifo_size']
+        lost = len(self._fifo) + n * len(packet) > cap
+        pushes = min(n, -(-cap // len(packet)) + 1)
+        self._fifo += packet * pushes
+        if len(self._fifo) > cap:
+            del self._fifo[:len(self._fifo) - cap]
+        return lost
+
+    def _fifo_push(self, value: int) -> None:
+        """One byte into the FIFO; when it is full the oldest goes (4.31)."""
+        self._fifo.append(value)
+        if len(self._fifo) > MPU6050_RULES['fifo_size']:
+            del self._fifo[0]
+
+    def _fifo_pop(self) -> int:
+        if self._fifo:
+            self._fifo_last = self._fifo.pop(0)
+        return self._fifo_last
 
     def _power_on(self) -> None:
         self.regs[:] = bytes(256)
         for reg, value in MPU6050_RULES['power_on'].items():
             self.regs[reg] = value
-        self._last_awake = bytes(_MPU_SAMPLE_SIZE)
+        self.regs[0x75] = self._die['who_am_i']
+        self._held = bytes(_MPU_SAMPLE_SIZE)
+        self._fifo = bytearray()
+        self._fifo_last = 0
+        self._dmp_mem[:] = bytes(len(self._dmp_mem))
+        for at, value in MPU6050_RULES['dmp_rom'].items():
+            self._dmp_mem[at] = value
+        self._restart_sampling()
+
+    def _dmp_cell(self) -> int:
+        """Where MEM_R_W reads or writes, and the address moved on past it.
+        The address wraps within its bank: eMPL refuses to cross one and
+        i2cdevlib selects the next bank itself."""
+        at = ((self.regs[_MPU_BANK_SEL] & 0x1F) << 8) | self.regs[_MPU_MEM_START_ADDR]
+        self.regs[_MPU_MEM_START_ADDR] = (self.regs[_MPU_MEM_START_ADDR] + 1) & 0xFF
+        return at % len(self._dmp_mem)
+
+    def _read_register(self, reg: int) -> int:
+        if reg == _MPU_FIFO_COUNT_H:
+            # Both bytes are latched when the high one is read (4.30).
+            self.regs[_MPU_FIFO_COUNT_H] = len(self._fifo) >> 8
+            self.regs[_MPU_FIFO_COUNT_L] = len(self._fifo) & 0xFF
+        if reg == _MPU_FIFO_R_W:
+            return self._fifo_pop()
+        if reg == _MPU_MEM_R_W:
+            return self._dmp_mem[self._dmp_cell()]
+        if _MPU_SAMPLE_FIRST <= reg <= _MPU_SAMPLE_LAST:
+            return self._sample[reg - _MPU_SAMPLE_FIRST]
+        return self.regs[reg]
 
     def _write_register(self, reg: int, value: int) -> None:
         if _MPU_READ_ONLY[reg]:
@@ -252,29 +699,84 @@ class MPU6050Slave:
         # SIG_COND_RESET clears the sensor registers too (4.27), which shows on
         # a sleeping chip; one that is awake has a new sample by the next read.
         if reg == _MPU_USER_CTRL and value & _MPU_SIG_COND_RESET:
-            self._last_awake = bytes(_MPU_SAMPLE_SIZE)
+            self._held = bytes(_MPU_SAMPLE_SIZE)
+        # FIFO_RESET empties it whether or not it is enabled: the register map
+        # says "while FIFO_EN equals 0", and i2cdevlib resets it enabled and
+        # counts on it (MotionApps resetFIFO).
+        if reg == _MPU_USER_CTRL and value & _MPU_FIFO_RESET:
+            self._fifo = bytearray()
+        if reg == _MPU_FIFO_R_W:
+            self._fifo_push(value)
+            return
+        if reg == _MPU_MEM_R_W:
+            self._dmp_mem[self._dmp_cell()] = value
+            return
         stored = value & ~_MPU_SELF_CLEARING[reg] & 0xFF
-        # The chip sampled until now, so what it holds asleep is this instant.
-        if reg == _MPU_PWR_MGMT_1 and stored & _MPU_SLEEP and not self._asleep():
-            self._last_awake = self._encode()
+        # What sampled until now holds this instant from here on if the write
+        # stops it; what did not keeps what it held.
+        if reg in (_MPU_PWR_MGMT_1, _MPU_PWR_MGMT_2):
+            self._held = self._output()
+        was_asleep = self._asleep()
         self.regs[reg] = stored
+        # Waking up, or another rate: the first sample is one period from here.
+        if self._asleep() != was_asleep or self._sample_period_ns() != self._period_ns:
+            self._restart_sampling()
 
     def _latch(self) -> None:
-        self._sample = self._last_awake if self._asleep() else self._encode()
+        self._sample = self._output()
         self._latch_due = False
+
+    def _cycling(self) -> bool:
+        """CYCLE with SLEEP clear: one sample per wake-up (4.28)."""
+        return self.regs[_MPU_PWR_MGMT_1] & (_MPU_CYCLE | _MPU_SLEEP) == _MPU_CYCLE
+
+    def _standby_fields(self) -> int:
+        """The fields of the sample block that are not sampling, as bits
+        (ax = bit 0)."""
+        fields = 0
+        stby = self.regs[_MPU_PWR_MGMT_2]
+        for bit, field in _MPU_STBY_FIELDS:
+            if stby & bit:
+                fields |= field
+        if self.regs[_MPU_PWR_MGMT_1] & _MPU_TEMP_DIS:
+            fields |= _MPU_TEMP_FIELD
+        return fields
+
+    def _output(self) -> bytes:
+        """The sample block as the chip's registers hold it now."""
+        frozen = (_MPU_ALL_FIELDS if self._asleep() or self._cycling()
+                  else self._standby_fields())
+        if frozen == _MPU_ALL_FIELDS:
+            return bytes(self._held)
+        out = bytearray(self._encode())
+        for f in range(7):
+            if frozen & (1 << f):
+                out[2 * f:2 * f + 2] = self._held[2 * f:2 * f + 2]
+        return bytes(out)
 
     def _encode(self) -> bytes:
         inputs = self._inputs
         accel = MPU6050_RULES['accel_lsb_per_g'][(self.regs[_MPU_ACCEL_CONFIG] >> 3) & 3]
         gyro  = MPU6050_RULES['gyro_lsb_per_dps'][(self.regs[_MPU_GYRO_CONFIG] >> 3) & 3]
+        regs = self.regs
+
+        # Offsets act before the output registers, the FIFO and the DMP
+        # (AN-OFFS 4).
+        def trim(reg: int) -> float:
+            return (((_mpu_word(regs, reg) & ~1) - (_MPU_FACTORY_TRIM[reg] & ~1)) * accel
+                    / MPU6050_RULES['accel_offset_lsb_per_g'])
+
+        def drift(reg: int) -> float:
+            return _mpu_word(regs, reg) * gyro / MPU6050_RULES['gyro_offset_lsb_per_dps']
+
         block = (
-            inputs['accelX'] * accel,
-            inputs['accelY'] * accel,
-            inputs['accelZ'] * accel,
-            (inputs['temp'] - MPU6050_RULES['temp_offset_c']) * MPU6050_RULES['temp_lsb_per_c'],
-            inputs['gyroX'] * gyro,
-            inputs['gyroY'] * gyro,
-            inputs['gyroZ'] * gyro,
+            inputs['accelX'] * accel + trim(_MPU_XA_OFFS),
+            inputs['accelY'] * accel + trim(_MPU_XA_OFFS + 2),
+            inputs['accelZ'] * accel + trim(_MPU_XA_OFFS + 4),
+            (inputs['temp'] - self._die['temp_offset_c']) * self._die['temp_lsb_per_c'],
+            inputs['gyroX'] * gyro + drift(_MPU_XG_OFFS_USR),
+            inputs['gyroY'] * gyro + drift(_MPU_XG_OFFS_USR + 2),
+            inputs['gyroZ'] * gyro + drift(_MPU_XG_OFFS_USR + 4),
         )
         out = bytearray()
         for value in block:

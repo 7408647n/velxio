@@ -122,10 +122,85 @@ class TestSeededFromTheRecord:
         w.sync()
         assert read_sample(w) == [-16384, *PANEL_COUNTS[1:]]
 
+    def test_the_record_picks_the_die_and_the_address(self, worker):
+        """The tab sends the variant and the address it resolved from AD0."""
+        w = worker(sensors=[record(variant='mpu9250'),
+                            {**record(), 'pin': PIN + 1, 'addr': 0x69, 'owner': 'imu2'}])
+        assert w.read_reg(0, ADDR, 0x75) == (0, 0x71)
+        assert w.read_reg(0, 0x69, 0x75) == (0, 0x68)
+
     def test_the_chip_is_asleep_until_the_sketch_wakes_it(self, worker):
         w = worker(sensors=[record(**PANEL)])
         assert w.read_reg(0, ADDR, PWR_MGMT_1) == (0, 0x40)
         assert read_sample(w) == [0] * 7
+
+
+INT_GPIO = 4
+SMPLRT_DIV, INT_PIN_CFG, INT_ENABLE, INT_STATUS = 0x19, 0x37, 0x38, 0x3A
+
+
+def int_levels(w) -> list[int]:
+    """Every level the worker put on the INT pad, in order."""
+    calls = w.guest('calls')['calls']
+    return [c[2] for c in calls if c[:2] == ['set_pin', INT_GPIO + 1]]
+
+
+def wait_levels(w, want: list[int], timeout: float = 3.0) -> list[int]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        got = int_levels(w)
+        if got == want:
+            return got
+        time.sleep(0.01)
+    return int_levels(w)
+
+
+class TestSampledOnTheGuestClock:
+    """The twin samples on QEMU_CLOCK_VIRTUAL: DATA_RDY and the INT pad follow
+    the guest's time, which the fake libqemu moves by hand."""
+
+    @pytest.fixture
+    def clocked(self, worker, monkeypatch):
+        monkeypatch.setenv('BB_FAKE_GUEST_CLOCK', '1')
+        w = worker(sensors=[record(int_pin=INT_GPIO)])
+        write_reg(w, SMPLRT_DIV, 0x07)     # 1 kHz at DLPF_CFG 0
+        write_reg(w, INT_ENABLE, 0x01)     # DATA_RDY_EN
+        write_reg(w, PWR_MGMT_1, 0x00)     # awake at guest time 0
+        return w
+
+    def test_data_ready_comes_with_the_guest_time_and_goes_with_the_read(self, clocked):
+        w = clocked
+        assert w.read_reg(0, ADDR, INT_STATUS) == (0, 0x00)
+        w.guest('clock', ns=1_000_000)
+        assert w.read_reg(0, ADDR, INT_STATUS) == (0, 0x01)
+        assert w.read_reg(0, ADDR, INT_STATUS) == (0, 0x00)
+
+    def test_int_pulses_on_the_pad_the_record_names(self, clocked):
+        w = clocked
+        # The pad is driven from the first event on: push-pull, active high.
+        assert int_levels(w)[:1] == [0]
+        w.guest('clock', ns=1_000_000)
+        assert wait_levels(w, [0, 1]) == [0, 1], 'the timer thread raises INT at the sample'
+        w.guest('clock', ns=1_050_000)
+        assert wait_levels(w, [0, 1, 0]) == [0, 1, 0], 'and lowers it 50 us later'
+
+    def test_a_latched_int_waits_for_the_read(self, clocked):
+        w = clocked
+        write_reg(w, INT_PIN_CFG, 0x20)    # LATCH_INT_EN
+        w.guest('clock', ns=3_000_000)
+        assert wait_levels(w, [0, 1]) == [0, 1]
+        assert w.read_reg(0, ADDR, INT_STATUS) == (0, 0x01)
+        assert int_levels(w) == [0, 1, 0]
+
+    def test_no_pad_is_driven_when_int_is_not_wired(self, worker, monkeypatch):
+        monkeypatch.setenv('BB_FAKE_GUEST_CLOCK', '1')
+        w = worker(sensors=[record()])
+        write_reg(w, INT_ENABLE, 0x01)
+        write_reg(w, PWR_MGMT_1, 0x00)
+        w.guest('clock', ns=5_000_000)
+        assert w.read_reg(0, ADDR, INT_STATUS) == (0, 0x01)
+        calls = w.guest('calls')['calls']
+        assert [c for c in calls if c[0] == 'set_pin' and c[1] < 100] == []
 
 
 class TestI2cTrace:
