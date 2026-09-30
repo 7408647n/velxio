@@ -35,10 +35,11 @@ pytest.importorskip('wasmtime', reason='chip runtime needs wasmtime')
 from app.services import wasm_chip_runtime  # noqa: E402
 from app.services.esp32_i2c_slaves import (  # noqa: E402
     I2C_FINISH, I2C_READ, I2C_START_RECV, I2C_START_SEND, I2C_WRITE,
-    BMP280Slave, DS1307Slave, DS3231Slave, bmp280_slave, rtc_slave,
+    BMP280Slave, DS1307Slave, DS3231Slave, MPU6050Slave, bmp280_slave, mpu6050_slave,
+    rtc_slave,
 )
 from app.services.wasm_i2c_models import (  # noqa: E402
-    SLAVES, WasmBMP280Slave, WasmDS1307Slave, WasmDS3231Slave,
+    SLAVES, WasmBMP280Slave, WasmDS1307Slave, WasmDS3231Slave, WasmMPU6050Slave,
 )
 
 # The vector runner and its clock are test_i2c_slaves.py's, so the two
@@ -49,6 +50,8 @@ from test_i2c_slaves import (  # noqa: E402
     BUS_FLAVOURS,
     DS1307_VECTORS,
     DS3231_VECTORS,
+    MPU_VECTORS,
+    GuestClock,
     VectorClock,
     build_time,
     replay_vector,
@@ -56,11 +59,12 @@ from test_i2c_slaves import (  # noqa: E402
 
 BUS_CHIPS = Path(__file__).resolve().parents[3] / 'frontend' / 'public' / 'bus-chips'
 WASM = {name: (BUS_CHIPS / f'{name}.wasm').read_bytes()
-        for name in ('ds1307', 'ds3231', 'bmp280')}
+        for name in ('ds1307', 'ds3231', 'bmp280', 'mpu6050')}
 CHIPS = {
     'ds1307': (WasmDS1307Slave, DS1307_VECTORS, 22),
     'ds3231': (WasmDS3231Slave, DS3231_VECTORS, 27),
     'bmp280': (WasmBMP280Slave, BMP_VECTORS, 22),
+    'mpu6050': (WasmMPU6050Slave, MPU_VECTORS, 38),
 }
 RTCS = ('ds1307', 'ds3231')
 
@@ -80,6 +84,13 @@ def on_path(slave, path: str):
 
 def power_on(name: str, vector: dict, path: str = 'held'):
     cls, file, _ = CHIPS[name]
+    if name == 'mpu6050':
+        # The guest's clock, standing at 0 until `advance`, or none at all.
+        clock = None if vector.get('clock') is False else GuestClock()
+        slave = cls(WASM[name], int(file['address'], 16), now_ns=clock,
+                    variant=vector.get('variant', 'mpu6050'))
+        slave.update(**file['inputs'])
+        return on_path(slave, path), clock
     if name == 'bmp280':
         slave = cls(WASM[name], int(file['address'], 16))
         slave.update(**file['inputs'])
@@ -343,3 +354,238 @@ class TestTheWorkersCallPath(unittest.TestCase):
         self.assertIsNone(slave._peek)
         want = _events(on_path(WasmDS1307Slave(WASM['ds1307']), 'byte-by-byte'), _now_events())
         self.assertEqual(_events(slave, _now_events())[4:11], want[4:11])
+
+
+def _mpu_pair(record=None, path='held', clock=None):
+    """The compiled MPU-6050 on `path` and its twin, on one guest clock."""
+    clock = clock if clock is not None else GuestClock()
+    record = dict(record or {})
+    wasm = on_path(mpu6050_slave(dict(record, wasmB64=base64.b64encode(WASM['mpu6050']).decode()),
+                                 now_ns=clock), path)
+    twin = mpu6050_slave(record, now_ns=clock)
+    return wasm, twin, clock
+
+
+def _write(slave, reg: int, *values: int) -> list[int]:
+    return _events(slave, [I2C_START_SEND, (reg << 8) | I2C_WRITE,
+                           *[(v << 8) | I2C_WRITE for v in values], I2C_FINISH])
+
+
+def _read(slave, reg: int, n: int) -> list[int]:
+    return _events(slave, [I2C_START_SEND, (reg << 8) | I2C_WRITE, I2C_FINISH, I2C_START_RECV,
+                           *[I2C_READ] * n, I2C_FINISH])[4:4 + n]
+
+
+class TestMpu6050Slave(unittest.TestCase):
+    """mpu6050_slave: the compiled model when the record carries it, the twin
+    otherwise, both at the record's address, die and panel values, and the
+    compiled one doing what the twin does where the vectors do not reach."""
+
+    RECORD = {'addr': 0x69, 'variant': 'MPU-9250', 'accelX': 0.5, 'gyroZ': -12.5, 'temp': 30.0}
+
+    def test_without_the_model_the_worker_keeps_its_twin(self):
+        slave = mpu6050_slave(dict(self.RECORD))
+        self.assertIs(type(slave), MPU6050Slave)
+        self.assertEqual(slave.addr, 0x69)
+        self.assertEqual(slave.inputs()['accelX'], 0.5)
+
+    def test_a_record_with_the_model_runs_it_at_the_panels_values(self):
+        wasm, twin, _ = _mpu_pair(self.RECORD)
+        self.assertIsInstance(wasm, WasmMPU6050Slave)
+        self.assertEqual((wasm.addr, wasm.runtime.i2c_address), (0x69, 0x69))
+        self.assertEqual(wasm.inputs(), twin.inputs())
+        self.assertEqual(_read(wasm, 0x75, 1), [0x71])
+        self.assertEqual(_read(wasm, 0x3B, 14), _read(twin, 0x3B, 14))
+
+    def test_bytes_that_cannot_run_leave_the_twin(self):
+        record = dict(self.RECORD, wasmB64=base64.b64encode(b'not wasm').decode())
+        self.assertIs(type(mpu6050_slave(record)), MPU6050Slave)
+
+    def test_the_panel_takes_what_the_twin_takes(self):
+        wasm, twin, _ = _mpu_pair()
+        for dev in (wasm, twin):
+            _write(dev, 0x6B, 0x00)
+        for values in ({'accelX': 1.25}, {'accel_y': -0.5}, {'temp': float('nan')},
+                       {'gyroX': True}, {'gyroY': '3'}, {'gyroZ': 10 ** 400}, {'bogus': 1}):
+            wasm.update(**values)
+            twin.update(**values)
+            self.assertEqual(wasm.inputs(), twin.inputs(), values)
+            self.assertEqual(_read(wasm, 0x3B, 14), _read(twin, 0x3B, 14), values)
+
+    def test_the_int_pad_moves_as_the_twins(self):
+        """What esp32_worker._MpuIntPin asks, at every step, on both paths."""
+        for path in ('held', 'byte-by-byte'):
+            wasm, twin, clock = _mpu_pair(path=path)
+            for dev in (wasm, twin):
+                _write(dev, 0x19, 0x07)   # 1 kHz
+                _write(dev, 0x38, 0x01)   # DATA_RDY_EN
+                _write(dev, 0x6B, 0x00)
+            for step in range(16):
+                for ask in (lambda d: d.int_pad(), lambda d: d.int_pulses(),
+                            lambda d: d.int_pad_levels(), lambda d: d.int_wake_ns(),
+                            lambda d: d.int_wake_ns(clock.ns + 2_500_000)):
+                    self.assertEqual(ask(wasm), ask(twin), f'{path} step {step}')
+                clock.ns += 330_000
+                if step == 6:
+                    for dev in (wasm, twin):
+                        _write(dev, 0x37, 0xE0)   # active low, open drain, latched
+                if step in (9, 12):
+                    self.assertEqual(_read(wasm, 0x3A, 1), _read(twin, 0x3A, 1))
+
+    def test_a_pad_driver_sees_every_event_as_the_twins_does(self):
+        seen = {'wasm': [], 'twin': []}
+        wasm, twin, clock = _mpu_pair()
+        for name, dev in (('wasm', wasm), ('twin', twin)):
+            dev.on_int_change = (lambda d, out: lambda: out.append(
+                (d.int_pad(), d.int_pulses(), d.int_pad_levels())))(dev, seen[name])
+        for dev in (wasm, twin):
+            _write(dev, 0x38, 0x01)
+            _write(dev, 0x6B, 0x00)
+        for _ in range(8):
+            clock.ns += 140_000
+            for dev in (wasm, twin):
+                _read(dev, 0x3A, 1)
+        self.assertEqual(seen['wasm'], seen['twin'])
+        self.assertGreater(len(seen['wasm']), 30)
+        # Unset, the fast path comes back.
+        wasm.on_int_change = None
+        self.assertIsNotNone(wasm._run)
+
+    def test_board_reset_and_the_pointer_are_the_twins(self):
+        wasm, twin, clock = _mpu_pair()
+        for dev in (wasm, twin):
+            _write(dev, 0x38, 0x01)
+            _write(dev, 0x6B, 0x00)
+        clock.ns = 5_000_000
+        for dev in (wasm, twin):
+            dev.board_reset()
+        clock.ns = 5_100_000
+        self.assertEqual(_read(wasm, 0x3A, 1), _read(twin, 0x3A, 1))
+        self.assertEqual(wasm.reg_ptr, twin.reg_ptr)
+        self.assertEqual(wasm.dump_registers(), twin.dump_registers())
+
+
+class TestMpu6050OnTheHeldPath(unittest.TestCase):
+    """The worker holds the events of a transaction back and serves a burst
+    from one peek. The MPU-6050 samples on the guest's clock, so each held
+    event goes to the model with its own time, and a byte of the peek is
+    served only until the next sample is due. Compared with the twin, which
+    hears every event when it happens."""
+
+    def counted(self, slave):
+        return TestTheWorkersCallPath.counted(self, slave)
+
+    def test_a_fourteen_byte_burst_is_one_call_into_the_model(self):
+        wasm, _twin, clock = _mpu_pair()
+        _write(wasm, 0x6B, 0x00)
+        _read(wasm, 0x3B, 14)
+        calls = self.counted(wasm)
+        for _ in range(3):
+            clock.ns += 200_000
+            _read(wasm, 0x3B, 14)
+        self.assertEqual(calls, ['_run'] * 3)
+
+    def test_a_write_held_back_takes_effect_at_its_own_instant(self):
+        """INT_ENABLE written, then a sample due, then INT_STATUS read: the
+        sample raises DATA_RDY because the write came before it."""
+        wasm, twin, clock = _mpu_pair()
+        for dev in (wasm, twin):
+            _write(dev, 0x19, 0x07)
+            _write(dev, 0x6B, 0x00)
+        clock.ns = 500_000
+        for dev in (wasm, twin):
+            _write(dev, 0x38, 0x01)
+        clock.ns = 1_200_000
+        self.assertEqual(_read(wasm, 0x3A, 1), _read(twin, 0x3A, 1))
+        self.assertEqual(_read(twin, 0x3A, 1), [0x00])
+
+    def test_a_sample_due_in_the_middle_of_a_burst_is_seen_as_the_twin_sees_it(self):
+        """A burst from 0x39 reads INT_STATUS second: a sample due between
+        the two bytes sets DATA_RDY there, which the peek taken at the
+        first byte did not hold."""
+        wasm, twin, clock = _mpu_pair()
+        for dev in (wasm, twin):
+            _write(dev, 0x38, 0x01)
+            _write(dev, 0x6B, 0x00)
+        clock.ns = 100_000
+        got = {}
+        for name, dev in (('wasm', wasm), ('twin', twin)):
+            clock.ns = 100_000
+            out = _events(dev, [I2C_START_SEND, (0x39 << 8) | I2C_WRITE, I2C_FINISH,
+                                I2C_START_RECV, I2C_READ])
+            clock.ns = 130_000
+            out += _events(dev, [I2C_READ, I2C_READ, I2C_FINISH])
+            got[name] = out
+        self.assertEqual(got['twin'][4:7], [0x00, 0x01, 0x00])
+        self.assertEqual(got['wasm'], got['twin'])
+
+    def test_a_sample_due_in_the_middle_of_a_fifo_burst_is_seen_as_the_twin_sees_it(self):
+        wasm, twin, clock = _mpu_pair()
+        for dev in (wasm, twin):
+            _write(dev, 0x37, 0x10)       # INT_RD_CLEAR
+            _write(dev, 0x38, 0x11)       # DATA_RDY_EN, FIFO_OFLOW_EN
+            _write(dev, 0x23, 0x78)       # gyro and temperature into the FIFO
+            _write(dev, 0x6A, 0x40)       # FIFO on
+            _write(dev, 0x6B, 0x00)
+        clock.ns = 380_000
+        got = {}
+        for name, dev in (('wasm', wasm), ('twin', twin)):
+            out = _events(dev, [I2C_START_SEND, (0x72 << 8) | I2C_WRITE, I2C_FINISH,
+                                I2C_START_RECV, I2C_READ, I2C_READ])
+            clock.ns = 380_000
+            # Past the next sample (8 kHz: 500 us) between two bytes.
+            out += _events(dev, [I2C_READ])
+            clock.ns = 510_000
+            out += _events(dev, [I2C_READ, I2C_READ, I2C_FINISH])
+            out += _read(dev, 0x3A, 1) + _read(dev, 0x72, 2)
+            got[name] = out
+            clock.ns = 380_000
+        self.assertEqual(got['wasm'], got['twin'])
+
+    def test_random_traffic_on_every_path_is_the_twins(self):
+        """Transactions of every kind the drivers make, with the guest's time
+        moving between and inside them, byte for byte against the twin."""
+        import random
+        for seed in range(6):
+            rng = random.Random(seed)
+            for path in PATHS:
+                clock = GuestClock()
+                wasm, twin, _ = _mpu_pair(path=path, clock=clock)
+                log = []
+                regs = [0x19, 0x1A, 0x1B, 0x1C, 0x23, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x41, 0x43,
+                        0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x71, 0x72, 0x74, 0x75, 0x13, 0x06]
+                for dev in (wasm, twin):
+                    _write(dev, 0x6B, 0x00)
+                for t in range(160):
+                    kind = rng.random()
+                    reg = rng.choice(regs)
+                    if kind < 0.35:
+                        value = rng.choice([0x00, 0x01, 0x07, 0x10, 0x20, 0x40, 0x78, 0xC0,
+                                            0x04, 0x11, rng.randrange(256)])
+                        if reg == 0x6B:
+                            value &= 0x7F if rng.random() < 0.9 else 0xFF
+                        events = [I2C_START_SEND, (reg << 8) | I2C_WRITE, (value << 8) | I2C_WRITE,
+                                  I2C_FINISH]
+                    else:
+                        n = rng.choice([1, 2, 6, 14, 15, 20])
+                        events = [I2C_START_SEND, (reg << 8) | I2C_WRITE, I2C_FINISH,
+                                  I2C_START_RECV, *[I2C_READ] * n, I2C_FINISH]
+                    step = rng.choice([0, 0, 20_000, 50_000, 125_000, 600_000, 1_000_000, 3_000_000])
+                    start_ns = clock.ns
+                    inner = rng.random() < 0.3
+                    for name, dev in (('wasm', wasm), ('twin', twin)):
+                        clock.ns = start_ns
+                        out = []
+                        for k, event in enumerate(events):
+                            if inner and k == len(events) // 2:
+                                clock.ns += step
+                            out.append(dev.handle_event(event))
+                        log.append((t, name, out))
+                    if not inner:
+                        clock.ns += step
+                    if rng.random() < 0.05:
+                        values = {'accelX': rng.uniform(-3, 3), 'gyroY': rng.uniform(-300, 300)}
+                        wasm.update(**values)
+                        twin.update(**values)
+                    self.assertEqual(log[-2][2], log[-1][2], f'seed {seed} {path} txn {t} {events}')
+                self.assertEqual(wasm.dump_registers(), twin.dump_registers(), f'seed {seed} {path}')

@@ -14,10 +14,17 @@ ctypes boundary, the guest played by calling the worker's own callbacks):
     beside a panel that said 24;
   - answering an I2C event logs nothing and emits nothing unless
     VELXIO_I2C_TRACE is set, and with it set the trace is what it always was.
+
+Every test runs twice: with the record the tab files by default, which
+carries the part's compiled model (buses/models/mpu6050.c, `wasmB64`, P5 of
+the project), and with the record of a tab whose i2cwasm flag is off, which
+the worker answers with its Python twin (esp32_i2c_slaves.mpu6050_slave).
 """
 from __future__ import annotations
 
+import base64
 import time
+from pathlib import Path
 
 import pytest
 
@@ -54,9 +61,27 @@ PANEL_COUNTS = [8192, -4096, 12288, -2220, 13100, -6550, 1310]
 REST_COUNTS = [0, 0, 16384, -4260, 0, 0, 0]
 
 
+MODEL_B64 = base64.b64encode(
+    (Path(__file__).resolve().parents[3] / 'frontend' / 'public' / 'bus-chips' / 'mpu6050.wasm')
+    .read_bytes()).decode()
+# What the tab adds to every record: the compiled model, or nothing.
+_RECORD_MODEL: dict = {}
+
+
+@pytest.fixture(autouse=True, params=['compiled', 'twin'])
+def model(request, monkeypatch):
+    """The worker's copy of the chip: the part's compiled model, which the
+    tab sends by default, or the twin of a tab with the i2cwasm flag off."""
+    monkeypatch.setattr(
+        __import__(__name__, fromlist=['_RECORD_MODEL']), '_RECORD_MODEL',
+        {'wasmB64': MODEL_B64} if request.param == 'compiled' else {})
+    return request.param
+
+
 def record(**values) -> dict:
     """The record the tab's part files for the worker (parts/i2cPart.ts)."""
-    return {'sensor_type': 'mpu6050', 'pin': PIN, 'addr': ADDR, 'owner': 'imu1', **values}
+    return {'sensor_type': 'mpu6050', 'pin': PIN, 'addr': ADDR, 'owner': 'imu1',
+            **_RECORD_MODEL, **values}
 
 
 def write_reg(w, reg: int, *values: int) -> None:
@@ -94,6 +119,15 @@ def event_lines(log: list[str]) -> list[str]:
 
 
 class TestSeededFromTheRecord:
+    def test_the_compiled_model_runs_when_the_record_carries_it(self, worker, model):
+        w = worker(sensors=[record(**PANEL)])
+        write_reg(w, PWR_MGMT_1, 0x00)
+        assert read_sample(w) == PANEL_COUNTS
+        w.flush()
+        w.send({'cmd': 'sensor_attach', 'sensor_type': 'trace-marker', 'pin': 77})
+        log = ''.join(stderr_after(w, 'Sensor trace-marker attached'))
+        assert 'the compiled model could not be run' not in log
+
     def test_the_start_config_record_sets_the_first_read(self, worker):
         w = worker(sensors=[record(**PANEL)])
         write_reg(w, PWR_MGMT_1, 0x00)

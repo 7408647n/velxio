@@ -188,6 +188,9 @@ class TestCompiledModelParity(unittest.TestCase):
             if device == 'bmp280':
                 model, twin = cls(wasm), BMP280Slave()
                 first = 0
+            elif device == 'mpu6050':
+                model, twin = cls(wasm), MPU6050Slave()
+                first = 0
             else:
                 model = cls(wasm, clock=clock)
                 twin = TWINS[device][0]({}, clock=clock)

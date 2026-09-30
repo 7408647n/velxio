@@ -120,6 +120,7 @@ try:
         find_build_times as _find_build_times,
         rtc_slave as _rtc_slave,
         bmp280_slave as _bmp280_slave,
+        mpu6050_slave as _mpu6050_slave,
     )
 except ImportError:
     # Fallback: direct import when running from backend/ directory as subprocess
@@ -139,6 +140,7 @@ except ImportError:
     _find_build_times = _mod.find_build_times  # type: ignore[assignment]
     _rtc_slave = _mod.rtc_slave  # type: ignore[assignment]
     _bmp280_slave = _mod.bmp280_slave  # type: ignore[assignment]
+    _mpu6050_slave = _mod.mpu6050_slave  # type: ignore[assignment]
 
 # The table those slaves answer from, by (controller, address) and removed by
 # identity (project board-buses-2026-09, F5). Same fallback dance.
@@ -1944,7 +1946,7 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                 note = ''
 
             slave_type_name = type(slave).__name__
-            if slave_type_name == 'MPU6050Slave':
+            if slave_type_name in ('MPU6050Slave', 'WasmMPU6050Slave'):
                 seq = _i2c_event_seq
                 n   = seq[addr] = seq.get(addr, 0) + 1
                 _log(f'I2C #{n:03d} bus={bus_id} addr=0x{addr:02x} {op_name} {note}')
@@ -3092,12 +3094,12 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             # so _on_i2c_event can find it when the firmware's Wire.begin() runs.
             elif sensor_type == 'mpu6050':
                 i2c_addr = _MPU6050Slave.address_of(s)
-                # On the guest's clock, the one the chips' timers run on.
-                slave = _MPU6050Slave(i2c_addr, now_ns=_guest_clock_ns,
-                                      variant=s.get('variant'))
-                # The record carries where the panel's sliders are, so the
-                # first read is already theirs and not the twin's own rest.
-                slave.update(**s)
+                # On the guest's clock, the one the chips' timers run on: the
+                # part's compiled model when the record carries it
+                # (buses/models/mpu6050.c), the twin otherwise. The record
+                # carries where the panel's sliders are, so the first read is
+                # already theirs and not the model's own rest.
+                slave = _mpu6050_slave(s, now_ns=_guest_clock_ns)
                 _i2c_add(gpio, s, slave, i2c_addr)
                 _mpu_int_attach(sensor_data, slave, s)
                 sensor_data['i2c_addr'] = i2c_addr
@@ -3437,9 +3439,7 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                         pass
                 elif sensor_type == 'mpu6050':
                     i2c_addr = _MPU6050Slave.address_of(cmd)
-                    slave = _MPU6050Slave(i2c_addr, now_ns=_guest_clock_ns,
-                                          variant=cmd.get('variant'))
-                    slave.update(**cmd)
+                    slave = _mpu6050_slave(cmd, now_ns=_guest_clock_ns)
                     _i2c_add(gpio, cmd, slave, i2c_addr)
                     _mpu_int_attach(sensor_data, slave, cmd)
                     sensor_data['i2c_addr'] = i2c_addr

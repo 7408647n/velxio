@@ -4,11 +4,12 @@
  *
  * The microSD card already runs as ONE model in C (buses/models/microsd.c)
  * that the tab, the QEMU workers and the Linux-board host all run. The two
- * real-time clocks and the BMP280 now do too: buses/models/ds1307.c and
- * ds3231.c (on the shared buses/models/rtc.h) and bmp280.c, hosted here by
- * ChipRuntime in place of VirtualDS1307, VirtualDS3231 and VirtualBMP280, and
- * in the worker from the same bytes (backend/app/services/wasm_i2c_models.py),
- * which the part puts in the worker's record (`wasmB64`).
+ * real-time clocks, the BMP280 and the MPU-6050 now do too:
+ * buses/models/ds1307.c and ds3231.c (on the shared buses/models/rtc.h),
+ * bmp280.c and mpu6050.c, hosted here by ChipRuntime in place of
+ * VirtualDS1307, VirtualDS3231, VirtualBMP280 and VirtualMPU6050, and in the
+ * worker from the same bytes (backend/app/services/wasm_i2c_models.py), which
+ * the part puts in the worker's record (`wasmB64`).
  *
  * On by default. `?i2cwasm=off` or localStorage `velxio.i2cwasm = 'off'` goes
  * back to the hand-written models in both hosts; a comma list
@@ -24,6 +25,7 @@
 import { ChipInstance } from '../customChips/ChipRuntime';
 import { PinManager } from '../PinManager';
 import { I2C_MODEL_WASM_B64 } from '../buses/models/i2cModelBytes.generated';
+import type { GuestClock } from '../buses/types';
 import {
   DS1307_RULES,
   DS3231_RULES,
@@ -36,7 +38,7 @@ import {
 export type WasmI2cModelName = keyof typeof I2C_MODEL_WASM_B64;
 
 /** The models that run compiled unless the flag says otherwise. */
-const DEFAULT_ON: readonly WasmI2cModelName[] = ['ds1307', 'ds3231', 'bmp280'];
+const DEFAULT_ON: readonly WasmI2cModelName[] = ['ds1307', 'ds3231', 'bmp280', 'mpu6050'];
 /** Flag values that name no model at all. */
 const OFF = new Set(['off', 'none', '0', 'false']);
 
@@ -357,6 +359,254 @@ export class WasmBMP280 implements I2CDevice {
   dumpRegisters(): Uint8Array {
     const ptr = (this.chip.exports.chip_dump_registers as () => number)();
     return new Uint8Array(this.chip.memory!.buffer, ptr, 256).slice();
+  }
+
+  dispose(): void {
+    this.chip.dispose();
+  }
+}
+
+/** What the MPU-6050's INT pad does to its line: it drives it, or lets go (open drain). */
+type MpuIntPad = 'high' | 'low' | 'z';
+const MPU_PADS: readonly MpuIntPad[] = ['low', 'high', 'z'];
+/** The panel's names, in the order of mpu_io.inputs (mpu6050.c). */
+const MPU_INPUT_KEYS = ['accelX', 'accelY', 'accelZ', 'gyroX', 'gyroY', 'gyroZ', 'temp'] as const;
+type MpuInputKey = (typeof MPU_INPUT_KEYS)[number];
+/** mpu_io in mpu6050.c. */
+const MPU_IO = {
+  now: 0,
+  inputs: 8,
+  notBefore: 64,
+  wake: 72,
+  address: 80,
+  variant: 84,
+  asleepReads: 88,
+  dmpUnknown: 92,
+  intHint: 96,
+  size: 112,
+} as const;
+
+/** The entries of mpu6050.c the tab calls besides the bus. */
+interface MpuExports {
+  chip_sync: () => void;
+  chip_restart_sampling: () => void;
+  chip_int_pad: () => number;
+  chip_int_wake: () => number;
+  chip_dump_registers: () => number;
+}
+
+export interface WasmMpu6050Options {
+  address: number;
+  /** The die: 'mpu6050', or 'mpu9250' (MPU6050_RULES.variants). */
+  variant: string;
+  /** What a copy of dumpRegisters() cannot answer (MPU6050_RULES.volatile_reads). */
+  volatileReads: readonly number[];
+  /** The ports the pointer stays on (MPU6050_RULES.pointer_stays). */
+  pointerStays: readonly number[];
+}
+
+/**
+ * The MPU-6050 from buses/models/mpu6050.c, in place of VirtualMPU6050, with
+ * its API: the panel's values, the guest's clock the chip samples on, the
+ * INT pad the part puts on the board pin (intPad, intWakeNs, onIntChange),
+ * the notes to the board's monitor (read asleep, a DMP image it does not
+ * run), and the register dump and the lists the Pi relay mirrors by.
+ *
+ * The guest's time is pushed into the model's `mpu_io` (the export
+ * chip_inputs) before every call, and the panel's values when they move; the
+ * model counts in it what the part tells the monitor and when the pad may
+ * have moved, which this reads back after every call.
+ */
+export class WasmMPU6050 implements I2CDevice {
+  public address: number;
+  /** The sample block was read while the chip sleeps, for the first time in this run. */
+  onAsleepRead: (() => void) | null = null;
+  /** The sketch started the DMP on an image the model does not know, for the first time in this run. */
+  onDmpUnknown: (() => void) | null = null;
+  /** What the INT pad does, or when it moves next, may have changed. */
+  onIntChange: (() => void) | null = null;
+  readonly volatileReads: readonly number[];
+  readonly pointerStays: readonly number[];
+
+  private readonly chip: ChipInstance;
+  private readonly dev: NonNullable<ReturnType<ChipInstance['i2cDevice']>>;
+  private readonly ioAt: number;
+  private view: DataView | null = null;
+  private clock: GuestClock | null = null;
+  private readonly inputs: Record<MpuInputKey, number> = {
+    accelX: 0,
+    accelY: 0,
+    accelZ: 1,
+    gyroX: 0,
+    gyroY: 0,
+    gyroZ: 0,
+    temp: 24,
+  };
+  private asleepReads = 0;
+  private dmpUnknown = 0;
+  private intHint = 0;
+  private asleepReadSaid = false;
+  private dmpUnknownSaid = false;
+  private readonly exports: MpuExports;
+
+  constructor(module: WebAssembly.Module, options: WasmMpu6050Options) {
+    this.address = options.address;
+    this.volatileReads = options.volatileReads;
+    this.pointerStays = options.pointerStays;
+    this.chip = ChipInstance.createSync({ wasm: module, pinManager: new PinManager() });
+    this.exports = this.chip.exports as unknown as MpuExports;
+    this.ioAt = (this.chip.exports.chip_inputs as () => number)();
+    const io = this.io();
+    io.setUint32(MPU_IO.address, this.address, true);
+    io.setUint32(MPU_IO.variant, options.variant === 'mpu9250' ? 1 : 0, true);
+    this.writeInputs();
+    // No clock until the part is placed on a board's bus (setClock).
+    io.setFloat64(MPU_IO.now, NaN, true);
+    this.chip.start();
+    const dev = this.chip.i2cDevice(this.address);
+    if (!dev) throw new Error(`the MPU-6050 model attached no I2C device at 0x${this.address.toString(16)}`);
+    this.dev = dev;
+  }
+
+  /** mpu_io, re-read if the memory ever grew under it. */
+  private io(): DataView {
+    const buffer = this.chip.memory!.buffer;
+    if (this.view === null || this.view.buffer !== buffer) {
+      this.view = new DataView(buffer, this.ioAt, MPU_IO.size);
+    }
+    return this.view;
+  }
+
+  private writeInputs(): void {
+    const io = this.io();
+    MPU_INPUT_KEYS.forEach((key, i) => io.setFloat64(MPU_IO.inputs + 8 * i, this.inputs[key], true));
+  }
+
+  /** The guest's time in ns (VirtualMPU6050.nowNs), NaN on a board that keeps none. */
+  private pushClock(): void {
+    const clock = this.clock;
+    const hz = clock ? clock.clockHz() : 0;
+    // Multiplied first: a whole number of ns comes out whole.
+    const now = clock && hz > 0 ? (clock.now() * 1e9) / hz : NaN;
+    this.io().setFloat64(MPU_IO.now, now, true);
+  }
+
+  /** What the model counted during the call, told to the part as VirtualMPU6050 tells it. */
+  private heard(): void {
+    const io = this.io();
+    const asleep = io.getUint32(MPU_IO.asleepReads, true);
+    if (asleep !== this.asleepReads) {
+      this.asleepReads = asleep;
+      if (!this.asleepReadSaid) {
+        this.asleepReadSaid = true;
+        this.onAsleepRead?.();
+      }
+    }
+    const unknown = io.getUint32(MPU_IO.dmpUnknown, true);
+    if (unknown !== this.dmpUnknown) {
+      this.dmpUnknown = unknown;
+      if (!this.dmpUnknownSaid) {
+        this.dmpUnknownSaid = true;
+        this.onDmpUnknown?.();
+      }
+    }
+    const hint = io.getUint32(MPU_IO.intHint, true);
+    if (hint !== this.intHint) {
+      this.intHint = hint;
+      this.onIntChange?.();
+    }
+  }
+
+  /** The clock of the board the chip is on, or null when it is on no bus. */
+  setClock(clock: GuestClock | null): void {
+    this.clock = clock;
+    this.pushClock();
+    this.exports.chip_restart_sampling();
+    this.heard();
+  }
+
+  get guestClock(): GuestClock | null {
+    return this.clock;
+  }
+
+  /** The panel moved. Only the values it names change. */
+  setInputs(values: Record<string, unknown>): void {
+    // The samples due until now were taken of the world as it was.
+    this.pushClock();
+    this.exports.chip_sync();
+    for (const key of MPU_INPUT_KEYS) {
+      const v = values[key];
+      if (typeof v === 'number' && Number.isFinite(v)) this.inputs[key] = v;
+    }
+    this.writeInputs();
+    this.heard();
+  }
+
+  getInputs(): Record<MpuInputKey, number> {
+    return { ...this.inputs };
+  }
+
+  start(read: boolean): void {
+    this.pushClock();
+    this.dev.connect(this.address, read);
+    this.heard();
+  }
+
+  writeByte(value: number): boolean {
+    this.pushClock();
+    const ack = this.dev.writeByte(value);
+    this.heard();
+    return ack;
+  }
+
+  readByte(): number {
+    this.pushClock();
+    const value = this.dev.readByte();
+    this.heard();
+    return value;
+  }
+
+  stop(): void {
+    this.dev.stop();
+  }
+
+  /**
+   * A new run reads a chip that is still asleep: its monitor is told again.
+   * The periods are counted from where the guest's counter stands now.
+   */
+  boardReset(): void {
+    this.asleepReadSaid = false;
+    this.dmpUnknownSaid = false;
+    this.pushClock();
+    this.exports.chip_restart_sampling();
+    this.heard();
+  }
+
+  /** The registers as a read would find them now, for a host that answers from a copy. */
+  dumpRegisters(): Uint8Array {
+    this.pushClock();
+    const ptr = this.exports.chip_dump_registers();
+    const out = new Uint8Array(this.chip.memory!.buffer, ptr, 256).slice();
+    this.heard();
+    return out;
+  }
+
+  /** What the INT pad does at this instant. */
+  intPad(): MpuIntPad {
+    this.pushClock();
+    const pad = MPU_PADS[this.exports.chip_int_pad()];
+    this.heard();
+    return pad;
+  }
+
+  /** The guest time, in ns, at which the pad moves next with nobody touching the chip. */
+  intWakeNs(): number | null {
+    this.pushClock();
+    const io = this.io();
+    io.setFloat64(MPU_IO.notBefore, NaN, true);
+    const some = this.exports.chip_int_wake();
+    this.heard();
+    return some ? io.getFloat64(MPU_IO.wake, true) : null;
   }
 
   dispose(): void {

@@ -36,6 +36,7 @@ try:
         DS1307Slave as _DS1307Slave, DS3231Slave as _DS3231Slave,
         I2CWriteSink as _I2CWriteSink, find_build_times as _find_build_times,
         rtc_slave as _rtc_slave, bmp280_slave as _bmp280_slave,
+        mpu6050_slave as _mpu6050_slave,
     )
 except ImportError:
     import importlib.util as _ilu, pathlib as _pl, sys as _sys
@@ -50,6 +51,7 @@ except ImportError:
     _find_build_times = _mod.find_build_times
     _rtc_slave = _mod.rtc_slave
     _bmp280_slave = _mod.bmp280_slave
+    _mpu6050_slave = _mod.mpu6050_slave
 
 _stdout_lock = threading.Lock()
 
@@ -188,11 +190,10 @@ def main() -> None:
         stype = s.get('sensor_type', '')
         if stype == 'mpu6050':
             addr = _MPU6050Slave.address_of(s)
-            sl = _MPU6050Slave(addr, now_ns=_guest_clock_ns, variant=s.get('variant'))
-            # The record carries where the panel's sliders are, so the first
-            # read is already theirs and not the twin's own rest.
-            sl.update(**s)
-            _i2c_slaves[addr] = sl
+            # The part's compiled model when the record carries it
+            # (buses/models/mpu6050.c), the twin otherwise, on the guest's
+            # clock and already at the panel's values.
+            _i2c_slaves[addr] = _mpu6050_slave(s, now_ns=_guest_clock_ns)
         elif stype == 'bmp280':
             # The part's compiled model when the record carries it
             # (buses/models/bmp280.c), the twin otherwise, at the panel's values.

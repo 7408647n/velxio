@@ -203,7 +203,8 @@ describe('the compiled clocks: on by default, and the flag that turns them off',
   it('both clocks run compiled unless the flag says otherwise', () => {
     expect(wasmI2cModelEnabled('ds1307')).toBe(true);
     expect(wasmI2cModelEnabled('ds3231')).toBe(true);
-    expect(wasmI2cModelEnabled('mpu6050')).toBe(false);
+    // A chip with no compiled model (the MPU-6050 has one since P5 step 3).
+    expect(wasmI2cModelEnabled('ssd1306')).toBe(false);
   });
 
   it('?i2cwasm=off turns every model off, and a list names the ones that stay', () => {

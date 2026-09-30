@@ -43,6 +43,7 @@ import {
   WasmBMP280,
   WasmDS1307,
   WasmDS3231,
+  WasmMPU6050,
   wasmI2cModelB64,
   wasmI2cModelEnabled,
   wasmI2cModule,
@@ -675,13 +676,13 @@ function firmwareBuildTimes(): RtcDateTime[] {
 
 /**
  * The compiled model of an I2C chip (buses/models/ds1307.c, ds3231.c,
- * bmp280.c) and the bytes the worker's record carries so the worker runs the
- * same one (project i2c-model-fidelity-2026-09, P5). Null when the i2cwasm
- * flag turns it off or it cannot be built: then the part keeps its
- * hand-written model and the worker its Python twin.
+ * bmp280.c, mpu6050.c) and the bytes the worker's record carries so the
+ * worker runs the same one (project i2c-model-fidelity-2026-09, P5). Null
+ * when the i2cwasm flag turns it off or it cannot be built: then the part
+ * keeps its hand-written model and the worker its Python twin.
  */
 function compiledModel(
-  name: 'ds1307' | 'ds3231' | 'bmp280',
+  name: 'ds1307' | 'ds3231' | 'bmp280' | 'mpu6050',
 ): { module: WebAssembly.Module; b64: string } | null {
   if (!wasmI2cModelEnabled(name)) return null;
   const module = wasmI2cModule(name);
@@ -1213,6 +1214,22 @@ function mpuDmpPacket(
 export type Mpu6050IntPad = 'high' | 'low' | 'z';
 
 /**
+ * What the part needs of an MPU-6050 model: VirtualMPU6050 below, or the
+ * compiled buses/models/mpu6050.c (WasmMPU6050, simulation/parts/
+ * wasmI2cModels.ts) that the part runs by default.
+ */
+export interface Mpu6050Model extends I2CDevice {
+  onAsleepRead: (() => void) | null;
+  onDmpUnknown: (() => void) | null;
+  onIntChange: (() => void) | null;
+  setInputs(values: Record<string, unknown>): void;
+  getInputs(): Mpu6050Inputs;
+  intPad(): Mpu6050IntPad;
+  intWakeNs(): number | null;
+  readonly guestClock: GuestClock | null;
+}
+
+/**
  * A physical value as the counts of a 16-bit output register. Half a count
  * rounds away from zero, so a tilt one way and the same tilt the other way
  * read the same size (Math.round sends -65.5 to -65), and what does not fit
@@ -1268,7 +1285,7 @@ function mpuCounts(value: number): number {
  *    it does not know writes nothing, and the monitor is told once per run
  *    (onDmpUnknown).
  */
-export class VirtualMPU6050 implements I2CDevice {
+export class VirtualMPU6050 implements Mpu6050Model {
   address: number;
   /** The sample block was read while the chip sleeps, for the first time in this run. */
   onAsleepRead: (() => void) | null = null;
@@ -1977,7 +1994,7 @@ export function mpu6050Address(ad0Property: unknown, componentId: string | undef
  * cycle. While no interrupt is enabled nothing is armed at all.
  */
 function hostMpu6050Int(
-  device: VirtualMPU6050,
+  device: Mpu6050Model,
   simulator: AnySimulator,
   pin: number,
   componentId: string,
@@ -2057,7 +2074,25 @@ PartSimulationRegistry.register('mpu6050', {
     const el = element as any;
     const addr = mpu6050Address(el.ad0, componentId);
     const variant = parseMpuVariant(el.variant);
-    const device = new VirtualMPU6050(addr, variant);
+    // buses/models/mpu6050.c, the model the worker runs too (project
+    // i2c-model-fidelity-2026-09, P5); VirtualMPU6050 behind the i2cwasm flag,
+    // and for a model that cannot be built.
+    let compiled = compiledModel('mpu6050');
+    let device: Mpu6050Model;
+    try {
+      device = compiled
+        ? new WasmMPU6050(compiled.module, {
+            address: addr,
+            variant,
+            volatileReads: mpuRegistersOf(MPU6050_RULES.volatile_reads),
+            pointerStays: mpuRegistersOf(MPU6050_RULES.pointer_stays),
+          })
+        : new VirtualMPU6050(addr, variant);
+    } catch (e) {
+      console.warn('[i2c-models] mpu6050: the compiled model could not start; the part keeps its own', e);
+      compiled = null;
+      device = new VirtualMPU6050(addr, variant);
+    }
     // The world starts where the panel's sliders do.
     device.setInputs(getSensorControl('mpu6050')?.defaultValues ?? {});
     // A board pin, not a rail (-1) and not a net between chips.
@@ -2077,6 +2112,7 @@ PartSimulationRegistry.register('mpu6050', {
           ...device.getInputs(),
           ...(intPin !== null ? { int_pin: intPin } : {}),
           ...(variant !== 'mpu6050' ? { variant } : {}),
+          ...(compiled ? { wasmB64: compiled.b64 } : {}),
         },
       },
     });
@@ -2108,6 +2144,7 @@ PartSimulationRegistry.register('mpu6050', {
       releaseInt?.();
       part.dispose();
       unregisterSensorUpdate(componentId);
+      if (device instanceof WasmMPU6050) device.dispose();
     };
   },
 });

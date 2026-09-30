@@ -17,12 +17,18 @@ export interface VectorStep {
   rw?: string;
   at?: string;
   values?: Record<string, number>;
+  /** `advance`: microseconds of guest time (decimal). */
+  us?: number;
 }
 
 export interface BusVector {
   name: string;
   spec: string;
   driver?: string;
+  /** False: the host keeps no guest time. Otherwise it stands at 0 until `advance`. */
+  clock?: boolean;
+  /** The die the model is built as (the MPU-6050's `variant`). */
+  variant?: string;
   steps: VectorStep[];
 }
 
@@ -48,6 +54,10 @@ export interface VectorHost {
   inputs(values: Record<string, number>): void;
   /** Absent on a model with no dump: its `dump` steps are skipped. */
   dump?(): Uint8Array;
+  /** Move the guest's time on; a vector that does is refused without it. */
+  advanceUs?(us: number): void;
+  /** What the INT pad does; a host that cannot see it skips the step. */
+  intPad?(): string;
 }
 
 /** A file of test/fixtures/i2c-vectors, by name. */
@@ -132,6 +142,14 @@ export function replayVector(host: VectorHost, vector: BusVector, flavour: BusFl
         got = Array.from(host.dump().slice(at, at + hexBytes(step.expect!).length));
         break;
       }
+      case 'advance':
+        expect(host.advanceUs, `step ${i}: time moves in a vector with no clock`).toBeDefined();
+        host.advanceUs!(step.us!);
+        break;
+      case 'int':
+        if (host.intPad)
+          expect(host.intPad(), `step ${i} ${JSON.stringify(step)}`).toBe(step.expect);
+        break;
       default:
         throw new Error(`step ${i}: unknown op "${step.op}"`);
     }

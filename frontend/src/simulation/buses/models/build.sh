@@ -27,7 +27,7 @@ done
 
 out="$front/public/bus-chips"
 mkdir -p "$out"
-for name in microsd ds1307 ds3231 bmp280; do
+for name in microsd ds1307 ds3231 bmp280 mpu6050; do
   "$clang" --target=wasm32-unknown-wasip1 -O2 -nostartfiles \
     -Wl,--import-memory -Wl,--export-table -Wl,--no-entry \
     -Wl,--export=chip_setup -Wl,--allow-undefined \
@@ -62,7 +62,7 @@ for (const n of names) {
   if (inc.length) out[n].includeSha256 = Object.fromEntries(inc.map((f) => [f, h(`${here}/${f}`)]));
 }
 writeFileSync(`${here}/manifest.json`, JSON.stringify(out, null, 2) + "\n");
-' "$here" microsd ds1307 ds3231 bmp280
+' "$here" microsd ds1307 ds3231 bmp280 mpu6050
 
 # The I2C register models are also compiled into the bundle, as base64: a part
 # attaches synchronously and answers the first START, so its model cannot wait
@@ -80,5 +80,5 @@ const lines = [
   "",
 ];
 writeFileSync(`${here}/i2cModelBytes.generated.ts`, lines.join("\n"));
-' "$here" "$out" ds1307 ds3231 bmp280
+' "$here" "$out" ds1307 ds3231 bmp280 mpu6050
 echo "built: $(ls "$out"/*.wasm | xargs -n1 basename | tr '\n' ' ')"

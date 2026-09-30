@@ -39,6 +39,7 @@ import {
   WasmBMP280,
   WasmDS1307,
   WasmDS3231,
+  WasmMPU6050,
   wasmI2cModelEnabled,
   wasmI2cModule,
 } from '../simulation/parts/wasmI2cModels';
@@ -150,7 +151,22 @@ const COMPILED_MODELS: Record<string, CompiledModel> = {
   bmp280: { make: (m) => new WasmBMP280(m, 0x76), replayedBy: 'bmp280-vectors-wasm.test.ts' },
   ds1307: { make: (m) => new WasmDS1307(m, { clock: () => 0 }), replayedBy: 'rtc-vectors-wasm.test.ts' },
   ds3231: { make: (m) => new WasmDS3231(m, { clock: () => 0 }), replayedBy: 'rtc-vectors-wasm.test.ts' },
+  mpu6050: {
+    make: (m) =>
+      new WasmMPU6050(m, {
+        address: 0x68,
+        variant: 'mpu6050',
+        volatileReads: registersOfRules(MPU6050_RULES.volatile_reads),
+        pointerStays: registersOfRules(MPU6050_RULES.pointer_stays),
+      }),
+    replayedBy: 'mpu6050-vectors-wasm.test.ts',
+  },
 };
+
+/** The registers of inclusive ranges of a rules table, as the part hands them to its model. */
+function registersOfRules(ranges: readonly (readonly [number, number])[]): number[] {
+  return ranges.flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i));
+}
 
 interface VectorFile {
   device: string;

@@ -2497,6 +2497,9 @@ describe('mpu6050 — ESP32 path', () => {
       temp: 24,
       addr: 0x68,
       owner: 'imu-q1',
+      // The compiled model the tab runs, which the worker runs too
+      // (buses/models/mpu6050.c; mpu6050-vectors-wasm.test.ts).
+      wasmB64: expect.any(String),
     });
   });
 

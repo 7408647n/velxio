@@ -2141,6 +2141,20 @@ def rtc_slave(sensor_type: str, record: dict, build_times=None):
     return cls(record, build_times=build_times)
 
 
+def mpu6050_slave(record: dict, now_ns=None):
+    """The worker's copy of an MPU-6050, from the part's record, at the
+    address the tab resolved and already at the panel's values: the compiled
+    model (wasm_i2c_models.WasmMPU6050Slave, buses/models/mpu6050.c) when the
+    record carries it, MPU6050Slave otherwise (_compiled_slave). `now_ns` is
+    the guest's clock the chip samples on (None where the worker has none)."""
+    compiled = _compiled_slave('mpu6050', record, now_ns=now_ns)
+    if compiled is not None:
+        return compiled
+    slave = MPU6050Slave(mpu6050_address(record), now_ns=now_ns, variant=record.get('variant'))
+    slave.update(**record)
+    return slave
+
+
 def bmp280_slave(record: dict):
     """The worker's copy of a BMP280, from the part's record, already at the
     panel's values: the compiled model (wasm_i2c_models.WasmBMP280Slave,
