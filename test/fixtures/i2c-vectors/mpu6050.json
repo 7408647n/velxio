@@ -11,9 +11,10 @@
     "gyro_lsb_per_dps": [131, 65.5, 32.8, 16.4],
     "gyro_offset_lsb_per_dps": 32.8,
     "accel_offset_lsb_per_g": 2048,
+    "accel_offs_reg": [6, 8, 10],
     "temp_lsb_per_c": 340,
     "temp_offset_c": 36.53,
-    "variants": { "mpu9250": { "who_am_i": 113, "temp_lsb_per_c": 333.87, "temp_offset_c": 21 } },
+    "variants": { "mpu9250": { "who_am_i": 113, "temp_lsb_per_c": 333.87, "temp_offset_c": 21, "accel_offs_reg": [119, 122, 125], "fifo_size": 512 } },
     "clear_on_read": { "3A": "FF" },
     "gyro_rate_hz": { "dlpf_off": 8000, "dlpf_on": 1000 },
     "cycle_rate_hz": [1.25, 5, 20, 40],
@@ -683,7 +684,7 @@
       ]
     },
     {
-      "name": "MPU-9250: WHO_AM_I reads 0x71 and the temperature is (T - 21) * 333.87, through a reset; the rest of the map is the MPU-6050 one",
+      "name": "MPU-9250: WHO_AM_I reads 0x71 and the temperature is (T - 21) * 333.87, through a reset",
       "spec": "RM-MPU-9250A-00 rev 1.6 sections 4.22 (TEMP_OUT) and 4.39 (WHO_AM_I 0x71); PS-MPU-9250A-01 section 3.4.2 (333.87 LSB per deg C, 21 deg C offset)",
       "variant": "mpu9250",
       "steps": [
@@ -697,6 +698,46 @@
         { "op": "read", "reg": "3F", "n": 2, "expect": "08 00" },
         { "op": "write", "data": "6B 80" },
         { "op": "read", "reg": "75", "n": 1, "expect": "71" }
+      ]
+    },
+    {
+      "name": "MPU-9250: the accelerometer offsets are XA/YA/ZA_OFFSET at 0x77-0x78, 0x7A-0x7B, 0x7D-0x7E, holding the factory trims; 0x06-0x0B read 0x00 and move nothing; DEVICE_RESET restores the trims",
+      "spec": "RM-MPU-9250A-00 rev 1.4 section 3 (register map: no 0x03-0x0C accelerometer trims, XA_OFFSET_H at 0x77) and 4.39 (+-16 g format, 15 bits, bit 0 of the low byte reserved); Kris Winer calibrateMPU9250() reads the factory trims there",
+      "variant": "mpu9250",
+      "steps": [
+        { "op": "read", "reg": "06", "n": 6, "expect": "00*6" },
+        { "op": "read", "reg": "77", "n": 8, "expect": "FA 38 00 04 B3 00 05 DC" },
+        { "op": "write", "data": "6B 00" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "00 00" },
+        { "op": "write", "data": "06 FE 38" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "00 00" },
+        { "op": "write", "data": "77 FE 38" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "20 00" },
+        { "op": "write", "data": "77 FE 39" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "20 00" },
+        { "op": "write", "data": "7D 01 DC" },
+        { "op": "read", "reg": "3F", "n": 2, "expect": "20 00" },
+        { "op": "write", "data": "6B 80" },
+        { "op": "read", "reg": "77", "n": 8, "expect": "FA 38 00 04 B3 00 05 DC" }
+      ]
+    },
+    {
+      "name": "MPU-9250: the FIFO holds 512 bytes, the oldest go, FIFO_OFLOW_INT is raised when FIFO_OFLOW_EN is set",
+      "spec": "PS-MPU-9250A-01 rev 1.0 sections 3.1 and 4.17 (512-byte FIFO); RM-MPU-9250A-00 rev 1.4 section 4.36 (FIFO_CNT[12:0])",
+      "variant": "mpu9250",
+      "steps": [
+        { "op": "write", "data": "6B 00" },
+        { "op": "write", "data": "38 10" },
+        { "op": "write", "data": "23 08" },
+        { "op": "write", "data": "6A 40" },
+        { "op": "advance", "us": 10625 },
+        { "op": "read", "reg": "72", "n": 2, "expect": "01 FE" },
+        { "op": "read", "reg": "3A", "n": 1, "expect": "00" },
+        { "op": "advance", "us": 125 },
+        { "op": "read", "reg": "72", "n": 2, "expect": "02 00" },
+        { "op": "read", "reg": "3A", "n": 1, "expect": "10" },
+        { "op": "read", "reg": "74", "n": 6, "expect": "40 00 00 00 00 00" },
+        { "op": "read", "reg": "72", "n": 2, "expect": "01 FA" }
       ]
     }
   ]

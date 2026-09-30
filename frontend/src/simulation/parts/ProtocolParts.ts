@@ -634,6 +634,12 @@ export const MPU6050_RULES = {
    */
   gyro_offset_lsb_per_dps: 32.8,
   accel_offset_lsb_per_g: 2048,
+  /**
+   * The high byte of the X, Y and Z accelerometer offset words, each word
+   * big-endian with its low byte behind it (XA_OFFS_H to ZA_OFFS_L, AN-OFFS
+   * 7.1). The factory trims of `power_on` are the bytes of these words.
+   */
+  accel_offs_reg: [0x06, 0x08, 0x0a],
   /** TEMP_OUT = (T - 36.53) * 340 (4.18). */
   temp_lsb_per_c: 340,
   temp_offset_c: 36.53,
@@ -642,10 +648,21 @@ export const MPU6050_RULES = {
    * `variant` property. The MPU-9250 (the Grove IMU 9DOF v2.0 and 10DOF
    * bricks) answers WHO_AM_I 0x71 and reads TEMP_OUT = (T - 21) * 333.87
    * (RM-MPU-9250A-00 rev 1.6, sections 4.22 and 4.39; PS-MPU-9250A-01 3.4.2).
-   * Its AK8963 magnetometer is not modelled.
+   * Its accelerometer offsets are XA/YA/ZA_OFFSET_H/L at 0x77-0x78,
+   * 0x7A-0x7B and 0x7D-0x7E, in the same +-16 g format with bit 0 reserved,
+   * and 0x06-0x0B are not in its map (RM-MPU-9250A-00 rev 1.4, sections 3
+   * and 4.39); the factory trims are loaded there, as Kris Winer's
+   * calibrateMPU9250() reads them back. Its FIFO holds 512 bytes (PS
+   * section 3.1, RM 4.17). Its AK8963 magnetometer is not modelled.
    */
   variants: {
-    mpu9250: { who_am_i: 0x71, temp_lsb_per_c: 333.87, temp_offset_c: 21 },
+    mpu9250: {
+      who_am_i: 0x71,
+      temp_lsb_per_c: 333.87,
+      temp_offset_c: 21,
+      accel_offs_reg: [0x77, 0x7a, 0x7d],
+      fifo_size: 512,
+    },
   },
   /**
    * Bits a read of the register takes with it: "each bit will clear after
@@ -722,8 +739,6 @@ const MPU6050_INPUT_KEYS = [
   'temp',
 ] as const;
 
-/** XA_OFFS_H: three signed words, X, Y, Z, of accelerometer trim. */
-const MPU_XA_OFFS = 0x06;
 /** XG_OFFS_USR_H: three signed words, X, Y, Z, of gyro offset. */
 const MPU_XG_OFFS_USR = 0x13;
 const MPU_SMPLRT_DIV = 0x19;
@@ -796,12 +811,15 @@ const MPU_STBY_FIELDS: ReadonlyArray<readonly [number, number]> = [
 const MPU_TEMP_FIELD = 0x08;
 const MPU_ALL_FIELDS = 0x7f;
 
-/** The accelerometer trims as words, by the register of their high byte. */
-const MPU_FACTORY_TRIM: Record<number, number> = {};
-for (const at of [MPU_XA_OFFS, MPU_XA_OFFS + 2, MPU_XA_OFFS + 4]) {
-  const p = MPU6050_RULES.power_on as Record<number, number>;
-  MPU_FACTORY_TRIM[at] = (((p[at] ?? 0) << 8) | (p[at + 1] ?? 0)) << 16 >> 16;
-}
+/**
+ * The accelerometer's factory trims, X, Y, Z, as the power-on bytes of the
+ * MPU-6050's offset words: [high byte, low byte].
+ */
+const MPU_FACTORY_TRIM: ReadonlyArray<readonly [number, number]> =
+  MPU6050_RULES.accel_offs_reg.map((at) => {
+    const p = MPU6050_RULES.power_on as Record<number, number>;
+    return [p[at] ?? 0, p[at + 1] ?? 0] as const;
+  });
 const MPU_READ_ONLY = new Uint8Array(256);
 for (const [first, last] of MPU6050_RULES.read_only) MPU_READ_ONLY.fill(1, first, last + 1);
 const MPU_SELF_CLEARING = new Uint8Array(256);
@@ -863,9 +881,10 @@ function mpuCounts(value: number): number {
  *    one period passes per register pointer the sketch writes, so a driver
  *    that waits for DATA_RDY still finds it.
  *  - With USER_CTRL.FIFO_EN set, each sample also pushes the sources FIFO_EN
- *    selects into a 1024-byte FIFO, in register order. FIFO_COUNT is latched
- *    when its high byte is read, and FIFO_R_W pops a byte per read without
- *    moving the pointer (an empty FIFO repeats the last one), so the FIFO
+ *    selects into the FIFO (1024 bytes, 512 on the MPU-9250), in register
+ *    order. FIFO_COUNT is latched when its high byte is read, and FIFO_R_W
+ *    pops a byte per read without moving the pointer (an empty FIFO repeats
+ *    the last one), so the FIFO
  *    calibrations of FastIMU and Kris Winer average real packets instead of
  *    dividing by a count of zero.
  *  - BANK_SEL, MEM_START_ADDR and MEM_R_W reach 32 banks of DMP memory, the
@@ -921,8 +940,8 @@ export class VirtualMPU6050 implements I2CDevice {
   private periodNs = 0;
   /** Where the INT pulse of the last sample ends; null when there is none. */
   private pulseEndNs: number | null = null;
-  /** The FIFO: a ring of fifo_size bytes, `fifoCount` of them from `fifoHead`. */
-  private readonly fifo = new Uint8Array(MPU6050_RULES.fifo_size);
+  /** The FIFO: a ring of the die's fifo_size bytes, `fifoCount` of them from `fifoHead`. */
+  private readonly fifo: Uint8Array;
   private fifoHead = 0;
   private fifoCount = 0;
   /** What an empty FIFO answers: the byte read last (4.31). */
@@ -930,8 +949,14 @@ export class VirtualMPU6050 implements I2CDevice {
   private readonly dmpMem = new Uint8Array(MPU6050_RULES.dmp_banks * 256);
   private dmpUploadSaid = false;
 
-  /** WHO_AM_I and the temperature line of the die (MPU6050_RULES.variants). */
-  private readonly die: { who_am_i: number; temp_lsb_per_c: number; temp_offset_c: number };
+  /** What the die changes of the MPU-6050's map (MPU6050_RULES.variants). */
+  private readonly die: {
+    who_am_i: number;
+    temp_lsb_per_c: number;
+    temp_offset_c: number;
+    accel_offs_reg: readonly number[];
+    fifo_size: number;
+  };
 
   constructor(address: number, variant: Mpu6050Variant = 'mpu6050') {
     this.address = address;
@@ -941,8 +966,11 @@ export class VirtualMPU6050 implements I2CDevice {
             who_am_i: MPU6050_RULES.power_on[0x75],
             temp_lsb_per_c: MPU6050_RULES.temp_lsb_per_c,
             temp_offset_c: MPU6050_RULES.temp_offset_c,
+            accel_offs_reg: MPU6050_RULES.accel_offs_reg,
+            fifo_size: MPU6050_RULES.fifo_size,
           }
         : MPU6050_RULES.variants[variant];
+    this.fifo = new Uint8Array(this.die.fifo_size);
     this.powerOn();
   }
 
@@ -1258,6 +1286,10 @@ export class VirtualMPU6050 implements I2CDevice {
     for (const [reg, value] of Object.entries(MPU6050_RULES.power_on)) {
       this.regs[Number(reg)] = value;
     }
+    // The factory trims go to the offset registers of the die, and a die
+    // whose map has none at the MPU-6050's reads 0x00 there.
+    for (const at of MPU6050_RULES.accel_offs_reg) this.regs.fill(0, at, at + 2);
+    this.die.accel_offs_reg.forEach((at, axis) => this.regs.set(MPU_FACTORY_TRIM[axis], at));
     this.regs[MPU_WHO_AM_I] = this.die.who_am_i;
     this.held.fill(0);
     this.fifoEmpty();
@@ -1369,14 +1401,16 @@ export class VirtualMPU6050 implements I2CDevice {
     const gyro = MPU6050_RULES.gyro_lsb_per_dps[(regs[MPU_GYRO_CONFIG] >> 3) & 3];
     // Offsets act before the output registers, the FIFO and the DMP (AN-OFFS 4).
     const word = (reg: number) => ((regs[reg] << 8) | regs[reg + 1]) << 16 >> 16;
-    const trim = (reg: number) =>
-      (((word(reg) & ~1) - (MPU_FACTORY_TRIM[reg] & ~1)) * accel) /
+    const factory = (axis: number) =>
+      ((MPU_FACTORY_TRIM[axis][0] << 8) | MPU_FACTORY_TRIM[axis][1]) << 16 >> 16;
+    const trim = (axis: number) =>
+      (((word(this.die.accel_offs_reg[axis]) & ~1) - (factory(axis) & ~1)) * accel) /
       MPU6050_RULES.accel_offset_lsb_per_g;
     const drift = (reg: number) => (word(reg) * gyro) / MPU6050_RULES.gyro_offset_lsb_per_dps;
     const block = [
-      inputs.accelX * accel + trim(MPU_XA_OFFS),
-      inputs.accelY * accel + trim(MPU_XA_OFFS + 2),
-      inputs.accelZ * accel + trim(MPU_XA_OFFS + 4),
+      inputs.accelX * accel + trim(0),
+      inputs.accelY * accel + trim(1),
+      inputs.accelZ * accel + trim(2),
       (inputs.temp - this.die.temp_offset_c) * this.die.temp_lsb_per_c,
       inputs.gyroX * gyro + drift(MPU_XG_OFFS_USR),
       inputs.gyroY * gyro + drift(MPU_XG_OFFS_USR + 2),

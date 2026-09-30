@@ -78,6 +78,10 @@ MPU6050_RULES = {
     # counts from the factory trim, so the chip at power-on reads the panel.
     'gyro_offset_lsb_per_dps': 32.8,
     'accel_offset_lsb_per_g': 2048,
+    # The high byte of the X, Y and Z accelerometer offset words, each word
+    # big-endian with its low byte behind it (XA_OFFS_H to ZA_OFFS_L, AN-OFFS
+    # 7.1). The factory trims of `power_on` are the bytes of these words.
+    'accel_offs_reg': (0x06, 0x08, 0x0A),
     # TEMP_OUT = (T - 36.53) * 340 (4.18).
     'temp_lsb_per_c': 340,
     'temp_offset_c': 36.53,
@@ -85,9 +89,15 @@ MPU6050_RULES = {
     # `variant`. The MPU-9250 (the Grove IMU 9DOF v2.0 and 10DOF bricks)
     # answers WHO_AM_I 0x71 and reads TEMP_OUT = (T - 21) * 333.87
     # (RM-MPU-9250A-00 rev 1.6, sections 4.22 and 4.39; PS-MPU-9250A-01
-    # 3.4.2). Its AK8963 magnetometer is not modelled.
+    # 3.4.2). Its accelerometer offsets are XA/YA/ZA_OFFSET_H/L at 0x77-0x78,
+    # 0x7A-0x7B and 0x7D-0x7E, in the same +-16 g format with bit 0 reserved,
+    # and 0x06-0x0B are not in its map (RM-MPU-9250A-00 rev 1.4, sections 3
+    # and 4.39); the factory trims are loaded there, as Kris Winer's
+    # calibrateMPU9250() reads them back. Its FIFO holds 512 bytes (PS
+    # section 3.1, RM 4.17). Its AK8963 magnetometer is not modelled.
     'variants': {
-        'mpu9250': {'who_am_i': 0x71, 'temp_lsb_per_c': 333.87, 'temp_offset_c': 21},
+        'mpu9250': {'who_am_i': 0x71, 'temp_lsb_per_c': 333.87, 'temp_offset_c': 21,
+                    'accel_offs_reg': (0x77, 0x7A, 0x7D), 'fifo_size': 512},
     },
     # Bits a read of the register takes with it: "each bit will clear after
     # the register is read" (4.16). With INT_RD_CLEAR set in INT_PIN_CFG, a
@@ -133,7 +143,6 @@ _MPU_INPUT_NAMES = {
     'gyro_x': 'gyroX', 'gyro_y': 'gyroY', 'gyro_z': 'gyroZ',
 }
 
-_MPU_XA_OFFS        = 0x06   # three signed words of accelerometer trim
 _MPU_XG_OFFS_USR    = 0x13   # three signed words of gyro offset
 _MPU_SMPLRT_DIV     = 0x19
 _MPU_CONFIG         = 0x1A
@@ -250,11 +259,12 @@ def _mpu_word(regs, reg: int) -> int:
     return raw - 0x10000 if raw & 0x8000 else raw
 
 
-# The accelerometer trims as words, by the register of their high byte.
-_MPU_FACTORY_TRIM = {
-    at: _mpu_word([MPU6050_RULES['power_on'].get(r, 0) for r in range(256)], at)
-    for at in (_MPU_XA_OFFS, _MPU_XA_OFFS + 2, _MPU_XA_OFFS + 4)
-}
+# The accelerometer's factory trims, X, Y, Z, as the power-on bytes of the
+# MPU-6050's offset words: (high byte, low byte).
+_MPU_FACTORY_TRIM = tuple(
+    (MPU6050_RULES['power_on'].get(at, 0), MPU6050_RULES['power_on'].get(at + 1, 0))
+    for at in MPU6050_RULES['accel_offs_reg']
+)
 
 
 def _mpu_counts(value: float) -> int:
@@ -308,7 +318,8 @@ class MPU6050Slave:
         passes per register pointer the sketch writes, so a driver that waits
         for DATA_RDY still finds it.
       - With USER_CTRL.FIFO_EN set, each sample also pushes the sources
-        FIFO_EN selects into a 1024-byte FIFO, in register order. FIFO_COUNT
+        FIFO_EN selects into the FIFO (1024 bytes, 512 on the MPU-9250), in
+        register order. FIFO_COUNT
         is latched when its high byte is read, and FIFO_R_W pops a byte per
         read without moving the pointer (an empty FIFO repeats the last one).
       - BANK_SEL, MEM_START_ADDR and MEM_R_W reach 32 banks of DMP memory,
@@ -320,11 +331,13 @@ class MPU6050Slave:
 
     def __init__(self, addr: int = 0x68, now_ns=None, variant: str = 'mpu6050'):
         self.addr       = addr
-        # WHO_AM_I and the temperature line of the die.
+        # What the die changes of the MPU-6050's map.
         self._die = MPU6050_RULES['variants'].get(parse_variant(variant)) or {
             'who_am_i': MPU6050_RULES['power_on'][0x75],
             'temp_lsb_per_c': MPU6050_RULES['temp_lsb_per_c'],
             'temp_offset_c': MPU6050_RULES['temp_offset_c'],
+            'accel_offs_reg': MPU6050_RULES['accel_offs_reg'],
+            'fifo_size': MPU6050_RULES['fifo_size'],
         }
         # The guest's clock, in ns, as a callable: what the chip measures its
         # sample period on. A worker hands over what it reads the guest's
@@ -635,7 +648,7 @@ class MPU6050Slave:
                 packet += block[at:at + size]
         if not packet:
             return False
-        cap = MPU6050_RULES['fifo_size']
+        cap = self._die['fifo_size']
         lost = len(self._fifo) + n * len(packet) > cap
         pushes = min(n, -(-cap // len(packet)) + 1)
         self._fifo += packet * pushes
@@ -646,7 +659,7 @@ class MPU6050Slave:
     def _fifo_push(self, value: int) -> None:
         """One byte into the FIFO; when it is full the oldest goes (4.31)."""
         self._fifo.append(value)
-        if len(self._fifo) > MPU6050_RULES['fifo_size']:
+        if len(self._fifo) > self._die['fifo_size']:
             del self._fifo[0]
 
     def _fifo_pop(self) -> int:
@@ -658,6 +671,12 @@ class MPU6050Slave:
         self.regs[:] = bytes(256)
         for reg, value in MPU6050_RULES['power_on'].items():
             self.regs[reg] = value
+        # The factory trims go to the offset registers of the die, and a die
+        # whose map has none at the MPU-6050's reads 0x00 there.
+        for at in MPU6050_RULES['accel_offs_reg']:
+            self.regs[at:at + 2] = bytes(2)
+        for at, trim in zip(self._die['accel_offs_reg'], _MPU_FACTORY_TRIM):
+            self.regs[at:at + 2] = bytes(trim)
         self.regs[0x75] = self._die['who_am_i']
         self._held = bytes(_MPU_SAMPLE_SIZE)
         self._fifo = bytearray()
@@ -762,17 +781,18 @@ class MPU6050Slave:
 
         # Offsets act before the output registers, the FIFO and the DMP
         # (AN-OFFS 4).
-        def trim(reg: int) -> float:
-            return (((_mpu_word(regs, reg) & ~1) - (_MPU_FACTORY_TRIM[reg] & ~1)) * accel
-                    / MPU6050_RULES['accel_offset_lsb_per_g'])
+        def trim(axis: int) -> float:
+            factory = _mpu_word(_MPU_FACTORY_TRIM[axis], 0)
+            return (((_mpu_word(regs, self._die['accel_offs_reg'][axis]) & ~1) - (factory & ~1))
+                    * accel / MPU6050_RULES['accel_offset_lsb_per_g'])
 
         def drift(reg: int) -> float:
             return _mpu_word(regs, reg) * gyro / MPU6050_RULES['gyro_offset_lsb_per_dps']
 
         block = (
-            inputs['accelX'] * accel + trim(_MPU_XA_OFFS),
-            inputs['accelY'] * accel + trim(_MPU_XA_OFFS + 2),
-            inputs['accelZ'] * accel + trim(_MPU_XA_OFFS + 4),
+            inputs['accelX'] * accel + trim(0),
+            inputs['accelY'] * accel + trim(1),
+            inputs['accelZ'] * accel + trim(2),
             (inputs['temp'] - self._die['temp_offset_c']) * self._die['temp_lsb_per_c'],
             inputs['gyroX'] * gyro + drift(_MPU_XG_OFFS_USR),
             inputs['gyroY'] * gyro + drift(_MPU_XG_OFFS_USR + 2),
