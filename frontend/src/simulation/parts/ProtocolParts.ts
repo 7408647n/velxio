@@ -874,6 +874,54 @@ export const MPU6050_RULES = {
    * and 371); 0xA5 is the one in its MotionApps comments.
    */
   dmp_rom: { 0x1006: 0xa5 },
+  /**
+   * The rate the DMP runs at, in Hz, and where in its memory the divider of
+   * its FIFO output sits (D_0_22, bank 2 byte 0x16, a big-endian word): it
+   * writes a packet every 1 + divider of its own periods. "DMP output
+   * frequency is calculated easily using this equation: (200Hz / (1 +
+   * value))" (i2cdevlib MotionApps20 dmpConfig; eMPL
+   * inv_mpu_dmp_motion_driver.c DMP_SAMPLE_RATE and dmp_set_fifo_rate).
+   */
+  dmp_rate_hz: 200,
+  dmp_rate_div_at: 0x216,
+  /**
+   * The DMP images the model runs, told apart by the 16 bytes at the
+   * program start address the sketch writes to DMP_CFG_1/2 (0x70-0x71), and
+   * the packet each one writes to the FIFO while USER_CTRL has DMP_EN and
+   * FIFO_EN set. `layout` is the packet as fields in order, each big-endian:
+   * quat32 is w, x, y, z as 32-bit q30 (1.0 = 2^30), gyro32 and accel32 are
+   * three 32-bit words with the counts in the high half, gyro16 and accel16
+   * three 16-bit counts, mag16 three 16-bit zeros (no magnetometer is
+   * modelled), footer two zero bytes. The gyroscope is in the counts
+   * GYRO_CONFIG selects; the accelerometer at `accel_lsb_per_g`, or in the
+   * counts ACCEL_CONFIG selects where that is null. Sizes and field places
+   * are those of i2cdevlib's packet diagrams and dmpGet*() readers:
+   * MPU6050_6Axis_MotionApps20 (42 bytes, "+1g = +8192 in standard DMP FIFO
+   * packet"), MPU6050_9Axis_MotionApps41 of the MPU-9150 (48 bytes, 4096 per
+   * g), MPU6050_6Axis_MotionApps612 (28 bytes, raw accelerometer, "+1g =
+   * +16384" at the 2 g range it selects). The 2.0 and 4.1 images both start
+   * at 0x0300 and 6.12 at 0x0400.
+   */
+  dmp_images: {
+    motionapps20: {
+      start: 0x300,
+      signature: 'D8 DC BA A2 F1 DE B2 B8 B4 A8 81 91 F7 4A 90 7F',
+      layout: 'quat32 gyro32 accel32 footer',
+      accel_lsb_per_g: 8192,
+    },
+    motionapps41: {
+      start: 0x300,
+      signature: 'D8 DC F4 D8 B9 AB F3 F8 FA F1 BA A2 DE B2 B8 B4',
+      layout: 'quat32 gyro32 mag16 accel32 footer',
+      accel_lsb_per_g: 4096,
+    },
+    motionapps612: {
+      start: 0x400,
+      signature: 'D8 DC B4 B8 B0 D8 B9 AB F3 F8 FA B3 B7 BB 8E 9E',
+      layout: 'quat32 accel16 gyro16',
+      accel_lsb_per_g: null,
+    },
+  },
 } as const;
 
 /** The dies the model answers as: `mpu6050`, or one of MPU6050_RULES.variants. */
@@ -931,9 +979,15 @@ const MPU_INT_RD_CLEAR = 0x10;
 const MPU_INT_ENABLE = 0x38;
 const MPU_INT_STATUS = 0x3a;
 const MPU_DATA_RDY_INT = 0x01;
+/** A DMP packet reached the FIFO (i2cdevlib MPU6050_INTERRUPT_DMP_INT_BIT). */
+const MPU_DMP_INT = 0x02;
 const MPU_FIFO_OFLOW_INT = 0x10;
 /** The interrupt sources the model raises, as bits of INT_ENABLE and INT_STATUS. */
-const MPU_INT_SOURCES = MPU_DATA_RDY_INT | MPU_FIFO_OFLOW_INT;
+const MPU_INT_SOURCES = MPU_DATA_RDY_INT | MPU_DMP_INT | MPU_FIFO_OFLOW_INT;
+/** The sources a sample raises. */
+const MPU_SAMPLE_INTS = MPU_DATA_RDY_INT | MPU_FIFO_OFLOW_INT;
+/** The sources a DMP packet raises. */
+const MPU_DMP_INTS = MPU_DMP_INT | MPU_FIFO_OFLOW_INT;
 const MPU_FIFO_EN = 0x23;
 /**
  * The FIFO_EN bits in the order their data enters the FIFO, which is the
@@ -954,6 +1008,11 @@ const MPU_FIFO_R_W = 0x74;
 /** USER_CTRL: the FIFO takes samples, and the trigger that empties it (4.27). */
 const MPU_USER_FIFO_EN = 0x40;
 const MPU_FIFO_RESET = 0x04;
+/** USER_CTRL: the DMP runs, and the trigger that restarts it (i2cdevlib setDMPEnabled, resetDMP). */
+const MPU_USER_DMP_EN = 0x80;
+const MPU_DMP_RESET = 0x08;
+/** DMP_CFG_1 and DMP_CFG_2: the DMP program start address, high byte first. */
+const MPU_DMP_CFG_1 = 0x70;
 /** The DMP memory port: bank, address in the bank, and the byte there. */
 const MPU_BANK_SEL = 0x6d;
 const MPU_MEM_START_ADDR = 0x6e;
@@ -1015,6 +1074,138 @@ for (const [reg, mask] of Object.entries(MPU6050_RULES.clear_on_read)) {
 }
 const MPU_INT_PULSE_NS = MPU6050_RULES.int_pulse_us * 1000;
 
+/** A DMP image the model runs (MPU6050_RULES.dmp_images). */
+interface MpuDmpImage {
+  start: number;
+  signature: readonly number[];
+  layout: readonly string[];
+  size: number;
+  accelLsbPerG: number | null;
+}
+/** Bytes of each field of a packet layout. */
+const MPU_DMP_FIELD_BYTES: Readonly<Record<string, number>> = {
+  quat32: 16,
+  gyro32: 12,
+  accel32: 12,
+  gyro16: 6,
+  accel16: 6,
+  mag16: 6,
+  footer: 2,
+};
+const MPU_DMP_IMAGES: readonly MpuDmpImage[] = Object.values(MPU6050_RULES.dmp_images).map(
+  (image) => {
+    const layout = image.layout.split(' ');
+    return {
+      start: image.start,
+      signature: image.signature.split(' ').map((b) => parseInt(b, 16)),
+      layout,
+      size: layout.reduce((n, field) => n + MPU_DMP_FIELD_BYTES[field], 0),
+      accelLsbPerG: image.accel_lsb_per_g,
+    };
+  },
+);
+
+/**
+ * The orientation the DMP reports, as the unit quaternion w, x, y, z that
+ * turns the chip's axes into the world's (i2cdevlib dmpGetGravity reads the
+ * gravity the chip feels as its third row). The tilt is the shortest turn
+ * that takes the accelerometer's direction to the vertical, so the gravity
+ * i2cdevlib works out of it is the panel's accelerometer, and pitch and roll
+ * follow the sliders; the heading is `yaw` about the vertical, integrated
+ * from the gyroscope. Upside down exactly, the turn is about X. The Python
+ * twin (esp32_i2c_slaves.mpu_dmp_quaternion) does the same operations in the
+ * same order, so both write the same packets.
+ */
+function mpuDmpQuaternion(
+  ax: number,
+  ay: number,
+  az: number,
+  yaw: number,
+): [number, number, number, number] {
+  const n = Math.sqrt(ax * ax + ay * ay + az * az);
+  let tw = 1;
+  let tx = 0;
+  let ty = 0;
+  if (n > 0) {
+    tw = 1 + az / n;
+    tx = ay / n;
+    ty = -ax / n;
+    const m = Math.sqrt(tw * tw + tx * tx + ty * ty);
+    if (m < 1e-9) {
+      tw = 0;
+      tx = 1;
+      ty = 0;
+    } else {
+      tw /= m;
+      tx /= m;
+      ty /= m;
+    }
+  }
+  const c = Math.cos(yaw / 2);
+  const s = Math.sin(yaw / 2);
+  // (c, 0, 0, s) times (tw, tx, ty, 0): the heading after the tilt.
+  return [c * tw, c * tx - s * ty, c * ty + s * tx, s * tw];
+}
+
+/**
+ * How far the heading turns in one DMP period, in radians: the rate about
+ * the vertical, which is the gyroscope along the accelerometer's direction.
+ * The counts of both are those of the sample block.
+ */
+function mpuDmpHeadingStep(block: Uint8Array, gyroLsb: number, periodNs: number): number {
+  const w = (i: number) => (((block[2 * i] << 8) | block[2 * i + 1]) << 16) >> 16;
+  const [ax, ay, az, gx, gy, gz] = [w(0), w(1), w(2), w(4), w(5), w(6)];
+  const n = Math.sqrt(ax * ax + ay * ay + az * az);
+  if (n === 0) return 0;
+  const rate = (gx * ax + gy * ay + gz * az) / n / gyroLsb;
+  return ((rate * periodNs) / 1e9) * (Math.PI / 180);
+}
+
+/** A q30 fraction (1.0 = 2^30) as a 32-bit word, half away from zero, held to the word. */
+function mpuQ30(value: number): number {
+  const q = Math.sign(value) * Math.round(Math.abs(value) * 1073741824);
+  return Math.max(-2147483648, Math.min(2147483647, q));
+}
+
+/**
+ * One packet of `image` as the DMP writes it to the FIFO, from the sample
+ * block (the counts the output registers hold, offsets applied) and the
+ * heading. `accelLsb` is the counts per g the block's accelerometer is in.
+ */
+function mpuDmpPacket(
+  image: MpuDmpImage,
+  block: Uint8Array,
+  accelLsb: number,
+  yaw: number,
+): number[] {
+  const w = (i: number) => (((block[2 * i] << 8) | block[2 * i + 1]) << 16) >> 16;
+  const accel = [w(0), w(1), w(2)];
+  const gyro = [w(4), w(5), w(6)];
+  const dmpAccel =
+    image.accelLsbPerG === null
+      ? accel
+      : accel.map((c) => mpuCounts((c * image.accelLsbPerG!) / accelLsb));
+  const out: number[] = [];
+  const word32 = (v: number) => out.push((v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff);
+  const word16 = (v: number) => out.push((v >> 8) & 0xff, v & 0xff);
+  for (const field of image.layout) {
+    if (field === 'quat32') {
+      for (const v of mpuDmpQuaternion(accel[0], accel[1], accel[2], yaw)) word32(mpuQ30(v));
+    } else if (field === 'gyro32') {
+      for (const c of gyro) word32(c * 65536);
+    } else if (field === 'accel32') {
+      for (const c of dmpAccel) word32(c * 65536);
+    } else if (field === 'gyro16') {
+      for (const c of gyro) word16(c);
+    } else if (field === 'accel16') {
+      for (const c of dmpAccel) word16(c);
+    } else {
+      for (let i = 0; i < MPU_DMP_FIELD_BYTES[field]; i++) out.push(0);
+    }
+  }
+  return out;
+}
+
 /** What the INT pad does to its line: it drives it, or lets go of it (open drain). */
 export type Mpu6050IntPad = 'high' | 'low' | 'z';
 
@@ -1063,16 +1254,23 @@ function mpuCounts(value: number): number {
  *    dividing by a count of zero.
  *  - BANK_SEL, MEM_START_ADDR and MEM_R_W reach 32 banks of DMP memory, the
  *    address advancing within its bank and the pointer staying on MEM_R_W,
- *    with the ROM byte i2cdevlib reads as the hardware revision. The DMP
- *    itself does not run: an image written there produces no packets, and
- *    the monitor is told once per run (onDmpUpload).
+ *    with the ROM byte i2cdevlib reads as the hardware revision.
+ *  - With DMP_EN and FIFO_EN set in USER_CTRL, a DMP image it knows (the
+ *    MotionApps 2.0, 4.1 and 6.12 images of i2cdevlib, told apart at the
+ *    program start address of DMP_CFG_1/2) writes its packets into the FIFO
+ *    at the rate the image's divider sets, on the guest's clock, and raises
+ *    DMP_INT for each. The packet carries the orientation of the panel: the
+ *    tilt of the accelerometer and a heading integrated from the gyroscope,
+ *    which DMP_RESET and every start of the DMP put back to zero. An image
+ *    it does not know writes nothing, and the monitor is told once per run
+ *    (onDmpUnknown).
  */
 export class VirtualMPU6050 implements I2CDevice {
   address: number;
   /** The sample block was read while the chip sleeps, for the first time in this run. */
   onAsleepRead: (() => void) | null = null;
-  /** The sketch wrote to the DMP memory, for the first time in this run. */
-  onDmpUpload: (() => void) | null = null;
+  /** The sketch started the DMP on an image the model does not run, for the first time in this run. */
+  onDmpUnknown: (() => void) | null = null;
   /**
    * What the INT pad does, or the time it moves next, may have changed: the
    * host that drives the pin reads intPad() and intWakeNs() again.
@@ -1125,7 +1323,16 @@ export class VirtualMPU6050 implements I2CDevice {
   /** What an empty FIFO answers: the byte read last (4.31). */
   private fifoLast = 0;
   private readonly dmpMem = new Uint8Array(MPU6050_RULES.dmp_banks * 256);
-  private dmpUploadSaid = false;
+  private dmpUnknownSaid = false;
+  /** The image the DMP runs, while it writes packets; null while it writes none. */
+  private dmpImage: MpuDmpImage | null = null;
+  /** The packet period of the running image, in ns. */
+  private dmpPeriodNs = 0;
+  /** As epochNs and taken, for the DMP's packets. */
+  private dmpEpochNs: number | null = null;
+  private dmpTaken = 0;
+  /** The heading the DMP has integrated since it started, in radians. */
+  private dmpYaw = 0;
 
   /** What the die changes of the MPU-6050's map (MPU6050_RULES.variants). */
   private readonly die: {
@@ -1243,7 +1450,7 @@ export class VirtualMPU6050 implements I2CDevice {
    */
   boardReset(): void {
     this.asleepReadSaid = false;
-    this.dmpUploadSaid = false;
+    this.dmpUnknownSaid = false;
     this.restartSampling();
     this.onIntChange?.();
   }
@@ -1294,9 +1501,16 @@ export class VirtualMPU6050 implements I2CDevice {
     } else if (this.pulseEndNs !== null && now < this.pulseEndNs) {
       return this.pulseEndNs;
     }
-    if (!this.sampling || this.epochNs === null) return null;
-    if ((this.regs[MPU_INT_ENABLE] & MPU_INT_SOURCES) === 0) return null;
-    return this.epochNs + (this.taken + 1) * this.periodNs;
+    const enabled = this.regs[MPU_INT_ENABLE];
+    let next: number | null = null;
+    if (this.epochNs !== null && (enabled & MPU_SAMPLE_INTS) !== 0) {
+      next = this.epochNs + (this.taken + 1) * this.periodNs;
+    }
+    if (this.dmpImage && this.dmpEpochNs !== null && (enabled & MPU_DMP_INTS) !== 0) {
+      const packet = this.dmpEpochNs + (this.dmpTaken + 1) * this.dmpPeriodNs;
+      if (next === null || packet < next) next = packet;
+    }
+    return next;
   }
 
   private get asleep(): boolean {
@@ -1356,6 +1570,8 @@ export class VirtualMPU6050 implements I2CDevice {
     this.taken = 0;
     this.periodNs = this.samplePeriodNs();
     this.pulseEndNs = null;
+    this.dmpEpochNs = this.dmpImage ? this.nowNs() : null;
+    this.dmpTaken = 0;
   }
 
   /**
@@ -1369,8 +1585,14 @@ export class VirtualMPU6050 implements I2CDevice {
     if (now === null) {
       // No time to measure on: the periods are the ticks of writeByte.
       this.epochNs = null;
+      this.dmpEpochNs = null;
       return;
     }
+    this.syncSamples(now);
+    this.syncDmp(now);
+  }
+
+  private syncSamples(now: number): void {
     const period = this.periodNs;
     if (this.epochNs === null || now < this.epochNs) {
       // A clock that was not there when the chip woke, or one that started
@@ -1386,9 +1608,30 @@ export class VirtualMPU6050 implements I2CDevice {
     this.sampled(n, this.epochNs + due * period);
   }
 
-  /** One sample period passed, on a board where nothing measures it. */
+  /** The DMP's packets that came due, counted as the samples are. */
+  private syncDmp(now: number): void {
+    if (!this.dmpImage) return;
+    if (this.dmpEpochNs === null || now < this.dmpEpochNs) {
+      this.dmpEpochNs = now;
+      this.dmpTaken = 0;
+      return;
+    }
+    const due = Math.floor((now - this.dmpEpochNs) / this.dmpPeriodNs);
+    if (due <= this.dmpTaken) return;
+    const n = due - this.dmpTaken;
+    this.dmpTaken = due;
+    this.dmpPackets(n, this.dmpEpochNs + due * this.dmpPeriodNs);
+  }
+
+  /**
+   * One sample period passed, on a board where nothing measures it. A DMP
+   * that runs writes one packet in it, so a driver that waits for one
+   * still finds it.
+   */
   private tick(): void {
-    if (this.sampling) this.sampled(1, null);
+    if (!this.sampling) return;
+    this.sampled(1, null);
+    if (this.dmpImage) this.dmpPackets(1, null);
   }
 
   /** `n` samples were taken, the last of them at `atNs` of the guest's time. */
@@ -1403,16 +1646,93 @@ export class VirtualMPU6050 implements I2CDevice {
     }
     let events = MPU_DATA_RDY_INT;
     if (this.fifoSamples(n)) events |= MPU_FIFO_OFLOW_INT;
-    // Only an enabled source raises its status bit. The register map does
-    // not say whether a disabled one latches (4.15, 4.16), and every driver
-    // that polls DATA_RDY enables it first: FastIMU and Kris Winer write
-    // INT_ENABLE = 0x01. A driver that never enables it reads 0 there, as
-    // it did before the chip kept time.
+    this.raise(events, atNs);
+  }
+
+  /**
+   * Interrupts happened at `atNs` of the guest's time. Only an enabled
+   * source raises its status bit. The register map does not say whether a
+   * disabled one latches (4.15, 4.16), and every driver that polls DATA_RDY
+   * enables it first: FastIMU and Kris Winer write INT_ENABLE = 0x01. A
+   * driver that never enables it reads 0 there, as it did before the chip
+   * kept time.
+   */
+  private raise(events: number, atNs: number | null): void {
     const raised = this.regs[MPU_INT_ENABLE] & MPU_INT_SOURCES & events;
     if (raised === 0) return;
     this.regs[MPU_INT_STATUS] |= raised;
-    // A pulse has a length only where there is a clock to measure it on.
-    if (atNs !== null && !this.latched) this.pulseEndNs = atNs + MPU_INT_PULSE_NS;
+    // A pulse has a length only where there is a clock to measure it on,
+    // and the later of two events ends it.
+    if (atNs !== null && !this.latched) {
+      this.pulseEndNs = Math.max(this.pulseEndNs ?? 0, atNs + MPU_INT_PULSE_NS);
+    }
+  }
+
+  /**
+   * The DMP wrote `n` packets, the last of them at `atNs`. They are of one
+   * instant, as fifoSamples' are, and the heading turns by one period's
+   * worth of the gyroscope per packet, whether or not the FIFO keeps it.
+   */
+  private dmpPackets(n: number, atNs: number | null): void {
+    const image = this.dmpImage!;
+    const block = this.output();
+    const accelLsb = MPU6050_RULES.accel_lsb_per_g[(this.regs[MPU_ACCEL_CONFIG] >> 3) & 3];
+    const gyroLsb = MPU6050_RULES.gyro_lsb_per_dps[(this.regs[MPU_GYRO_CONFIG] >> 3) & 3];
+    const step = mpuDmpHeadingStep(block, gyroLsb, this.dmpPeriodNs);
+    const size = this.fifo.length;
+    const lost = this.fifoCount + n * image.size > size;
+    const pushes = Math.min(n, Math.ceil(size / image.size) + 1);
+    for (let k = 0; k < n - pushes; k++) this.dmpYaw += step;
+    for (let k = 0; k < pushes; k++) {
+      this.dmpYaw += step;
+      for (const b of mpuDmpPacket(image, block, accelLsb, this.dmpYaw)) this.fifoPush(b);
+    }
+    this.raise(MPU_DMP_INT | (lost ? MPU_FIFO_OFLOW_INT : 0), atNs);
+  }
+
+  /**
+   * The image the DMP runs now, or null: it runs while the chip is awake
+   * and USER_CTRL has DMP_EN and FIFO_EN, from the program start address of
+   * DMP_CFG_1/2, and the model runs it where the bytes there are those of an
+   * image it knows.
+   */
+  private dmpRunnable(): MpuDmpImage | null | 'unknown' {
+    const both = MPU_USER_DMP_EN | MPU_USER_FIFO_EN;
+    if (!this.sampling || (this.regs[MPU_USER_CTRL] & both) !== both) return null;
+    const start = ((this.regs[MPU_DMP_CFG_1] << 8) | this.regs[MPU_DMP_CFG_1 + 1]) % this.dmpMem.length;
+    const known = MPU_DMP_IMAGES.find(
+      (image) =>
+        image.start === start && image.signature.every((b, i) => this.dmpMem[start + i] === b),
+    );
+    return known ?? 'unknown';
+  }
+
+  /** The DMP period the image's divider sets, in ns. */
+  private dmpPeriodOf(): number {
+    const at = MPU6050_RULES.dmp_rate_div_at;
+    const divider = (this.dmpMem[at] << 8) | this.dmpMem[at + 1];
+    return ((1 + divider) * 1e9) / MPU6050_RULES.dmp_rate_hz;
+  }
+
+  /**
+   * After a write: the DMP starts, stops, or runs at another rate. A start
+   * (and DMP_RESET) puts the heading back to zero, and the first packet is
+   * one period from here.
+   */
+  private dmpFollow(reset: boolean): void {
+    const runnable = this.dmpRunnable();
+    const image = runnable === 'unknown' ? null : runnable;
+    if (runnable === 'unknown' && !this.dmpUnknownSaid) {
+      this.dmpUnknownSaid = true;
+      this.onDmpUnknown?.();
+    }
+    const period = image ? this.dmpPeriodOf() : 0;
+    if (image === this.dmpImage && period === this.dmpPeriodNs && !reset) return;
+    if (image !== this.dmpImage || reset) this.dmpYaw = 0;
+    this.dmpImage = image;
+    this.dmpPeriodNs = period;
+    this.dmpEpochNs = image ? this.nowNs() : null;
+    this.dmpTaken = 0;
   }
 
   /**
@@ -1478,6 +1798,9 @@ export class VirtualMPU6050 implements I2CDevice {
     this.fifoLast = 0;
     this.dmpMem.fill(0);
     for (const [at, value] of Object.entries(MPU6050_RULES.dmp_rom)) this.dmpMem[Number(at)] = value;
+    this.dmpImage = null;
+    this.dmpPeriodNs = 0;
+    this.dmpYaw = 0;
     this.restartSampling();
   }
 
@@ -1529,10 +1852,8 @@ export class VirtualMPU6050 implements I2CDevice {
     }
     if (reg === MPU_MEM_R_W) {
       this.dmpMem[this.dmpCell()] = value;
-      if (!this.dmpUploadSaid) {
-        this.dmpUploadSaid = true;
-        this.onDmpUpload?.();
-      }
+      // A divider written while the DMP runs changes its rate.
+      if (this.dmpImage) this.dmpFollow(false);
       return;
     }
     const stored = value & ~MPU_SELF_CLEARING[reg] & 0xff;
@@ -1545,6 +1866,7 @@ export class VirtualMPU6050 implements I2CDevice {
     if (this.sampling !== sampled || this.samplePeriodNs() !== this.periodNs) {
       this.restartSampling();
     }
+    this.dmpFollow(reg === MPU_USER_CTRL && (value & MPU_DMP_RESET) !== 0);
   }
 
   private latch(): void {
@@ -1760,11 +2082,12 @@ PartSimulationRegistry.register('mpu6050', {
         'i2c-target-asleep',
         `${variant.toUpperCase()} 0x${addr.toString(16)} is in sleep mode: write 0x00 to PWR_MGMT_1 (0x6B) to wake it`,
       );
-    device.onDmpUpload = () =>
+    device.onDmpUnknown = () =>
       part.report(
         'i2c-target-unmodelled',
-        `${variant.toUpperCase()} 0x${addr.toString(16)}: the sketch loads a DMP image, but the simulator does not run the DMP, ` +
-          'so no quaternion packets reach the FIFO. Read the accelerometer and gyroscope registers instead',
+        `${variant.toUpperCase()} 0x${addr.toString(16)}: the sketch starts a DMP image the simulator does not know ` +
+          '(it runs the MotionApps 2.0, 4.1 and 6.12 images of i2cdevlib), so no packets reach the FIFO. ' +
+          'Read the accelerometer and gyroscope registers instead',
       );
     const releaseInt =
       intPin !== null && !part.remote

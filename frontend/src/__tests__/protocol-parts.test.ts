@@ -1481,6 +1481,38 @@ describe('mpu6050 — the INT pin on the board', () => {
     expect(edges.at(-1)).toEqual([true, 3500]);
   });
 
+  it('drives the pin on a board whose registerSensor declines the part, as AVR and RP2040 do', () => {
+    // Their simulators carry a registerSensor that answers false and no
+    // hostsCustomChips. The part was taken for worker-hosted there, and the
+    // pin INT is wired to never moved on an Uno.
+    const clock = new RigClock();
+    const rig = i2cRig({ imu: HW_I2C_PINS }, clock);
+    const edges: boolean[] = [];
+    const registerSensor = vi.fn(() => false);
+    const sim = {
+      setPinState: (pin: number, level: boolean) => {
+        if (pin === INT_PIN) edges.push(level);
+      },
+      pinManager: new PinManager(),
+      registerSensor,
+      updateSensor: () => {},
+      unregisterSensor: () => {},
+    };
+    PartSimulationRegistry.get('mpu6050')!.attachEvents!(
+      makeElement(),
+      sim as any,
+      (name) => (name === 'INT' ? INT_PIN : null),
+      'imu',
+    );
+    expect(registerSensor).toHaveBeenCalled();
+    rig.write(0x68, [0x19, 0x07]);
+    rig.write(0x68, [0x38, 0x01]);
+    wakeImu(rig);
+    edges.length = 0;
+    clock.advanceUs(1500);
+    expect(edges).toEqual([true, false]);
+  });
+
   it('arms nothing while no interrupt is enabled, and lets go of the pin when it leaves', () => {
     const { clock, rig, dispose } = setup();
     wakeImu(rig);
@@ -1493,15 +1525,16 @@ describe('mpu6050 — the INT pin on the board', () => {
   });
 });
 
-describe('mpu6050 — a DMP image is uploaded', () => {
-  // The memory port works, the DMP does not run: a DMP sketch gets no
-  // packets, and its monitor says why once per run.
+describe('mpu6050 — the DMP starts on an image the model does not know', () => {
+  // The model runs the MotionApps images of i2cdevlib (the shared vectors
+  // hold their packets). Any other image writes nothing, and the monitor
+  // says why once per run, when the sketch starts the DMP on it.
   const listeners: Array<() => void> = [];
   afterEach(() => {
     for (const off of listeners.splice(0)) off();
   });
 
-  it('tells the monitor once, and again on the next run', () => {
+  it('tells the monitor once, and again on the next run; a known image and an upload say nothing', () => {
     const rig = i2cRig({ imu: HW_I2C_PINS });
     attachImu();
     const heard: BusDiagnostic[] = [];
@@ -1510,20 +1543,36 @@ describe('mpu6050 — a DMP image is uploaded', () => {
         if (d.code === 'i2c-target-unmodelled') heard.push(d);
       }),
     );
-    // Reading the revision byte is not an upload.
+    rig.write(0x68, [0x6b, 0x00]);
+    // Reading the revision byte and writing memory start nothing.
     rig.write(0x68, [0x6d, 0x70]);
     rig.write(0x68, [0x6e, 0x06]);
     expect(rig.readReg(0x68, 0x6f, 1)).toEqual([0xa5]);
-    expect(heard).toEqual([]);
-    rig.write(0x68, [0x6d, 0x00, 0x00]);
+    rig.write(0x68, [0x6d, 0x03, 0x00]);
     rig.write(0x68, [0x6f, 0xfb, 0x00, 0x00, 0x3e]);
-    rig.write(0x68, [0x6f, 0x00, 0x03]);
+    rig.write(0x68, [0x70, 0x03, 0x00]);
+    expect(heard).toEqual([]);
+    // DMP_EN and FIFO_EN on bytes that are no image the model knows.
+    rig.write(0x68, [0x6a, 0xc0]);
+    rig.write(0x68, [0x6a, 0x00]);
+    rig.write(0x68, [0x6a, 0xc0]);
     expect(heard.map((d) => [d.boardId, d.owners, d.message.split(':')[0]])).toEqual([
       [RIG_BOARD, ['imu'], 'MPU6050 0x68'],
     ]);
-    expect(heard[0].message).toMatch(/does not run the DMP/);
+    expect(heard[0].message).toMatch(/DMP image the simulator does not know/);
     rig.reset();
-    rig.write(0x68, [0x6f, 0x01]);
+    rig.write(0x68, [0x6a, 0x00]);
+    rig.write(0x68, [0x6a, 0xc0]);
+    expect(heard).toHaveLength(2);
+    // The MotionApps 2.0 image at its start address runs, and says nothing.
+    rig.reset();
+    rig.write(0x68, [0x6a, 0x00]);
+    rig.write(0x68, [0x6d, 0x03, 0x00]);
+    rig.write(0x68, [
+      0x6f, 0xd8, 0xdc, 0xba, 0xa2, 0xf1, 0xde, 0xb2, 0xb8, 0xb4, 0xa8, 0x81, 0x91, 0xf7, 0x4a,
+      0x90, 0x7f,
+    ]);
+    rig.write(0x68, [0x6a, 0xc0]);
     expect(heard).toHaveLength(2);
   });
 });

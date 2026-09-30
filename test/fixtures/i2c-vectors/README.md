@@ -79,6 +79,10 @@ find and the loops it has to leave alone.
   the pointer does not move past. The tab model tells a host that mirrors its
   registers (the Raspberry Pi relay) about them through its map entry; a
   file without them says the chip has none.
+- `dmp_images` in `rules` (MPU-6050): the DMP images the model runs, each
+  told apart by the 16 bytes at the program start address a driver writes to
+  DMP_CFG_1/2, with the packet it writes to the FIFO as a list of fields.
+  The DMP vectors upload only those 16 bytes, not the whole image.
 - `ad0_values` (MPU-6050): how each model reads the part's `ad0` property
   and the worker record's, as `[value, "69" or "68", or null when the AD0
   net decides]`.

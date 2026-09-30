@@ -198,18 +198,27 @@ export function attachI2cPart(opts: I2cPartOptions): I2cPartHandle {
     : null;
 
   let workerPin: number | null = null;
+  // Whether a worker took the record: AVR, RP2040 and the rest answer
+  // registerSensor with false, and the Pi shim does for anything but a line
+  // sensor, so the part is answered here and its INT pad is this tab's.
+  let accepted = false;
   if (worker && owner && workerHosted(sim)) {
     workerPin = i2cPartWorkerPin(owner);
     // `owner` is how the worker finds this record in the bus map the tab
     // sends, which says which controller the part's SDA is on.
-    sim!.registerSensor!(worker.type, workerPin, { ...(worker.props ?? {}), addr: address, owner });
+    accepted =
+      sim!.registerSensor!(worker.type, workerPin, {
+        ...(worker.props ?? {}),
+        addr: address,
+        owner,
+      }) !== false;
     // Under its own id: the echo names the record it came from, so two parts
     // at one address each draw their own stream.
     if (worker.echo) sim!.addI2CTransactionListener?.(address, worker.echo, owner);
   }
 
   return {
-    remote: workerPin !== null,
+    remote: workerPin !== null && accepted,
     updateWorker: (values) => {
       if (workerPin !== null) sim!.updateSensor?.(workerPin, values);
     },

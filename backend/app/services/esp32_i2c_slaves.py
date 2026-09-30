@@ -141,6 +141,39 @@ MPU6050_RULES = {
     # byte 6. Parts report 0xA5 or 0x4D there (jrowberg/i2cdevlib issues 246
     # and 371); 0xA5 is the one in its MotionApps comments.
     'dmp_rom': {0x1006: 0xA5},
+    # The rate the DMP runs at, in Hz, and where in its memory the divider of
+    # its FIFO output sits (D_0_22, bank 2 byte 0x16, a big-endian word): it
+    # writes a packet every 1 + divider of its own periods. "DMP output
+    # frequency is calculated easily using this equation: (200Hz / (1 +
+    # value))" (i2cdevlib MotionApps20 dmpConfig; eMPL
+    # inv_mpu_dmp_motion_driver.c DMP_SAMPLE_RATE and dmp_set_fifo_rate).
+    'dmp_rate_hz': 200,
+    'dmp_rate_div_at': 0x216,
+    # The DMP images the model runs, told apart by the 16 bytes at the
+    # program start address the sketch writes to DMP_CFG_1/2 (0x70-0x71),
+    # and the packet each one writes to the FIFO while USER_CTRL has DMP_EN
+    # and FIFO_EN set. See MPU6050_RULES.dmp_images in the tab model for the
+    # layout fields and where each image's facts come from.
+    'dmp_images': {
+        'motionapps20': {
+            'start': 0x300,
+            'signature': 'D8 DC BA A2 F1 DE B2 B8 B4 A8 81 91 F7 4A 90 7F',
+            'layout': 'quat32 gyro32 accel32 footer',
+            'accel_lsb_per_g': 8192,
+        },
+        'motionapps41': {
+            'start': 0x300,
+            'signature': 'D8 DC F4 D8 B9 AB F3 F8 FA F1 BA A2 DE B2 B8 B4',
+            'layout': 'quat32 gyro32 mag16 accel32 footer',
+            'accel_lsb_per_g': 4096,
+        },
+        'motionapps612': {
+            'start': 0x400,
+            'signature': 'D8 DC B4 B8 B0 D8 B9 AB F3 F8 FA B3 B7 BB 8E 9E',
+            'layout': 'quat32 accel16 gyro16',
+            'accel_lsb_per_g': None,
+        },
+    },
 }
 
 # Motion and temperature at the chip, under the names of the panel's sliders
@@ -172,9 +205,12 @@ _MPU_INT_RD_CLEAR   = 0x10
 _MPU_INT_ENABLE     = 0x38
 _MPU_INT_STATUS     = 0x3A
 _MPU_DATA_RDY_INT   = 0x01
+_MPU_DMP_INT        = 0x02   # a DMP packet reached the FIFO
 _MPU_FIFO_OFLOW_INT = 0x10
 # The interrupt sources the model raises, as bits of INT_ENABLE and INT_STATUS.
-_MPU_INT_SOURCES    = _MPU_DATA_RDY_INT | _MPU_FIFO_OFLOW_INT
+_MPU_INT_SOURCES    = _MPU_DATA_RDY_INT | _MPU_DMP_INT | _MPU_FIFO_OFLOW_INT
+_MPU_SAMPLE_INTS    = _MPU_DATA_RDY_INT | _MPU_FIFO_OFLOW_INT   # what a sample raises
+_MPU_DMP_INTS       = _MPU_DMP_INT | _MPU_FIFO_OFLOW_INT        # what a DMP packet raises
 _MPU_FIFO_EN        = 0x23
 # The FIFO_EN bits in the order their data enters the FIFO, which is the
 # order of the registers (4.6, 4.31): ACCEL (0x3B-0x40), TEMP, XG, YG, ZG, as
@@ -187,6 +223,11 @@ _MPU_FIFO_R_W       = 0x74
 # USER_CTRL: the FIFO takes samples, and the trigger that empties it (4.27).
 _MPU_USER_FIFO_EN   = 0x40
 _MPU_FIFO_RESET     = 0x04
+# USER_CTRL: the DMP runs, and the trigger that restarts it.
+_MPU_USER_DMP_EN    = 0x80
+_MPU_DMP_RESET      = 0x08
+# DMP_CFG_1 and DMP_CFG_2: the DMP program start address, high byte first.
+_MPU_DMP_CFG_1      = 0x70
 # The DMP memory port: bank, address in the bank, and the byte there.
 _MPU_BANK_SEL       = 0x6D
 _MPU_MEM_START_ADDR = 0x6E
@@ -225,6 +266,19 @@ _MPU_CLEAR_ON_READ = bytearray(256)
 for _reg, _mask in MPU6050_RULES['clear_on_read'].items():
     _MPU_CLEAR_ON_READ[_reg] = _mask
 _MPU_INT_PULSE_NS = MPU6050_RULES['int_pulse_us'] * 1000
+
+# Bytes of each field of a DMP packet layout.
+_MPU_DMP_FIELD_BYTES = {'quat32': 16, 'gyro32': 12, 'accel32': 12, 'gyro16': 6,
+                        'accel16': 6, 'mag16': 6, 'footer': 2}
+# The DMP images the model runs, as (start, signature, layout, size, accel
+# counts per g or None).
+_MPU_DMP_IMAGES = tuple(
+    (image['start'], bytes(int(b, 16) for b in image['signature'].split()),
+     tuple(image['layout'].split()),
+     sum(_MPU_DMP_FIELD_BYTES[f] for f in image['layout'].split()),
+     image['accel_lsb_per_g'])
+    for image in MPU6050_RULES['dmp_images'].values()
+)
 
 
 def parse_ad0(value):
@@ -302,6 +356,85 @@ def _mpu_counts(value: float) -> int:
     return min(counts, 32767) if value >= 0 else -counts
 
 
+def mpu_dmp_quaternion(ax: float, ay: float, az: float, yaw: float) -> tuple:
+    """The orientation the DMP reports, as the unit quaternion (w, x, y, z)
+    that turns the chip's axes into the world's: the shortest turn that
+    takes the accelerometer's direction to the vertical, then `yaw` about
+    the vertical. mpuDmpQuaternion in the tab does the same operations in
+    the same order, so both write the same packets."""
+    n = _math.sqrt(ax * ax + ay * ay + az * az)
+    tw, tx, ty = 1.0, 0.0, 0.0
+    if n > 0:
+        tw = 1 + az / n
+        tx = ay / n
+        ty = -ax / n
+        m = _math.sqrt(tw * tw + tx * tx + ty * ty)
+        if m < 1e-9:
+            tw, tx, ty = 0.0, 1.0, 0.0
+        else:
+            tw /= m
+            tx /= m
+            ty /= m
+    c = _math.cos(yaw / 2)
+    s = _math.sin(yaw / 2)
+    return (c * tw, c * tx - s * ty, c * ty + s * tx, s * tw)
+
+
+def _mpu_block_words(block) -> list:
+    """The seven signed words of a sample block."""
+    return [_mpu_word(block, 2 * i) for i in range(7)]
+
+
+def _mpu_dmp_heading_step(block, gyro_lsb: float, period_ns: float) -> float:
+    """How far the heading turns in one DMP period, in radians: the
+    gyroscope along the accelerometer's direction."""
+    ax, ay, az, _, gx, gy, gz = _mpu_block_words(block)
+    n = _math.sqrt(ax * ax + ay * ay + az * az)
+    if n == 0:
+        return 0.0
+    rate = (gx * ax + gy * ay + gz * az) / n / gyro_lsb
+    return rate * period_ns / 1e9 * (_math.pi / 180)
+
+
+def _mpu_q30(value: float) -> int:
+    """A q30 fraction (1.0 = 2^30) as a 32-bit word, half away from zero,
+    held to the word."""
+    q = _math.floor(abs(value) * 1073741824 + 0.5)
+    q = q if value >= 0 else -q
+    return max(-2147483648, min(2147483647, q))
+
+
+def mpu_dmp_packet(image, block, accel_lsb: float, yaw: float) -> bytes:
+    """One packet of `image` as the DMP writes it to the FIFO, from the
+    sample block and the heading (mpuDmpPacket in the tab)."""
+    _, _, layout, _, image_accel_lsb = image
+    words = _mpu_block_words(block)
+    accel = words[0:3]
+    gyro = words[4:7]
+    dmp_accel = (accel if image_accel_lsb is None
+                 else [_mpu_counts(c * image_accel_lsb / accel_lsb) for c in accel])
+    out = bytearray()
+    for field in layout:
+        if field == 'quat32':
+            for v in mpu_dmp_quaternion(accel[0], accel[1], accel[2], yaw):
+                out += (_mpu_q30(v) & 0xFFFFFFFF).to_bytes(4, 'big')
+        elif field == 'gyro32':
+            for c in gyro:
+                out += ((c * 65536) & 0xFFFFFFFF).to_bytes(4, 'big')
+        elif field == 'accel32':
+            for c in dmp_accel:
+                out += ((c * 65536) & 0xFFFFFFFF).to_bytes(4, 'big')
+        elif field == 'gyro16':
+            for c in gyro:
+                out += (c & 0xFFFF).to_bytes(2, 'big')
+        elif field == 'accel16':
+            for c in dmp_accel:
+                out += (c & 0xFFFF).to_bytes(2, 'big')
+        else:
+            out += bytes(_MPU_DMP_FIELD_BYTES[field])
+    return bytes(out)
+
+
 class MPU6050Slave:
     """MPU-6050 6-axis IMU (address 0x68 or 0x69), modelled where a driver can
     tell the difference from the chip. The twin of VirtualMPU6050 in the tab:
@@ -338,8 +471,14 @@ class MPU6050Slave:
       - BANK_SEL, MEM_START_ADDR and MEM_R_W reach 32 banks of DMP memory,
         the address advancing within its bank and the pointer staying on
         MEM_R_W, with the ROM byte i2cdevlib reads as the hardware revision.
-        The DMP itself does not run: an image written there produces no
-        packets.
+      - With DMP_EN and FIFO_EN set in USER_CTRL, a DMP image it knows (the
+        MotionApps 2.0, 4.1 and 6.12 images of i2cdevlib, told apart at the
+        program start address of DMP_CFG_1/2) writes its packets into the
+        FIFO at the rate the image's divider sets, on the guest's clock, and
+        raises DMP_INT for each. The packet carries the orientation of the
+        panel: the tilt of the accelerometer and a heading integrated from
+        the gyroscope, which DMP_RESET and every start of the DMP put back to
+        zero. An image it does not know writes nothing.
     """
 
     def __init__(self, addr: int = 0x68, now_ns=None, variant: str = 'mpu6050'):
@@ -388,6 +527,14 @@ class MPU6050Slave:
         self._fifo = bytearray()
         self._fifo_last = 0       # what an empty FIFO answers: the byte read last
         self._dmp_mem = bytearray(MPU6050_RULES['dmp_banks'] * 256)
+        # The image the DMP runs while it writes packets (None while it
+        # writes none), its packet period, the periods counted as the
+        # samples' are, and the heading it has integrated, in radians.
+        self._dmp_image = None
+        self._dmp_period_ns = 0.0
+        self._dmp_epoch_ns = None
+        self._dmp_taken = 0
+        self._dmp_yaw = 0.0
         # The panel moves on the worker's command thread and QEMU's thread
         # runs the bus: the samples due are taken of the world before a move,
         # under one lock with the bus events.
@@ -568,14 +715,23 @@ class MPU6050Slave:
                     return None
             elif self._pulse_end_ns is not None and now < self._pulse_end_ns:
                 return self._pulse_end_ns
-            if self._epoch_ns is None:
-                return None
-            if not self.regs[_MPU_INT_ENABLE] & _MPU_INT_SOURCES:
-                return None
-            k = self._taken + 1
-            if not_before_ns is not None:
-                k = max(k, _math.ceil((not_before_ns - self._epoch_ns) / self._period_ns))
-            return self._epoch_ns + k * self._period_ns
+            enabled = self.regs[_MPU_INT_ENABLE]
+            nxt = None
+            if self._epoch_ns is not None and enabled & _MPU_SAMPLE_INTS:
+                k = self._taken + 1
+                if not_before_ns is not None:
+                    k = max(k, _math.ceil((not_before_ns - self._epoch_ns) / self._period_ns))
+                nxt = self._epoch_ns + k * self._period_ns
+            if (self._dmp_image is not None and self._dmp_epoch_ns is not None
+                    and enabled & _MPU_DMP_INTS):
+                k = self._dmp_taken + 1
+                if not_before_ns is not None:
+                    k = max(k, _math.ceil((not_before_ns - self._dmp_epoch_ns)
+                                          / self._dmp_period_ns))
+                packet = self._dmp_epoch_ns + k * self._dmp_period_ns
+                if nxt is None or packet < nxt:
+                    nxt = packet
+            return nxt
 
     def _asleep(self) -> bool:
         return (self.regs[_MPU_PWR_MGMT_1] & _MPU_SLEEP) != 0
@@ -615,6 +771,8 @@ class MPU6050Slave:
         self._taken = 0
         self._period_ns = self._sample_period_ns()
         self._pulse_end_ns = None
+        self._dmp_epoch_ns = None if self._dmp_image is None else self._now()
+        self._dmp_taken = 0
 
     def _sync(self) -> None:
         """Take the samples that came due since the chip was last looked at.
@@ -625,7 +783,12 @@ class MPU6050Slave:
         now = self._now()
         if now is None:
             self._epoch_ns = None
+            self._dmp_epoch_ns = None
             return
+        self._sync_samples(now)
+        self._sync_dmp(now)
+
+    def _sync_samples(self, now) -> None:
         if self._epoch_ns is None or now < self._epoch_ns:
             # A clock that was not there when the chip woke, or one that
             # started again: the first sample is one period from here.
@@ -639,10 +802,28 @@ class MPU6050Slave:
         self._taken = due
         self._sampled(n, self._epoch_ns + due * self._period_ns)
 
+    def _sync_dmp(self, now) -> None:
+        """The DMP's packets that came due, counted as the samples are."""
+        if self._dmp_image is None:
+            return
+        if self._dmp_epoch_ns is None or now < self._dmp_epoch_ns:
+            self._dmp_epoch_ns = now
+            self._dmp_taken = 0
+            return
+        due = int((now - self._dmp_epoch_ns) // self._dmp_period_ns)
+        if due <= self._dmp_taken:
+            return
+        n = due - self._dmp_taken
+        self._dmp_taken = due
+        self._dmp_packets(n, self._dmp_epoch_ns + due * self._dmp_period_ns)
+
     def _tick(self) -> None:
-        """One sample period passed, on a host where nothing measures it."""
+        """One sample period passed, on a host where nothing measures it. A
+        DMP that runs writes one packet in it."""
         if not self._asleep():
             self._sampled(1, None)
+            if self._dmp_image is not None:
+                self._dmp_packets(1, None)
 
     def _sampled(self, n: int, at_ns) -> None:
         """`n` samples were taken, the last of them at `at_ns` of the guest's
@@ -662,14 +843,81 @@ class MPU6050Slave:
         events = _MPU_DATA_RDY_INT
         if self._fifo_samples(n):
             events |= _MPU_FIFO_OFLOW_INT
+        self._raise(events, at_ns)
+
+    def _raise(self, events: int, at_ns) -> None:
+        """Interrupts happened at `at_ns` of the guest's time; only an
+        enabled source raises its status bit."""
         raised = self.regs[_MPU_INT_ENABLE] & _MPU_INT_SOURCES & events
         if not raised:
             return
         self.regs[_MPU_INT_STATUS] |= raised
-        # A pulse has a length only where there is a clock to measure it on.
+        # A pulse has a length only where there is a clock to measure it on,
+        # and the later of two events ends it.
         if at_ns is not None and not self._latched():
-            self._pulse_end_ns = at_ns + _MPU_INT_PULSE_NS
+            end = at_ns + _MPU_INT_PULSE_NS
+            self._pulse_end_ns = end if self._pulse_end_ns is None else max(self._pulse_end_ns, end)
             self._pulses += 1
+
+    def _dmp_packets(self, n: int, at_ns) -> None:
+        """The DMP wrote `n` packets, the last of them at `at_ns`. They are
+        of one instant, as _fifo_samples' are, and the heading turns by one
+        period's worth of the gyroscope per packet, whether or not the FIFO
+        keeps it."""
+        image = self._dmp_image
+        size = image[3]
+        block = self._output()
+        accel_lsb = MPU6050_RULES['accel_lsb_per_g'][(self.regs[_MPU_ACCEL_CONFIG] >> 3) & 3]
+        gyro_lsb = MPU6050_RULES['gyro_lsb_per_dps'][(self.regs[_MPU_GYRO_CONFIG] >> 3) & 3]
+        step = _mpu_dmp_heading_step(block, gyro_lsb, self._dmp_period_ns)
+        cap = self._die['fifo_size']
+        lost = len(self._fifo) + n * size > cap
+        pushes = min(n, -(-cap // size) + 1)
+        for _ in range(n - pushes):
+            self._dmp_yaw += step
+        for _ in range(pushes):
+            self._dmp_yaw += step
+            self._fifo += mpu_dmp_packet(image, block, accel_lsb, self._dmp_yaw)
+        if len(self._fifo) > cap:
+            del self._fifo[:len(self._fifo) - cap]
+        self._raise(_MPU_DMP_INT | (_MPU_FIFO_OFLOW_INT if lost else 0), at_ns)
+
+    def _dmp_runnable(self):
+        """The image the DMP runs now, None, or 'unknown': it runs while the
+        chip is awake and USER_CTRL has DMP_EN and FIFO_EN, from the program
+        start address of DMP_CFG_1/2, where the bytes there are those of an
+        image the model knows."""
+        both = _MPU_USER_DMP_EN | _MPU_USER_FIFO_EN
+        if self._asleep() or self.regs[_MPU_USER_CTRL] & both != both:
+            return None
+        start = ((self.regs[_MPU_DMP_CFG_1] << 8) | self.regs[_MPU_DMP_CFG_1 + 1]) % len(self._dmp_mem)
+        for image in _MPU_DMP_IMAGES:
+            sig = image[1]
+            if image[0] == start and self._dmp_mem[start:start + len(sig)] == sig:
+                return image
+        return 'unknown'
+
+    def _dmp_period_of(self) -> float:
+        """The DMP period the image's divider sets, in ns."""
+        at = MPU6050_RULES['dmp_rate_div_at']
+        divider = (self._dmp_mem[at] << 8) | self._dmp_mem[at + 1]
+        return (1 + divider) * 1e9 / MPU6050_RULES['dmp_rate_hz']
+
+    def _dmp_follow(self, reset: bool) -> None:
+        """After a write: the DMP starts, stops, or runs at another rate. A
+        start (and DMP_RESET) puts the heading back to zero, and the first
+        packet is one period from here."""
+        runnable = self._dmp_runnable()
+        image = None if runnable == 'unknown' else runnable
+        period = self._dmp_period_of() if image is not None else 0.0
+        if image is self._dmp_image and period == self._dmp_period_ns and not reset:
+            return
+        if image is not self._dmp_image or reset:
+            self._dmp_yaw = 0.0
+        self._dmp_image = image
+        self._dmp_period_ns = period
+        self._dmp_epoch_ns = None if image is None else self._now()
+        self._dmp_taken = 0
 
     def _fifo_samples(self, n: int) -> bool:
         """Push `n` samples of the sources FIFO_EN selects, while USER_CTRL
@@ -726,6 +974,9 @@ class MPU6050Slave:
         self._dmp_mem[:] = bytes(len(self._dmp_mem))
         for at, value in MPU6050_RULES['dmp_rom'].items():
             self._dmp_mem[at] = value
+        self._dmp_image = None
+        self._dmp_period_ns = 0.0
+        self._dmp_yaw = 0.0
         self._restart_sampling()
 
     def _dmp_cell(self) -> int:
@@ -771,6 +1022,9 @@ class MPU6050Slave:
             return
         if reg == _MPU_MEM_R_W:
             self._dmp_mem[self._dmp_cell()] = value
+            # A divider written while the DMP runs changes its rate.
+            if self._dmp_image is not None:
+                self._dmp_follow(False)
             return
         stored = value & ~_MPU_SELF_CLEARING[reg] & 0xFF
         # What sampled until now holds this instant from here on if the write
@@ -782,6 +1036,7 @@ class MPU6050Slave:
         # Waking up, or another rate: the first sample is one period from here.
         if self._asleep() != was_asleep or self._sample_period_ns() != self._period_ns:
             self._restart_sampling()
+        self._dmp_follow(reg == _MPU_USER_CTRL and bool(value & _MPU_DMP_RESET))
 
     def _latch(self) -> None:
         self._sample = self._output()
