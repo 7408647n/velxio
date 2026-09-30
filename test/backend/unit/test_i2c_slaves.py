@@ -1157,6 +1157,25 @@ class TestMPU6050Slave(unittest.TestCase):
         # The pulse under way ends when it ends.
         self.assertEqual(mpu.int_wake_ns(2_000_000), 175_000)
 
+    def test_int_pulses_count_the_pulses_started_and_the_levels_follow_int_pin_cfg(self):
+        clock = GuestClock()
+        mpu = MPU6050Slave(0x68, now_ns=clock)
+        i2c_write_reg(mpu, 0x38, 0x01)
+        i2c_write_reg(mpu, 0x6B, 0x00)
+        self.assertEqual(mpu.int_pulses(), 0)
+        clock.ns = 1_000_000                # eight samples at 8 kHz
+        self.assertEqual(mpu.int_pulses(), 1)   # taken at one look: one pulse
+        clock.ns = 1_125_000
+        self.assertEqual(mpu.int_pulses(), 2)
+        self.assertEqual(mpu.int_pad_levels(), ('high', 'low'))
+        i2c_write_reg(mpu, 0x37, 0x80)      # active low
+        self.assertEqual(mpu.int_pad_levels(), ('low', 'high'))
+        i2c_write_reg(mpu, 0x37, 0xC0)      # active low, open drain
+        self.assertEqual(mpu.int_pad_levels(), ('low', 'z'))
+        i2c_write_reg(mpu, 0x37, 0x20)      # latched: a level, no pulses
+        clock.ns = 2_000_000
+        self.assertEqual(mpu.int_pulses(), 2)
+
     def test_rules_are_the_table_the_shared_vectors_carry(self):
         """The twin and the tab model work from one table of facts, and the
         vectors hold the copy both are compared with."""

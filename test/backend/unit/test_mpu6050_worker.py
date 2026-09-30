@@ -184,6 +184,15 @@ class TestSampledOnTheGuestClock:
         w.guest('clock', ns=1_050_000)
         assert wait_levels(w, [0, 1, 0]) == [0, 1, 0], 'and lowers it 50 us later'
 
+    def test_pulses_the_thread_woke_too_late_for_reach_the_pad_as_one(self, clocked):
+        """The guest ran past a sample and the end of its pulse before the
+        timer thread looked: the pad still pulses, once for all of them."""
+        w = clocked
+        w.guest('clock', ns=3_200_000)
+        assert wait_levels(w, [0, 1, 0]) == [0, 1, 0]
+        time.sleep(0.1)
+        assert int_levels(w) == [0, 1, 0], 'one pulse for the three samples'
+
     def test_a_latched_int_waits_for_the_read(self, clocked):
         w = clocked
         write_reg(w, INT_PIN_CFG, 0x20)    # LATCH_INT_EN
@@ -212,7 +221,8 @@ class TestIntTimerCost:
 
     TAG = 'esp32_worker.py:chip_timer'
 
-    def test_an_8khz_int_takes_the_lock_at_most_twice_a_millisecond(self, worker, monkeypatch):
+    def test_an_8khz_int_takes_the_lock_at_most_twice_a_millisecond_and_pulses_at_each_look(
+            self, worker, monkeypatch):
         monkeypatch.setenv('BB_FAKE_GUEST_CLOCK', '1')
         monkeypatch.setenv('BB_FAKE_BQL', '1')
         w = worker(sensors=[record(int_pin=INT_GPIO)])
@@ -226,12 +236,18 @@ class TestIntTimerCost:
         seconds = time.monotonic() - t0
         takes = (w.guest('bql')['takes'].get(self.TAG, 0) - before) / seconds
         edges = int_levels(w)
-        print(f'chip timer lock takes: {takes:.0f}/s, INT levels put: {len(edges)}')
+        pulses = sum(1 for a, b in zip(edges, edges[1:]) if a == 0 and b == 1) / seconds
+        print(f'chip timer lock takes: {takes:.0f}/s, INT pulses delivered: {pulses:.0f}/s')
         # One sample per millisecond at most is looked at between bus events,
         # and its pulse end: 2,000 a second, with room for the host's jitter.
         assert takes <= 2200, f'{takes:.0f} lock takes a second'
-        # Still pulsing: the pad went up and down between the bus events.
-        assert edges.count(1) >= 50, f'{edges.count(1)} pulses in {seconds:.2f} s'
+        # And a pulse per look: a look past the floor finds samples that
+        # pulsed since the last one and gives the guest one edge for them;
+        # the only other look is the end of a pulse it caught live. So at
+        # least one pulse for every two takes, with room for the host.
+        # Measured on the rig: 5,747 takes and 740 pulses a second before the
+        # floor, 522 and 225 with the floor alone, about 1,100 and 580 now.
+        assert pulses >= 0.4 * takes, f'{pulses:.0f} pulses for {takes:.0f} lock takes a second'
 
 
 class TestI2cTrace:

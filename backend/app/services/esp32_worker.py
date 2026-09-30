@@ -2990,7 +2990,12 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         every 50 or 75 us: waking for each took QEMU's I/O-thread lock about
         6,000 times a second (the thread could not keep up with 16,000) and
         delivered one pulse in ten. Now it wakes at most twice a millisecond,
-        at a sample and at the end of its pulse, whatever the rate.
+        at a sample and at the end of its pulse, whatever the rate. A look
+        that finds the pad idle while pulses were started since the last one
+        (the thread woke past the 50 us) puts one pulse on the pad, active
+        then idle, for all of them: a sketch counting DATA_RDY interrupts
+        gets one per look, as a slow ISR would. A latched INT is a level and
+        needs none.
         """
 
         def __init__(self, slave, gpio: int) -> None:
@@ -3000,12 +3005,27 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             self._last = None
             # The guest time the thread last looked at the pad.
             self._looked_ns = None
+            # The twin's pulse count when the pad was last seen or pulsed
+            # (None: a twin that counts none).
+            counter = getattr(slave, 'int_pulses', None)
+            self._pulses = counter() if counter is not None else None
             slave.on_int_change = self.refresh
 
         def refresh(self) -> None:
             pad = self.slave.int_pad()
-            if pad == self._last:
-                return
+            if self._pulses is not None:
+                pulses = self.slave.int_pulses()
+                missed = pulses != self._pulses
+                self._pulses = pulses
+                active, idle = self.slave.int_pad_levels()
+                if missed and pad == idle and active != idle:
+                    # Pulses came and went between two looks: one of them
+                    # reaches the pad, so the guest sees the edge.
+                    self._put(active)
+            if pad != self._last:
+                self._put(pad)
+
+        def _put(self, pad: str) -> None:
             self._last = pad
             if pad == 'z':
                 _pads.chip_release(self.gpio, self.owner)
@@ -3020,7 +3040,12 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         def next_timer_deadline(self):
             if self.slave.int_pad() != self._last:
                 return 0
+            # Asking the time takes the samples due: one that pulsed since
+            # the pad was last looked at is owed a pulse, over or not, at the
+            # next look the floor allows.
             looked = self._looked_ns
+            if self._pulses is not None and self.slave.int_pulses() != self._pulses:
+                return 0 if looked is None else looked + _MPU_INT_LOOK_NS
             return self.slave.int_wake_ns(
                 None if looked is None else looked + _MPU_INT_LOOK_NS)
 

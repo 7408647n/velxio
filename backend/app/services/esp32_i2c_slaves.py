@@ -374,6 +374,7 @@ class MPU6050Slave:
         self._taken = 0           # samples since the epoch
         self._period_ns = 0.0     # the period _taken was counted with
         self._pulse_end_ns = None # where the INT pulse of the last sample ends
+        self._pulses = 0          # INT pulses started, ever (int_pulses)
         self._fifo = bytearray()
         self._fifo_last = 0       # what an empty FIFO answers: the byte read last
         self._dmp_mem = bytearray(MPU6050_RULES['dmp_banks'] * 256)
@@ -511,11 +512,27 @@ class MPU6050Slave:
         open-drain pad (INT_OPEN) only ever pulls low (4.14)."""
         with self._lock:
             self._sync()
-            cfg = self.regs[_MPU_INT_PIN_CFG]
-            high = self._int_active() != bool(cfg & _MPU_INT_LEVEL)
-            if not high:
-                return 'low'
-            return 'z' if cfg & _MPU_INT_OPEN else 'high'
+            return self._pad(self._int_active())
+
+    def _pad(self, active: bool) -> str:
+        cfg = self.regs[_MPU_INT_PIN_CFG]
+        if active == bool(cfg & _MPU_INT_LEVEL):
+            return 'low'
+        return 'z' if cfg & _MPU_INT_OPEN else 'high'
+
+    def int_pad_levels(self) -> tuple:
+        """What the pad does (active, idle) under the INT_PIN_CFG of now."""
+        with self._lock:
+            return self._pad(True), self._pad(False)
+
+    def int_pulses(self) -> int:
+        """How many 50 us INT pulses the chip has started, ever. A host that
+        cannot look at the pad every 50 us (the ESP32 worker's timer thread)
+        counts them, and gives the guest one pulse for those it missed, so a
+        sketch that counts DATA_RDY interrupts still gets one per look."""
+        with self._lock:
+            self._sync()
+            return self._pulses
 
     def int_wake_ns(self, not_before_ns=None):
         """The guest time, in ns, at which the pad moves next with nobody
@@ -642,6 +659,7 @@ class MPU6050Slave:
         # A pulse has a length only where there is a clock to measure it on.
         if at_ns is not None and not self._latched():
             self._pulse_end_ns = at_ns + _MPU_INT_PULSE_NS
+            self._pulses += 1
 
     def _fifo_samples(self, n: int) -> bool:
         """Push `n` samples of the sources FIFO_EN selects, while USER_CTRL
