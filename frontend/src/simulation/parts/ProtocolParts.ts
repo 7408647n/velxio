@@ -40,8 +40,8 @@ import type { GuestClock } from '../buses/types';
 import { buildTimesOfPrograms } from '../firmwareBuildTime';
 import { attachI2cPart, hostClockRecord, parseI2cAddress } from './i2cPart';
 import {
+  WasmDS1307,
   WasmDS3231,
-  prepareWasmI2cModel,
   wasmI2cModelB64,
   wasmI2cModelEnabled,
   wasmI2cModule,
@@ -557,18 +557,43 @@ function firmwareBuildTimes(): RtcDateTime[] {
 }
 
 /**
- * DS1307 Real-Time Clock: VirtualDS1307 from I2CBusManager. The browser's
- * time, until the sketch sets one of its own.
+ * The compiled model of a clock chip (buses/models/ds1307.c, ds3231.c) and
+ * the bytes the worker's record carries so the worker runs the same one
+ * (project i2c-model-fidelity-2026-09, P5). Null when the i2cwasm flag turns
+ * it off or it cannot be built: then the part keeps its hand-written model
+ * and the worker its Python twin.
+ */
+function compiledRtc(name: 'ds1307' | 'ds3231'): { module: WebAssembly.Module; b64: string } | null {
+  if (!wasmI2cModelEnabled(name)) return null;
+  const module = wasmI2cModule(name);
+  const b64 = wasmI2cModelB64(name);
+  return module && b64 ? { module, b64 } : null;
+}
+
+/**
+ * DS1307 Real-Time Clock: buses/models/ds1307.c (VirtualDS1307 from
+ * I2CBusManager behind the i2cwasm flag). The browser's time, until the
+ * sketch sets one of its own.
  */
 PartSimulationRegistry.register('ds1307', {
   attachEvents: (_element, simulator, _getPin, componentId) => {
+    const compiled = compiledRtc('ds1307');
+    const dev = compiled
+      ? new WasmDS1307(compiled.module, { buildTimes: firmwareBuildTimes })
+      : new VirtualDS1307({ buildTimes: firmwareBuildTimes });
     const part = attachI2cPart({
       simulator,
       componentId,
-      device: new VirtualDS1307({ buildTimes: firmwareBuildTimes }),
-      worker: { type: 'ds1307', props: hostClockRecord() },
+      device: dev,
+      worker: {
+        type: 'ds1307',
+        props: { ...hostClockRecord(), ...(compiled ? { wasmB64: compiled.b64 } : {}) },
+      },
     });
-    return () => part.dispose();
+    return () => {
+      part.dispose();
+      if (dev instanceof WasmDS1307) dev.dispose();
+    };
   },
 });
 
@@ -2123,8 +2148,9 @@ PartSimulationRegistry.register('bmp280', {
 
 /**
  * DS3231: I2C clock with two alarms and an on-chip temperature sensor
- * (address 0x68), VirtualDS3231 from I2CBusManager. The browser's time, until
- * the sketch sets one of its own.
+ * (address 0x68): buses/models/ds3231.c (VirtualDS3231 from I2CBusManager
+ * behind the i2cwasm flag). The browser's time, until the sketch sets one of
+ * its own.
  *
  * The temperature is the panel's; it starts at `element.temperature`, or at
  * the panel's default.
@@ -2137,18 +2163,13 @@ PartSimulationRegistry.register('ds3231', {
       ? fromElement
       : sensorControlDefault('ds3231', 'temperature', 25);
 
-    // Behind the i2cwasm flag, off by default: the compiled model of the chip
-    // (buses/models/ds3231.c) in place of VirtualDS3231, and its bytes in the
-    // worker's record so the worker runs it too (project
-    // i2c-model-fidelity-2026-09, P5). Until the compile is ready, this run
-    // keeps the hand-written model.
-    const wantWasm = wasmI2cModelEnabled('ds3231');
-    const wasmModule = wantWasm ? wasmI2cModule('ds3231') : null;
-    if (wantWasm && !wasmModule) void prepareWasmI2cModel('ds3231');
-    const dev = wasmModule
-      ? new WasmDS3231(wasmModule, { buildTimes: firmwareBuildTimes })
+    // The compiled model of the chip, and its bytes in the worker's record so
+    // the worker runs it too; VirtualDS3231 behind the i2cwasm flag.
+    const compiled = compiledRtc('ds3231');
+    const dev = compiled
+      ? new WasmDS3231(compiled.module, { buildTimes: firmwareBuildTimes })
       : new VirtualDS3231({ buildTimes: firmwareBuildTimes });
-    const wasmB64 = wasmModule ? wasmI2cModelB64('ds3231') : null;
+    const wasmB64 = compiled?.b64 ?? null;
     dev.temperatureC = initTemp;
     const part = attachI2cPart({
       simulator,
@@ -2173,7 +2194,6 @@ PartSimulationRegistry.register('ds3231', {
     };
   },
 });
-if (wasmI2cModelEnabled('ds3231')) void prepareWasmI2cModel('ds3231');
 
 // ─── PCF8574 I/O Expander ────────────────────────────────────────────────────
 

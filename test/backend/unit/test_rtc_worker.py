@@ -17,6 +17,11 @@ calling the worker's own callbacks):
   - the DS3231 starts from the temperature of its record, and a slider that
     moves changes it.
 
+Every case runs twice: on the record the tab files by default since P5, which
+carries the part's compiled model (`wasmB64`, buses/models/ds1307.c and
+ds3231.c) that the worker then runs, and on a record without it (the tab's
+`?i2cwasm=off`), for which the worker keeps its Python twin.
+
 The worker's clock cannot be replaced from here. Every record below puts the
 tab's clock years away from the machine's, at the start of a minute, so what
 a test reads in the minute after the worker started is known: minutes, hours,
@@ -24,8 +29,10 @@ day of week, date, month and year. The seconds are never compared.
 """
 from __future__ import annotations
 
+import base64
 import calendar
 import time
+from pathlib import Path
 
 import pytest
 
@@ -68,9 +75,24 @@ BUILD_TIME = [0x41, 0x39, 0x23, 0x02, 0x29, 0x09, 0x26]
 OWN_TIME = [0x00, 0x30, 0x12, 0x06, 0x19, 0x01, 0x13]   # 19 January 2013, 12:30:00
 
 
+BUS_CHIPS = Path(__file__).resolve().parents[3] / 'frontend' / 'public' / 'bus-chips'
+_MODEL = {'now': 'compiled'}
+
+
+@pytest.fixture(autouse=True, params=['compiled', 'twin'])
+def model(request):
+    """What the record carries: the compiled model, or nothing (the twin)."""
+    _MODEL['now'] = request.param
+    yield request.param
+    _MODEL['now'] = 'compiled'
+
+
 def record(kind: str, **values) -> dict:
     """The record the tab's part files for the worker (parts/i2cPart.ts)."""
-    return {'sensor_type': kind, 'pin': PIN, 'addr': ADDR, 'owner': 'rtc1', **values}
+    rec = {'sensor_type': kind, 'pin': PIN, 'addr': ADDR, 'owner': 'rtc1', **values}
+    if _MODEL['now'] == 'compiled':
+        rec['wasmB64'] = base64.b64encode((BUS_CHIPS / f'{kind}.wasm').read_bytes()).decode()
+    return rec
 
 
 def write_reg(w, reg: int, *values: int) -> None:
@@ -170,3 +192,16 @@ class TestWhatTheChipsKeep:
         assert read_regs(w, 0x0E, 2) == [0x1C, 0x08]
         write_reg(w, 0x0F, 0x80)
         assert read_regs(w, 0x0E, 2) == [0x1C, 0x00]
+
+
+@pytest.mark.parametrize('kind', ['ds1307', 'ds3231'])
+def test_the_worker_runs_the_model_the_record_carries(worker, kind, model):
+    """And says so on stderr when it cannot, keeping the twin."""
+    w = worker(sensors=[record(kind, **TAB)])
+    assert read_regs(w, 0x01, 6) == TAB_WALL
+    assert not any('could not be run' in line for line in w.stderr)
+    bad = dict(record(kind, **TAB), wasmB64=base64.b64encode(b'not wasm').decode())
+    w = worker(sensors=[bad])
+    assert read_regs(w, 0x01, 6) == TAB_WALL
+    assert w.wait_for(lambda: any(f'{kind}: the compiled model could not be run' in line
+                                  for line in w.stderr), 5.0)

@@ -18,6 +18,7 @@ import { useSimulatorStore } from '../../store/useSimulatorStore';
 import { i2cTargetOf } from '../../simulation/parts/i2cPart';
 import { VirtualMPU6050 } from '../../simulation/parts/ProtocolParts';
 import { VirtualDS1307, VirtualDS3231, type I2CDevice } from '../../simulation/I2CBusManager';
+import { WasmDS1307, WasmDS3231, wasmI2cModule } from '../../simulation/parts/wasmI2cModels';
 
 class Circuit implements NetResolver {
   private readonly nets = new Map<string, ResolvedPin>();
@@ -170,6 +171,8 @@ describe('Raspberry Pi: the map says where a clock chip wraps its pointer', () =
   // DS3231 wraps after 0x12 and the DS1307 after 0x3F, so a read across the
   // last register answered zeros where the chip answers its seconds again.
   const clocks = [
+    ['ds3231 (compiled)', () => new WasmDS3231(wasmI2cModule('ds3231')!, { clock: () => 0 }), 0x12],
+    ['ds1307 (compiled)', () => new WasmDS1307(wasmI2cModule('ds1307')!, { clock: () => 0 }), 0x3f],
     ['ds3231 (hand-written)', () => new VirtualDS3231({ clock: () => 0 }), 0x12],
     ['ds1307 (hand-written)', () => new VirtualDS1307({ clock: () => 0 }), 0x3f],
   ] as const;
