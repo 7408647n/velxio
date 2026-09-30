@@ -69,16 +69,31 @@ import { useSimulatorStore, registerSdImageReader } from '../../store/useSimulat
  * differs.  This core is used by both VirtualSSD1306 (I2C) and
  * attachSSD1306SPI (SPI).
  *
- * Supported commands:
- *  - 0x20 Set Memory Addressing Mode (horizontal / vertical / page)
- *  - 0x21 Set Column Address
- *  - 0x22 Set Page Address
- *  - 0x40–0x7F Set Display Start Line
- *  - 0xAF Display ON / 0xAE Display OFF
- *  - All other parameterized commands are parsed but ignored.
+ * Modelled from the datasheet (SSD1306 rev 1.1, section 10.1), everything that
+ * decides what the glass shows:
+ *  - 0x20 memory addressing mode, 0x21 column and 0x22 page window,
+ *    0xB0-0xB7 page and 0x00-0x1F column pointer (page addressing)
+ *  - 0x40-0x7F display start line, 0xD3 display offset
+ *  - 0xA0/0xA1 segment re-map, 0xC0/0xC8 COM scan direction
+ *  - 0x81 contrast, 0xA4/0xA5 entire display on, 0xA6/0xA7 normal/inverse,
+ *    0xAE/0xAF display off/on
+ * Every other command is parsed with its parameter bytes and ignored.
+ *
+ * The state starts at the chip's reset values (datasheet 8.5): display off,
+ * contrast 0x7F, no re-map, normal scan, page addressing. It is the panel's,
+ * not the sketch's, so it lives as long as the part on the canvas does (see
+ * coreFor below).
  */
 class SSD1306Core {
-  /** 1024-byte GDDRAM: 8 pages × 128 columns. Each byte = 8 vertical pixels. */
+  /**
+   * 1024-byte GDDRAM: 8 pages × 128 columns. Each byte = 8 vertical pixels.
+   *
+   * Byte `page * 128 + x` holds the column the glass shows at x. The RAM has
+   * no read path here, so which way its columns are numbered is ours to pick;
+   * this way round a driver that sends 0xA1 (Adafruit_SSD1306, U8g2 R0,
+   * MicroPython ssd1306.py, SSD1306Ascii) addresses byte `page * 128 + col`,
+   * as the buffer always was.
+   */
   readonly buffer = new Uint8Array(128 * 8);
 
   // GDDRAM cursor
@@ -94,6 +109,16 @@ class SSD1306Core {
   // this default and never send 0x20 — so the default MUST be 2 or their
   // setCursor (0xB0-0xB7 + 0x00-0x1F) renders garbled.
   private memMode = 2;
+
+  // What the glass shows (datasheet 10.1.6 to 10.1.15), at reset values.
+  private displayOn = false;
+  private contrast = 0x7f;
+  private inverse = false;
+  private entireOn = false;
+  private segRemap = false;
+  private comRemap = false;
+  private displayOffset = 0;
+  private startLine = 0;
 
   // Multi-byte command accumulation
   private cmdBuf: number[] = [];
@@ -114,13 +139,25 @@ class SSD1306Core {
       cmd === 0xdb
     )
       return 1;
-    if (cmd === 0x21 || cmd === 0x22) return 2;
+    if (cmd === 0x21 || cmd === 0x22 || cmd === 0xa3) return 2;
+    // Scroll setup (datasheet 10.2.1, 10.2.2). Their parameters carry values
+    // such as 0x40 and 0x00-0x0F that would otherwise be taken for the start
+    // line and column commands.
+    if (cmd === 0x29 || cmd === 0x2a) return 5;
+    if (cmd === 0x26 || cmd === 0x27) return 6;
     return 0;
   }
 
   /** Write a data byte to GDDRAM and advance cursor. */
   writeData(value: number): void {
-    this.buffer[this.page * 128 + this.col] = value;
+    // Segment re-map acts on the write, not on the display: "Data already
+    // stored in GDDRAM will have no changes" (datasheet 10.1.8). With 0xA1,
+    // column address c drives SEG127-c; the glass is wired so that this is
+    // the column at x = c (the orientation every driver's init selects).
+    if (this.col <= 127) {
+      const x = this.segRemap ? this.col : 127 - this.col;
+      this.buffer[this.page * 128 + x] = value;
+    }
     this.advanceCursor();
   }
 
@@ -165,6 +202,32 @@ class SSD1306Core {
         this.pageEnd = p2 & 0x07;
         this.page = this.pageStart;
         break;
+      case 0x81:
+        this.contrast = p1;
+        break;
+      case 0xd3:
+        this.displayOffset = p1 & 0x3f;
+        break;
+      case 0xa0:
+      case 0xa1:
+        this.segRemap = cmd === 0xa1;
+        break;
+      case 0xa4:
+      case 0xa5:
+        this.entireOn = cmd === 0xa5;
+        break;
+      case 0xa6:
+      case 0xa7:
+        this.inverse = cmd === 0xa7;
+        break;
+      case 0xae:
+      case 0xaf:
+        this.displayOn = cmd === 0xaf;
+        break;
+      case 0xc0:
+      case 0xc8:
+        this.comRemap = cmd === 0xc8;
+        break;
       default:
         // Page-addressing-mode cursor commands (single-byte). Used by
         // Tiny4kOLED / U8g2 page buffer / classic SSD1306 drivers whose
@@ -179,7 +242,7 @@ class SSD1306Core {
           // set higher column nibble (0x10..0x1F)
           this.col = (this.col & 0x0f) | ((cmd & 0x0f) << 4);
         } else if (cmd >= 0x40 && cmd <= 0x7f) {
-          /* display start line — visual, skip */
+          this.startLine = cmd & 0x3f;
         }
         break;
     }
@@ -210,11 +273,38 @@ class SSD1306Core {
   }
 
   /**
-   * Push the 1-bit GDDRAM buffer to the wokwi-ssd1306 web component.
+   * How bright a lit pixel is, 0..1, for the contrast register.
+   *
+   * The datasheet gives the contrast as 256 steps of segment current
+   * (10.1.7), not as a luminance, and on a module the steps above the reset
+   * value are hard to tell apart: Adafruit_SSD1306 dim() jumps straight to 0
+   * because "the range of contrast is too small to be really useful". So the
+   * reset value and every value above it paint at full brightness, the one the
+   * panel always had, and that covers what every driver's init sends
+   * (Adafruit 0x8F/0x9F/0xCF, U8g2 and ThingPulse 0xCF, SSD1306Ascii 0x7F,
+   * MicroPython 0xFF). Below it the panel dims towards 0x00, which on the
+   * bench is still readable.
+   */
+  private brightness(): number {
+    const DIMMEST = 0.3;
+    if (this.contrast >= 0x7f) return 1;
+    return DIMMEST + ((1 - DIMMEST) * this.contrast) / 0x7f;
+  }
+
+  /**
+   * Push what the glass shows to the wokwi-ssd1306 web component.
    *
    * wokwi-ssd1306 API:
    *   - `element.imageData` — a 128×64 ImageData (RGBA, 4 bytes/pixel)
    *   - `element.redraw()` — flushes imageData to the internal canvas
+   *
+   * Glass row y is driven by COM(63-y), so the scan direction every driver
+   * selects (0xC8) shows RAM row y there. A COM pin shows display row
+   * (i + offset) mod 64 when scanning up and (63 - i + offset) mod 64 when
+   * scanning down, and display row r reads RAM row (r + start line) mod 64
+   * (datasheet Tables 10-1 and 10-2). Display off leaves the segments at VSS:
+   * a dark panel over an intact RAM (10.1.12). Entire display on lights every
+   * pixel whatever the RAM holds (10.1.9); inverse lights the zeros (10.1.10).
    */
   syncElement(element: HTMLElement): void {
     const el = element as any;
@@ -230,25 +320,51 @@ class SSD1306Core {
     }
 
     const px = imgData.data;
+    const level = this.brightness();
+    const r = Math.round(200 * level);
+    const g = Math.round(230 * level);
+    const b = Math.round(255 * level);
+    const flip = this.inverse ? 1 : 0;
 
-    for (let page = 0; page < 8; page++) {
-      for (let col = 0; col < 128; col++) {
-        const byte = this.buffer[page * 128 + col];
-        for (let bit = 0; bit < 8; bit++) {
-          const row = page * 8 + bit;
-          const lit = (byte >> bit) & 1;
-          const idx = (row * 128 + col) * 4;
-          px[idx] = lit ? 200 : 0; // R
-          px[idx + 1] = lit ? 230 : 0; // G
-          px[idx + 2] = lit ? 255 : 0; // B
-          px[idx + 3] = 255; // A
-        }
+    for (let y = 0; y < 64; y++) {
+      const com = 63 - y;
+      const displayRow = ((this.comRemap ? 63 - com : com) + this.displayOffset) & 63;
+      const ramRow = (displayRow + this.startLine) & 63;
+      const base = (ramRow >> 3) * 128;
+      const bit = ramRow & 7;
+      for (let x = 0; x < 128; x++) {
+        const lit = this.displayOn && (this.entireOn || (((this.buffer[base + x] >> bit) & 1) ^ flip) === 1);
+        const idx = (y * 128 + x) * 4;
+        px[idx] = lit ? r : 0; // R
+        px[idx + 1] = lit ? g : 0; // G
+        px[idx + 2] = lit ? b : 0; // B
+        px[idx + 3] = 255; // A
       }
     }
 
     el.imageData = imgData;
     if (typeof el.redraw === 'function') el.redraw();
   }
+}
+
+/**
+ * One panel per part on the canvas. The part re-attaches when its wires
+ * change or a new program is loaded, and neither powers the module down: the
+ * configuration the sketch's init wrote in setup() (display on, re-map,
+ * contrast) and the frame in its RAM stay, as on the bench. A fresh core per
+ * attach would come up at the reset values, display off, and a sketch that
+ * only initialises in setup() would stay dark after a wire edit.
+ */
+const panels = new WeakMap<object, SSD1306Core>();
+
+function coreFor(element: HTMLElement): SSD1306Core {
+  let core = panels.get(element);
+  if (!core) {
+    core = new SSD1306Core();
+    panels.set(element, core);
+  }
+  core.resetCommand();
+  return core;
 }
 
 /**
@@ -269,7 +385,7 @@ class SSD1306Core {
  */
 class VirtualSSD1306 implements I2CDevice {
   address: number;
-  private readonly core = new SSD1306Core();
+  private readonly core: SSD1306Core;
 
   private ctrlByte = true;
   private isData = false;
@@ -280,6 +396,7 @@ class VirtualSSD1306 implements I2CDevice {
   constructor(address: number, element: HTMLElement) {
     this.address = address;
     this.element = element;
+    this.core = coreFor(element);
   }
 
   /** Expose core buffer for tests. */
@@ -362,7 +479,7 @@ function attachSSD1306SPI(
   componentId?: string,
 ): () => void {
   const pinManager = simulator?.pinManager;
-  const core = new SSD1306Core();
+  const core = coreFor(element);
   let dcState = false;
   const unsubs: (() => void)[] = [];
 
@@ -391,12 +508,11 @@ function attachSSD1306SPI(
     });
   };
 
+  // A command repaints too: invert, contrast, display on/off and the scan
+  // direction change the glass without a single data byte.
   const take = (value: number): void => {
-    if (!dcState) {
-      core.writeCommand(value);
-      return;
-    }
-    core.writeData(value);
+    if (dcState) core.writeData(value);
+    else core.writeCommand(value);
     dirty = true;
     scheduleSync();
   };

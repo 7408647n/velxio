@@ -71,6 +71,8 @@ const litCount = (el: { imageData: ImageData }) => {
 
 /** One column of eight pixels at the cursor (page mode, column 0, page 0). */
 const PIXELS = [0x40, 0xff];
+/** Display on, upright: what every driver's init sends; the panel powers up off. */
+const PANEL_ON = [0x00, 0xaf, 0xa1, 0xc8];
 
 describe('two SSD1306 at 0x3C on one QEMU board', () => {
   it('each draws the write phases the worker names it for', () => {
@@ -81,6 +83,8 @@ describe('two SSD1306 at 0x3C on one QEMU board', () => {
     logic.attachEvents!(a as unknown as HTMLElement, shim as never, () => null, 'oledA');
     logic.attachEvents!(b as unknown as HTMLElement, shim as never, () => null, 'oledB');
 
+    bridge.onI2cTransaction!(0x3c, PANEL_ON, 'oledA');
+    bridge.onI2cTransaction!(0x3c, PANEL_ON, 'oledB');
     bridge.onI2cTransaction!(0x3c, PIXELS, 'oledA');
     expect([litCount(a), litCount(b)]).toEqual([8, 0]);
   });
@@ -94,6 +98,7 @@ describe('two SSD1306 at 0x3C on one QEMU board', () => {
     logic.attachEvents!(b as unknown as HTMLElement, shim as never, () => null, 'oledB');
     detachA();
 
+    bridge.onI2cTransaction!(0x3c, PANEL_ON, 'oledB');
     bridge.onI2cTransaction!(0x3c, PIXELS, 'oledB');
     expect(litCount(b)).toBe(8);
   });
@@ -107,6 +112,7 @@ describe('two SSD1306 at 0x3C on one QEMU board', () => {
       () => null,
       'oledA',
     );
+    bridge.onI2cTransaction!(0x3c, PANEL_ON);
     bridge.onI2cTransaction!(0x3c, PIXELS);
     expect(litCount(a)).toBe(8);
   });

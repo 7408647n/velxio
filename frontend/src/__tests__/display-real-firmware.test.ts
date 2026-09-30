@@ -151,10 +151,35 @@ function lit(el: { imageData: ImageData }): Set<string> {
 }
 
 function quarter(x0: number, y0: number): Set<string> {
+  return rows(y0, y0 + 32, x0, x0 + 64);
+}
+
+/** Pixels x0 <= x < x1 on the rows y0 <= y < y1. */
+function rows(y0: number, y1: number, x0 = 0, x1 = 64): Set<string> {
   const on = new Set<string>();
-  for (let y = y0; y < y0 + 32; y++) for (let x = x0; x < x0 + 64; x++) on.add(`${x},${y}`);
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) on.add(`${x},${y}`);
   return on;
 }
+
+const union = (...sets: Set<string>[]): Set<string> => new Set(sets.flatMap((s) => [...s]));
+const allBut = (off: Set<string>): Set<string> => {
+  const on = rows(0, 64, 0, 128);
+  for (const p of off) on.delete(p);
+  return on;
+};
+
+/** The distinct colours the panel shows, as "r,g,b". */
+function colours(el: { imageData: ImageData }): Set<string> {
+  const seen = new Set<string>();
+  const d = el.imageData.data;
+  for (let i = 0; i < d.length; i += 4) seen.add(`${d[i]},${d[i + 1]},${d[i + 2]}`);
+  return seen;
+}
+
+// The lit colour the panel has always painted, and the one at contrast 0.
+const LIT = '200,230,255';
+const DIMMED = '60,69,77';
+const DARK = '0,0,0';
 
 if (typeof globalThis.ImageData === 'undefined') {
   (globalThis as { ImageData?: unknown }).ImageData = class {
@@ -197,6 +222,9 @@ describe.each([
     runFrames();
     expect(el.redraw).toHaveBeenCalledTimes(1);
     expect(lit(el)).toEqual(quarter(0, 0));
+    // begin() sends its re-map (0xA1), scan direction (0xC8) and contrast:
+    // the same picture, in the same colours, as before they were modelled.
+    expect(colours(el)).toEqual(new Set([LIT, DARK]));
 
     // Exactly one display() / sendBuffer(): many transactions, one paint.
     const stopsBefore = b.stops();
@@ -206,6 +234,7 @@ describe.each([
     runFrames();
     expect(el.redraw).toHaveBeenCalledTimes(2);
     expect(lit(el)).toEqual(quarter(64, 32));
+    expect(colours(el)).toEqual(new Set([LIT, DARK]));
   }, 120_000);
 
   it('keeps the last picture when the part goes before the next animation frame', () => {
@@ -213,6 +242,63 @@ describe.each([
     b.until(/^DONE$/);
     detach();
     expect(lit(el)).toEqual(quarter(64, 32));
+  }, 120_000);
+});
+
+/**
+ * The commands that change the glass without a new frame (project
+ * i2c-model-fidelity-2026-09, item "ssd1306cmd"). The panel ignored all of
+ * them: 56 projects of the production corpus send invert, contrast or display
+ * off, and ThingPulse and U8g2 R2 / setFlipMode(1) flip the picture with
+ * 0xA0 / 0xC0. Each step of the sketch is looked at on the frame after it.
+ */
+describe('SSD1306 over I2C under Adafruit_SSD1306 on an Arduino Uno, compiled: the panel commands', () => {
+  it('invert, dim, display off, entire display on, scan direction, start line, offset and segment re-map', () => {
+    const { b, el } = oledBench('avr-ssd1306-adafruit-commands');
+    const at = (step: string) => {
+      b.until(new RegExp(`^${step}$`));
+      runFrames();
+      return { lit: lit(el), colours: colours(el) };
+    };
+    expect(at('SHOWN')).toEqual({ lit: quarter(0, 0), colours: new Set([LIT, DARK]) });
+    // 0xA7: the zeros light up.
+    expect(at('INVERTED').lit).toEqual(allBut(quarter(0, 0)));
+    // 0x81 0x00: the same picture, dimmer.
+    expect(at('DIM')).toEqual({ lit: quarter(0, 0), colours: new Set([DIMMED, DARK]) });
+    // 0xAE: a dark panel.
+    expect(at('OFF').lit).toEqual(new Set());
+    // 0xAF then 0xA5: on again, every pixel lit whatever the RAM holds.
+    expect(at('ALLON')).toEqual({ lit: rows(0, 64, 0, 128), colours: new Set([LIT]) });
+    // 0xA4 then 0xC0: the RAM again, the rows scanned the other way at once.
+    expect(at('COMUP').lit).toEqual(quarter(0, 32));
+    // 0xC8, start line 8: RAM row 8 on the top row, rows wrap round.
+    expect(at('STARTLINE').lit).toEqual(union(rows(0, 24), rows(56, 64)));
+    // Start line 0, offset 16: COM16 moves to the top.
+    expect(at('OFFSET').lit).toEqual(union(rows(0, 16), rows(48, 64)));
+    // 0xA0 leaves what is in the RAM alone ...
+    expect(at('SEGSAME').lit).toEqual(quarter(0, 0));
+    // ... and mirrors what is written after it.
+    expect(at('MIRRORED').lit).toEqual(quarter(64, 0));
+    expect(at('RESTORED')).toEqual({ lit: quarter(0, 0), colours: new Set([LIT, DARK]) });
+  }, 120_000);
+});
+
+describe('SSD1306 over I2C under U8g2 page buffer on an Arduino Uno, compiled: the panel calls', () => {
+  it('setContrast, setPowerSave and setFlipMode', () => {
+    const { b, el } = oledBench('avr-ssd1306-u8g2-commands');
+    const at = (step: string) => {
+      b.until(new RegExp(`^${step}$`));
+      runFrames();
+      return { lit: lit(el), colours: colours(el) };
+    };
+    // Eight page transfers in page addressing: the picture as it always was.
+    expect(at('SHOWN')).toEqual({ lit: quarter(0, 0), colours: new Set([LIT, DARK]) });
+    expect(at('DIM')).toEqual({ lit: quarter(0, 0), colours: new Set([DIMMED, DARK]) });
+    expect(at('ASLEEP').lit).toEqual(new Set());
+    expect(at('AWAKE')).toEqual({ lit: quarter(0, 0), colours: new Set([LIT, DARK]) });
+    // 0xA0 0xC0 and a redraw: the picture turned 180 degrees, as the
+    // module shows it the other way up.
+    expect(at('FLIPPED').lit).toEqual(quarter(64, 32));
   }, 120_000);
 });
 
