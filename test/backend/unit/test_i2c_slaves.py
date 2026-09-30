@@ -1141,6 +1141,22 @@ class TestMPU6050Slave(unittest.TestCase):
         self.assertEqual(i2c_read_seq(mpu, 0x75, 1), [0x68])
         self.assertEqual(asked, [])
 
+    def test_int_wake_not_before_skips_to_a_sample_and_never_delays_a_pulse(self):
+        """The worker's timer thread asks for the first sample past the least
+        time between two of its looks (esp32_worker._MpuIntPin)."""
+        clock = GuestClock()
+        mpu = MPU6050Slave(0x68, now_ns=clock)
+        i2c_write_reg(mpu, 0x38, 0x01)   # DATA_RDY_EN; 8 kHz: 125 us
+        i2c_write_reg(mpu, 0x6B, 0x00)
+        self.assertEqual(mpu.int_wake_ns(), 125_000)
+        self.assertEqual(mpu.int_wake_ns(1_000_000), 1_000_000)
+        self.assertEqual(mpu.int_wake_ns(1_000_001), 1_125_000)
+        self.assertEqual(mpu.int_wake_ns(0), 125_000)
+        clock.ns = 125_010
+        self.assertEqual(mpu.int_pad(), 'high')
+        # The pulse under way ends when it ends.
+        self.assertEqual(mpu.int_wake_ns(2_000_000), 175_000)
+
     def test_rules_are_the_table_the_shared_vectors_carry(self):
         """The twin and the tab model work from one table of facts, and the
         vectors hold the copy both are compared with."""

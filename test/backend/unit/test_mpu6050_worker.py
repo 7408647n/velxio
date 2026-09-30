@@ -203,6 +203,37 @@ class TestSampledOnTheGuestClock:
         assert [c for c in calls if c[0] == 'set_pin' and c[1] < 100] == []
 
 
+class TestIntTimerCost:
+    """The INT pad costs the worker's chip timer thread a bounded number of
+    wake-ups, however fast the chip samples. At 8 kHz with DATA_RDY_EN set,
+    a pulse edge comes due every 50 or 75 us of guest time; the thread used
+    to wake for each and take QEMU's I/O-thread lock every time, some 16,000
+    times a second of a guest running at the host's pace."""
+
+    TAG = 'esp32_worker.py:chip_timer'
+
+    def test_an_8khz_int_takes_the_lock_at_most_twice_a_millisecond(self, worker, monkeypatch):
+        monkeypatch.setenv('BB_FAKE_GUEST_CLOCK', '1')
+        monkeypatch.setenv('BB_FAKE_BQL', '1')
+        w = worker(sensors=[record(int_pin=INT_GPIO)])
+        write_reg(w, INT_ENABLE, 0x01)     # DATA_RDY_EN; SMPLRT_DIV 0, DLPF off: 8 kHz
+        write_reg(w, PWR_MGMT_1, 0x00)
+        before = w.guest('bql')['takes'].get(self.TAG, 0)
+        start = w.guest('clock_run')['ns']
+        t0 = time.monotonic()
+        time.sleep(1.0)
+        w.guest('clock', ns=start + int((time.monotonic() - t0) * 1e9))
+        seconds = time.monotonic() - t0
+        takes = (w.guest('bql')['takes'].get(self.TAG, 0) - before) / seconds
+        edges = int_levels(w)
+        print(f'chip timer lock takes: {takes:.0f}/s, INT levels put: {len(edges)}')
+        # One sample per millisecond at most is looked at between bus events,
+        # and its pulse end: 2,000 a second, with room for the host's jitter.
+        assert takes <= 2200, f'{takes:.0f} lock takes a second'
+        # Still pulsing: the pad went up and down between the bus events.
+        assert edges.count(1) >= 50, f'{edges.count(1)} pulses in {seconds:.2f} s'
+
+
 class TestI2cTrace:
     def _traffic(self, w) -> None:
         write_reg(w, PWR_MGMT_1, 0x00)

@@ -2983,6 +2983,14 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         next look: a sketch that counts pulses sees fewer of them than a
         board would, one that reads on each edge or on a latched level reads
         every sample it gets.
+
+        Between two looks of the thread at least _MPU_INT_LOOK_NS of guest
+        time passes before the next sample it waits for (a pulse under way
+        still ends on time). At 8 kHz with DATA_RDY_EN set an edge comes due
+        every 50 or 75 us: waking for each took QEMU's I/O-thread lock about
+        6,000 times a second (the thread could not keep up with 16,000) and
+        delivered one pulse in ten. Now it wakes at most twice a millisecond,
+        at a sample and at the end of its pulse, whatever the rate.
         """
 
         def __init__(self, slave, gpio: int) -> None:
@@ -2990,6 +2998,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             self.gpio = gpio
             self.owner = object()
             self._last = None
+            # The guest time the thread last looked at the pad.
+            self._looked_ns = None
             slave.on_int_change = self.refresh
 
         def refresh(self) -> None:
@@ -3010,10 +3020,20 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         def next_timer_deadline(self):
             if self.slave.int_pad() != self._last:
                 return 0
-            return self.slave.int_wake_ns()
+            looked = self._looked_ns
+            return self.slave.int_wake_ns(
+                None if looked is None else looked + _MPU_INT_LOOK_NS)
 
         def fire_due_timers(self) -> None:
+            self._looked_ns = _chip_now_ns()
             self.refresh()
+
+    # The least guest time between two looks of the chip timer thread at an
+    # INT pad, 1 ms: the sample period at 1 kHz, the fastest rate with the
+    # low-pass filter on and the one DATA_RDY sketches run at (see
+    # _MpuIntPin). A faster chip is looked at on every sample that falls
+    # past it.
+    _MPU_INT_LOOK_NS = 1_000_000
 
     def _mpu_int_attach(sensor_data: dict, slave, record: dict) -> None:
         """Drive the pad INT is wired to, when the tab says it is wired."""
@@ -3143,11 +3163,23 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
                     break
                 if _chip_now_ns() < soonest_ns:
                     continue
+            # Only what is due now fires, and with nothing due the lock is
+            # not taken: a deadline can move while the thread naps (an INT
+            # pad the bus already moved, a pulse the thread woke too late
+            # for), and every take stalls the vCPU.
+            now_ns = _chip_now_ns()
+            due = []
+            for rt in list(_chip_timer_runtimes):
+                d = rt.next_timer_deadline()
+                if d is not None and d <= now_ns:
+                    due.append(rt)
+            if not due:
+                continue
             # Fire under the IO-thread lock so any pin_write the timer triggers is safe.
             if _lock_iothread:
                 _lock_iothread(b'esp32_worker.py:chip_timer', 0)
             try:
-                for rt in list(_chip_timer_runtimes):
+                for rt in due:
                     try:
                         rt.fire_due_timers()
                     except Exception as e:

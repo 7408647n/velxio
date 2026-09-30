@@ -513,11 +513,16 @@ class MPU6050Slave:
                 return 'low'
             return 'z' if cfg & _MPU_INT_OPEN else 'high'
 
-    def int_wake_ns(self):
+    def int_wake_ns(self, not_before_ns=None):
         """The guest time, in ns, at which the pad moves next with nobody
         touching the chip: the end of the pulse under way, or the next sample
         that raises an enabled interrupt. None when nothing is due: a latched
-        interrupt waits for the sketch, and so does a chip with no clock."""
+        interrupt waits for the sketch, and so does a chip with no clock.
+
+        With `not_before_ns`, a host that cannot look that often asks for the
+        first sample at or past that instant instead of the next one (a
+        pulse under way still ends when it ends): the pad is then seen at a
+        sample, as it moves, and not between two."""
         with self._lock:
             # Asleep, nothing moves: no sample, and going to sleep ended any
             # pulse. The clock is not asked either (see _restart_sampling).
@@ -536,7 +541,10 @@ class MPU6050Slave:
                 return None
             if not self.regs[_MPU_INT_ENABLE] & _MPU_INT_SOURCES:
                 return None
-            return self._epoch_ns + (self._taken + 1) * self._period_ns
+            k = self._taken + 1
+            if not_before_ns is not None:
+                k = max(k, _math.ceil((not_before_ns - self._epoch_ns) / self._period_ns))
+            return self._epoch_ns + k * self._period_ns
 
     def _asleep(self) -> bool:
         return (self.regs[_MPU_PWR_MGMT_1] & _MPU_SLEEP) != 0

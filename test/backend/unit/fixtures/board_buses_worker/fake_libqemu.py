@@ -22,7 +22,10 @@ one JSON reply per op (BB_CTL_OUT). Symbols the real library may lack
 worker takes the same fallback it takes on an older libqemu build. The guest
 clock (qemu_clock_get_ns, QEMU_CLOCK_VIRTUAL) is one of those: it is exported
 only when the test sets BB_FAKE_GUEST_CLOCK, and then the `clock` op moves it
-(board-buses F7: the chips a worker hosts read that clock).
+(board-buses F7: the chips a worker hosts read that clock), or `clock_run`
+lets it run with the host's time. The I/O-thread lock (bql_lock_impl,
+bql_unlock) is exported only when the test sets BB_FAKE_BQL; it excludes
+nothing, it counts the takes by the tag the worker passes (`bql` op).
 """
 from __future__ import annotations
 
@@ -31,6 +34,7 @@ import json
 import os
 import queue
 import threading
+import time
 
 
 class _Fn:
@@ -70,8 +74,25 @@ class FakeLibQemu:
         # The guest's virtual clock, in ns, moved by the `clock` op. Only a
         # test that asks for it sees the symbol at all.
         self._clock_ns = 0
+        # While the clock runs: the host's monotonic time it started at.
+        self._clock_run_from = None
         if os.environ.get('BB_FAKE_GUEST_CLOCK'):
-            self.qemu_clock_get_ns = _Fn(lambda _kind: self._clock_ns)
+            self.qemu_clock_get_ns = _Fn(lambda _kind: self._guest_ns())
+        self._bql_takes: dict[str, int] = {}
+        if os.environ.get('BB_FAKE_BQL'):
+            self.bql_lock_impl = _Fn(self._bql_lock)
+            self.bql_unlock = _Fn(lambda: None)
+
+    def _guest_ns(self) -> int:
+        start = self._clock_run_from
+        if start is None:
+            return self._clock_ns
+        return self._clock_ns + (time.monotonic_ns() - start)
+
+    def _bql_lock(self, tag, _line) -> None:
+        name = tag.decode() if isinstance(tag, bytes) else str(tag)
+        with self._calls_cv:
+            self._bql_takes[name] = self._bql_takes.get(name, 0) + 1
 
     # ── what the worker calls into QEMU ─────────────────────────────────────
     def _register(self, ref) -> None:
@@ -160,8 +181,18 @@ class FakeLibQemu:
             # QEMU_CLOCK_VIRTUAL reaches `ns`, as -icount or the host's time
             # would move it; the worker's chip timer thread reads it on its
             # own, so the reply needs no wait.
+            self._clock_run_from = None
             self._clock_ns = int(op['ns'])
             return {}
+        if kind == 'clock_run':
+            # The guest runs at the host's pace from where its clock stands,
+            # until the next `clock` op stops it.
+            self._clock_ns = self._guest_ns()
+            self._clock_run_from = time.monotonic_ns()
+            return {'ns': self._clock_ns}
+        if kind == 'bql':
+            with self._calls_cv:
+                return {'takes': dict(self._bql_takes)}
         if kind == 'wait':
             want = op['call']
             with self._calls_cv:
