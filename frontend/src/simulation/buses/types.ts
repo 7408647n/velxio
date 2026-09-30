@@ -382,6 +382,12 @@ export interface I2cTarget {
    * (I2CDevice.pointerStays), for a host that keeps a pointer of its own.
    */
   readonly pointerStays?: readonly number[];
+  /**
+   * The register after which the chip's pointer wraps to 0x00
+   * (I2CDevice.pointerWrapsAfter), for a host that keeps a pointer of its
+   * own. Absent: after 0xFF.
+   */
+  readonly pointerWrapsAfter?: number;
 }
 
 /**

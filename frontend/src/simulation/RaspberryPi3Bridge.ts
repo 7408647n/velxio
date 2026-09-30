@@ -76,6 +76,11 @@ export interface PiBusTopology {
    * `pointer_stays`: with `regs`, the registers the chip's pointer does not
    * move past (I2cTarget.pointerStays); the backend's pointer stays there
    * too. Absent = none.
+   *
+   * `pointer_wraps_after`: with `regs`, the register after which the chip's
+   * pointer wraps to 0x00 (I2cTarget.pointerWrapsAfter): 0x3F on a DS1307,
+   * 0x12 on a DS3231. Absent = after 0xFF, which is also what a backend from
+   * before the field does.
    */
   i2c: Array<{
     bus: number;
@@ -85,6 +90,7 @@ export interface PiBusTopology {
     seq?: number;
     volatile_reads?: number[];
     pointer_stays?: number[];
+    pointer_wraps_after?: number;
   }>;
   /**
    * `responders` are the SPI devices with a portable model (the bus map an

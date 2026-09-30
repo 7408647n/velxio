@@ -679,6 +679,11 @@ export class PiBridgeShim {
         if (first && t.pointer_stays) {
           first.pointer_stays = [...new Set([...(first.pointer_stays ?? []), ...t.pointer_stays])];
         }
+        // Two pointers that wrap in different places are no one pointer the
+        // relay can keep: it wraps after 0xFF, as it did before the field.
+        if (first && first.pointer_wraps_after !== t.pointer_wraps_after) {
+          delete first.pointer_wraps_after;
+        }
         continue;
       }
       seen.add(key);
@@ -720,8 +725,13 @@ export class PiBridgeShim {
           regs !== null && m.target.pointerStays?.length
             ? { pointer_stays: [...m.target.pointerStays] }
             : {};
+        // And where its pointer wraps, so the relay's wraps there too.
+        const wraps =
+          regs !== null && typeof m.target.pointerWrapsAfter === 'number'
+            ? { pointer_wraps_after: m.target.pointerWrapsAfter }
+            : {};
         for (const addr of m.addresses) {
-          out.push({ bus: port.unit, addr, regs, ...ask, ...volatile, ...stays });
+          out.push({ bus: port.unit, addr, regs, ...ask, ...volatile, ...stays, ...wraps });
         }
       }
     }
