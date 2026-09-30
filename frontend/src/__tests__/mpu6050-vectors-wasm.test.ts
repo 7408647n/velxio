@@ -278,10 +278,9 @@ describe('mpu6050.wasm: what the hand-written copy does besides the vectors', ()
     }
   });
 
-  it('after DEVICE_RESET an empty FIFO repeats 0, as the twin does', () => {
-    // The one place the two copies differed: VirtualMPU6050 kept the byte
-    // read last across the reset, MPU6050Slave (and a register reset on
-    // the bench) starts from 0. The model follows the twin.
+  it('after DEVICE_RESET an empty FIFO repeats 0, as both old copies do', () => {
+    // A register reset on the bench starts the FIFO_R_W repeat from 0;
+    // VirtualMPU6050 (powerOn clears fifoLast) and MPU6050Slave agree.
     const dev = powerOn();
     write(dev, 0x6b, 0x00);
     write(dev, 0x74, 0x5a);

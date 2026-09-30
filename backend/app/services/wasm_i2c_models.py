@@ -566,6 +566,10 @@ class WasmMPU6050Slave(_WasmI2cModel):
             self._on_int_change = cb
 
     def _event_then_pad(self, event: int, addr: int) -> int:
+        # A STOP takes no sample, as the twin never looks at the chip on one:
+        # samples due at a STOP are taken at the next START or read.
+        if (event & 0xFF) == 0x03:
+            return self._fast[2](event, addr)
         answer = self._event_int_call(event, addr)
         pulses, state = _U32X2.unpack(self.runtime.read_memory(self._inputs + _MPU_PULSES, 8))
         self._int_seen = (self._events_heard, self._pushed_ns, self._int_answer(state, pulses))
