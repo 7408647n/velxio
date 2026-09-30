@@ -10,7 +10,7 @@ that pass the same file cannot drift apart again.
 | `mpu6050.json` | InvenSense MPU-6050 | `frontend/src/__tests__/protocol-parts.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
 | `ds1307.json` | DS1307 real-time clock | `frontend/src/__tests__/rtc-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin), and the compiled model `buses/models/ds1307.c` in both hosts: `frontend/src/__tests__/rtc-vectors-wasm.test.ts`, `test/backend/unit/test_wasm_i2c_models.py` |
 | `ds3231.json` | DS3231 real-time clock | `frontend/src/__tests__/rtc-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin), and the compiled model `buses/models/ds3231.c` in both hosts: `frontend/src/__tests__/rtc-vectors-wasm.test.ts`, `test/backend/unit/test_wasm_i2c_models.py` |
-| `bmp280.json` | Bosch BMP280 | `frontend/src/__tests__/bmp280-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
+| `bmp280.json` | Bosch BMP280 | `frontend/src/__tests__/bmp280-vectors.test.ts` (the part, which runs the compiled model by default, and the tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin), and the compiled model `buses/models/bmp280.c` in both hosts: `frontend/src/__tests__/bmp280-vectors-wasm.test.ts`, `test/backend/unit/test_wasm_i2c_models.py` |
 
 ## The parity gate
 
@@ -29,6 +29,11 @@ in the deploy gate. They fail when
 - a class that answers the bus is added to
   `backend/app/services/esp32_i2c_slaves.py` with no file here (the write
   sink, which has no registers, is listed as such).
+
+A chip that also runs as a compiled model (`frontend/src/simulation/buses/models/`)
+is held by both gates a second time: a test per host replays its file against
+that model (in the worker on every path it can take to the model, see
+`buses/models/i2c_host.h`), and the model powers on as its hand-written copy.
 
 A new chip therefore lands with its file, an entry in both gates, and a test
 per side that replays it. The pro BME280 file lives in the pro tree and is

@@ -35,7 +35,7 @@ try:
         MPU6050Slave as _MPU6050Slave, BMP280Slave as _BMP280Slave,
         DS1307Slave as _DS1307Slave, DS3231Slave as _DS3231Slave,
         I2CWriteSink as _I2CWriteSink, find_build_times as _find_build_times,
-        rtc_slave as _rtc_slave,
+        rtc_slave as _rtc_slave, bmp280_slave as _bmp280_slave,
     )
 except ImportError:
     import importlib.util as _ilu, pathlib as _pl, sys as _sys
@@ -49,6 +49,7 @@ except ImportError:
     _I2CWriteSink = _mod.I2CWriteSink
     _find_build_times = _mod.find_build_times
     _rtc_slave = _mod.rtc_slave
+    _bmp280_slave = _mod.bmp280_slave
 
 _stdout_lock = threading.Lock()
 
@@ -193,9 +194,10 @@ def main() -> None:
             sl.update(**s)
             _i2c_slaves[addr] = sl
         elif stype == 'bmp280':
-            addr = int(s.get('addr', 0x76)); sl = _BMP280Slave(addr)
-            sl.update(**s)
-            _i2c_slaves[addr] = sl
+            # The part's compiled model when the record carries it
+            # (buses/models/bmp280.c), the twin otherwise, at the panel's values.
+            addr = int(s.get('addr', 0x76))
+            _i2c_slaves[addr] = _bmp280_slave(s)
         elif stype in ('ds1307', 'ds3231'):
             addr = int(s.get('addr', 0x68))
             # The record carries the tab's clock, and the panel's temperature

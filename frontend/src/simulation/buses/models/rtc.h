@@ -427,4 +427,15 @@ static void rtc_setup(void) {
   vx_i2c_attach(&cfg);
 }
 
+/* The entries the worker calls (i2c_host.h). A read after a START calls no
+ * host, the time was latched there, so a burst is served from a peek. The
+ * START, write and STOP ACK everything and call the host only for the build
+ * times, a fact of the firmware: the worker may hold them back. */
+#define I2C_HOST_CONNECT(addr, is_read) on_connect(0, (addr), (is_read))
+#define I2C_HOST_WRITE(byte) on_write(0, (byte))
+#define I2C_HOST_READ() on_read(0)
+#define I2C_HOST_STOP() on_stop(0)
+#define I2C_HOST_DEFERRABLE 1
+#include "i2c_host.h"
+
 #endif /* VELXIO_RTC_H */

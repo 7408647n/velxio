@@ -78,6 +78,100 @@ def _probe_fast_call():
 _FAST_CALL = _probe_fast_call()
 
 
+class _RawCallApi:
+    """wasmtime's unchecked call, bound as a bare C function of addresses.
+
+    `wasmtime_func_call_unchecked` takes the arguments and the results in one
+    array of raw values and checks no type, so a caller that has checked the
+    type once can fill that array in place and call with plain integers. Bound
+    here with void* arguments, ctypes converts nothing per call: about 2 us an
+    i2c callback against 10 us through _fast_call and 14 us through the
+    generic path, measured on buses/models/ds1307.c (project
+    i2c-model-fidelity-2026-09, P5 step 2). Probed once; a wasmtime without it
+    keeps the other paths (WasmChipRuntime.export_caller).
+    """
+
+    def __init__(self, bindings, trap_cls, error_cls, raise_last) -> None:
+        addr = ctypes.cast(bindings.dll.wasmtime_func_call_unchecked, ctypes.c_void_p).value
+        self.call = ctypes.CFUNCTYPE(
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.c_size_t, ctypes.c_void_p)(addr)
+        vp = ctypes.c_void_p
+        self.memory_size = ctypes.CFUNCTYPE(ctypes.c_size_t, vp, vp)(
+            ctypes.cast(bindings.dll.wasmtime_memory_data_size, vp).value)
+        self.memory_data = ctypes.CFUNCTYPE(vp, vp, vp)(
+            ctypes.cast(bindings.dll.wasmtime_memory_data, vp).value)
+        self.val_raw_t = bindings.wasmtime_val_raw_t
+        self.trap_t = bindings.wasm_trap_t
+        self.error_t = bindings.wasmtime_error_t
+        self.trap_cls = trap_cls
+        self.error_cls = error_cls
+        self.raise_last = raise_last
+
+
+def _probe_raw_call():
+    try:
+        from wasmtime import _bindings as _wt_bindings
+        from wasmtime._func import maybe_raise_last_exn as _raise_last
+        api = _RawCallApi(_wt_bindings, wasmtime.Trap, wasmtime.WasmtimeError, _raise_last)
+        _ = ctypes.sizeof(api.val_raw_t), api.trap_t, api.error_t
+        return api
+    except Exception:  # noqa: BLE001 - any shape change falls back
+        return None
+
+
+_RAW_CALL = _probe_raw_call()
+
+
+class _PeekGuard:
+    """Whether the chip is running ahead of the bus, and what it did then.
+
+    A model that serves reads ahead of the master (chip_i2c_peek in
+    buses/models/i2c_host.h) runs its on_read for bytes not asked for yet and
+    then puts its memory back, so it is only a read-ahead while nothing
+    outside that memory saw it: a host function called in it (a pin driven,
+    the guest clock read, a log line) would be seen, or would make the byte
+    depend on when it is read. The model says in its own memory that it is
+    peeking (`flag_at`, i2c_host_state[0]); while it is, every host function
+    answers a neutral value and does nothing, and marks the peek
+    (i2c_host_state[1]), which the model then throws away. The host asks for
+    those bytes one at a time.
+    """
+
+    __slots__ = ("runtime", "flag_at")
+
+    def __init__(self, runtime: "WasmChipRuntime") -> None:
+        self.runtime = runtime
+        self.flag_at: int | None = None
+
+    def peeking(self) -> bool:
+        at = self.flag_at
+        if at is None:
+            return False
+        base = self.runtime.mem_address()
+        if not ctypes.c_uint8.from_address(base + at).value:
+            return False
+        ctypes.c_uint8.from_address(base + at + 1).value = 1
+        return True
+
+
+def _guarded(func, ty, guard: _PeekGuard):
+    results = list(ty.results)
+    if not results:
+        neutral = None
+    elif str(results[0]) in ("f32", "f64"):
+        neutral = 0.0
+    else:
+        neutral = 0
+
+    def call(*args):
+        if guard.peeking():
+            return neutral
+        return func(*args)
+
+    return call
+
+
 
 
 # I2C config struct layout (must match velxio-chip.h's vx_i2c_config — 64 bytes)
@@ -403,12 +497,16 @@ class _ImportedOnly:
     Defining the whole ABI costs a few milliseconds per runtime (a FuncType
     and a trampoline each), and a register model imports a handful of it."""
 
-    def __init__(self, linker: wasmtime.Linker, imports: frozenset) -> None:
+    def __init__(self, linker: wasmtime.Linker, imports: frozenset,
+                 guard: "_PeekGuard | None" = None) -> None:
         self._linker = linker
         self._imports = imports
+        self._guard = guard
 
     def define_func(self, module: str, name: str, ty, func) -> None:
         if (module, name) in self._imports:
+            if self._guard is not None:
+                func = _guarded(func, ty, self._guard)
             self._linker.define_func(module, name, ty, func)
 
 
@@ -529,8 +627,10 @@ class WasmChipRuntime:
                         module for every runtime built from the same bytes,
                         and define only the host functions the module imports
                         (_compiled_module). For a model a part attaches on
-                        every Run (buses/models/ds1307.c, ds3231.c); off, each
-                        runtime compiles its own, as before.
+                        every Run (buses/models/ds1307.c, ds3231.c, bmp280.c);
+                        off, each runtime compiles its own, as before. Such a
+                        runtime can also run the model ahead of the bus
+                        (watch_peeks, _PeekGuard).
         """
         compiled = _compiled_module(wasm_bytes) if share_module else None
         self._engine = compiled.engine if compiled else wasmtime.Engine()
@@ -665,7 +765,13 @@ class WasmChipRuntime:
 
         # Build the linker
         linker = wasmtime.Linker(self._engine)
-        defs = _ImportedOnly(linker, compiled.imports) if compiled else linker
+        # A shared module is a bus model (buses/models/), which a host may
+        # run ahead of the bus: its host functions stand still while it does.
+        self._peek_guard = _PeekGuard(self) if compiled else None
+        self._mem_size = -1
+        self._mem_base = 0
+        self._mem_handles: tuple[int, int] | None = None
+        defs = _ImportedOnly(linker, compiled.imports, self._peek_guard) if compiled else linker
         self._define_wasi(defs)  # type: ignore[arg-type]
         self._define_velxio(defs)  # type: ignore[arg-type]
         linker.define(self._store, "env", "memory", self._memory)
@@ -1626,7 +1732,113 @@ class WasmChipRuntime:
 
     def read_memory(self, ptr: int, length: int) -> bytes:
         """`length` bytes of the chip's linear memory from `ptr`."""
-        return self._read_bytes(ptr, length)
+        if _RAW_CALL is None:
+            return self._read_bytes(ptr, length)
+        with self._entry_lock:
+            base = self.mem_address()
+            if ptr < 0 or length < 0 or ptr + length > self._mem_size:
+                raise IndexError("read outside the chip's memory")
+            return ctypes.string_at(base + ptr, length)
+
+    def export_caller(self, name: str) -> Callable[..., int]:
+        """A function that calls the export `name` with i32 arguments and
+        returns its i32 result (0 for none), under the entry lock, on the
+        cheapest path this wasmtime offers.
+
+        For a host that calls the same export for every bus event (the
+        whole-event entry of buses/models/i2c_host.h): the function's type is
+        checked here once, the value array and the trap slot are made once,
+        and a call is one foreign call of plain integers (_RawCallApi). An
+        export of another shape, or a wasmtime without the unchecked call,
+        gets the generic call behind the same signature.
+        """
+        fn = self._exports.get(name)
+        if fn is None:
+            raise KeyError(f"chip WASM does not export {name}")
+        ty = fn.type(self._store)
+        params = [str(p) for p in ty.params]
+        results = [str(r) for r in ty.results]
+        api = _RAW_CALL
+        lock = self._entry_lock
+        runtime = self
+
+        if api is None or any(p != "i32" for p in params) or results not in ([], ["i32"]):
+            def generic(*args: int) -> int:
+                with lock:
+                    runtime._drop_mem_view()
+                    result = fn(runtime._store, *args)
+                    if runtime._stdout_buf:
+                        runtime._flush_stdout()
+                    return int(result or 0)
+            return generic
+
+        nargs, nres = len(params), len(results)
+        n = max(nargs, nres, 1)
+        buf = (api.val_raw_t * n)()
+        base = ctypes.addressof(buf)
+        stride = ctypes.sizeof(api.val_raw_t)
+        slots = [ctypes.c_int32.from_address(base + i * stride) for i in range(n)]
+        out = slots[0]
+        trap = ctypes.POINTER(api.trap_t)()
+        trap_at = ctypes.addressof(trap)
+        ctx = ctypes.cast(self._store._context(), ctypes.c_void_p).value
+        func_at = ctypes.addressof(fn._func)
+        raw = api.call
+        # The array, the trap slot and the Func are what the addresses point
+        # into: the closure keeps them alive.
+        keep = (buf, trap, fn)
+
+        def failed(err) -> None:
+            _ = keep
+            if trap:
+                owned = ctypes.cast(trap, ctypes.POINTER(api.trap_t))
+                ctypes.memset(trap_at, 0, ctypes.sizeof(ctypes.c_void_p))
+                exc = api.trap_cls._from_ptr(owned)
+                api.raise_last()
+                raise exc
+            raise api.error_cls._from_ptr(ctypes.cast(err, ctypes.POINTER(api.error_t)))
+
+        def call(*args: int) -> int:
+            with lock:
+                # Wasm is about to run, and may grow the memory under the view.
+                runtime._drop_mem_view()
+                for i in range(nargs):
+                    slots[i].value = args[i]
+                err = raw(ctx, func_at, base, n, trap_at)
+                if err or trap:
+                    failed(err)
+                if runtime._stdout_buf:
+                    runtime._flush_stdout()
+                return out.value if nres else 0
+
+        return call
+
+    def mem_address(self) -> int:
+        """Where the chip's linear memory starts in this process. Asked of the
+        engine only when the memory's size has changed (a grow can move it),
+        which is one foreign call where the view costs several."""
+        api = _RAW_CALL
+        where = self._mem_handles
+        if where is None:
+            where = self._mem_handles = (
+                ctypes.cast(self._store._context(), ctypes.c_void_p).value,
+                ctypes.addressof(self._memory._memory))
+        size = api.memory_size(*where)
+        if size != self._mem_size:
+            self._mem_base = api.memory_data(*where) or 0
+            self._mem_size = size
+        return self._mem_base
+
+    def watch_peeks(self, flag_at: int) -> bool:
+        """Guard this chip's host functions while the byte at `flag_at` of
+        its memory says it is peeking (_PeekGuard). False for a runtime whose
+        host functions are not wrapped (one that does not share its module),
+        or a wasmtime without the calls mem_address needs: then the chip may
+        not be run ahead."""
+        if self._peek_guard is None or _RAW_CALL is None:
+            return False
+        self._peek_guard.flag_at = int(flag_at)
+        return True
 
     @_under_entry_lock
     def write_memory(self, ptr: int, data: bytes) -> None:
@@ -1635,8 +1847,14 @@ class WasmChipRuntime:
         instead of the chip calling out for it. Through the cached view, so a
         store between two calls is one memmove; under the entry lock, since
         the panel's thread pushes while the bus thread may be in the chip."""
-        view = self._mem_view()
-        ctypes.memmove(ctypes.addressof(view) + ptr, data, len(data))
+        if _RAW_CALL is None:
+            view = self._mem_view()
+            ctypes.memmove(ctypes.addressof(view) + ptr, data, len(data))
+            return
+        base = self.mem_address()
+        if ptr < 0 or ptr + len(data) > self._mem_size:
+            raise IndexError("write outside the chip's memory")
+        ctypes.memmove(base + ptr, data, len(data))
 
     # ── Live attribute updates (sensor control panel sliders) ───────────────
     @_under_entry_lock

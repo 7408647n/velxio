@@ -4,11 +4,11 @@
  *
  * The microSD card already runs as ONE model in C (buses/models/microsd.c)
  * that the tab, the QEMU workers and the Linux-board host all run. The two
- * real-time clocks now do too: buses/models/ds1307.c and ds3231.c (on the
- * shared buses/models/rtc.h), hosted here by ChipRuntime in place of
- * VirtualDS1307 and VirtualDS3231, and in the worker from the same bytes
- * (backend/app/services/wasm_i2c_models.py), which the part puts in the
- * worker's record (`wasmB64`).
+ * real-time clocks and the BMP280 now do too: buses/models/ds1307.c and
+ * ds3231.c (on the shared buses/models/rtc.h) and bmp280.c, hosted here by
+ * ChipRuntime in place of VirtualDS1307, VirtualDS3231 and VirtualBMP280, and
+ * in the worker from the same bytes (backend/app/services/wasm_i2c_models.py),
+ * which the part puts in the worker's record (`wasmB64`).
  *
  * On by default. `?i2cwasm=off` or localStorage `velxio.i2cwasm = 'off'` goes
  * back to the hand-written models in both hosts; a comma list
@@ -36,7 +36,7 @@ import {
 export type WasmI2cModelName = keyof typeof I2C_MODEL_WASM_B64;
 
 /** The models that run compiled unless the flag says otherwise. */
-const DEFAULT_ON: readonly WasmI2cModelName[] = ['ds1307', 'ds3231'];
+const DEFAULT_ON: readonly WasmI2cModelName[] = ['ds1307', 'ds3231', 'bmp280'];
 /** Flag values that name no model at all. */
 const OFF = new Set(['off', 'none', '0', 'false']);
 
@@ -257,5 +257,109 @@ export class WasmDS3231 extends WasmRtc {
   set temperatureC(celsius: number) {
     this.celsius = celsius;
     this.pushTemperature(celsius);
+  }
+}
+
+/**
+ * The BMP280 from buses/models/bmp280.c, in place of VirtualBMP280: the same
+ * address choice, the panel's two values, the note to the board's monitor
+ * when the data registers are read before the chip ever measured, and the
+ * register dump the Pi relay mirrors.
+ *
+ * The panel's values and the address are pushed into the model's `bmp280_io`
+ * (the export chip_inputs); the model counts the reads of a chip that never
+ * measured there (asleep_reads), and the part says it once a run.
+ */
+export class WasmBMP280 implements I2CDevice {
+  public address: number;
+  /** The data registers were read before the chip ever measured, for the first time in this run. */
+  onAsleepRead: (() => void) | null = null;
+
+  private readonly chip: ChipInstance;
+  private readonly dev: NonNullable<ReturnType<ChipInstance['i2cDevice']>>;
+  private readonly ioAt: number;
+  private view: DataView | null = null;
+  private asleepReads = 0;
+  private asleepReadSaid = false;
+  // Where the sensor panel starts (sensorControlConfig, bmp280), as bmp280.c.
+  private temperature = 24.0;
+  private pressure = 1013.25;
+
+  constructor(module: WebAssembly.Module, address = 0x76) {
+    this.address = address === 0x77 ? 0x77 : 0x76;
+    this.chip = ChipInstance.createSync({ wasm: module, pinManager: new PinManager() });
+    this.ioAt = (this.chip.exports.chip_inputs as () => number)();
+    this.io().setUint32(16, this.address, true);
+    this.io().setFloat64(0, this.temperature, true);
+    this.io().setFloat64(8, this.pressure, true);
+    this.chip.start();
+    const dev = this.chip.i2cDevice(this.address);
+    if (!dev) throw new Error(`the BMP280 model attached no I2C device at 0x${this.address.toString(16)}`);
+    this.dev = dev;
+  }
+
+  /** bmp280_io, re-read if the memory ever grew under it. */
+  private io(): DataView {
+    const buffer = this.chip.memory!.buffer;
+    if (this.view === null || this.view.buffer !== buffer) {
+      this.view = new DataView(buffer, this.ioAt, 24);
+    }
+    return this.view;
+  }
+
+  get temperatureC(): number {
+    return this.temperature;
+  }
+  set temperatureC(v: number) {
+    this.temperature = v;
+    this.io().setFloat64(0, v, true);
+  }
+
+  get pressureHPa(): number {
+    return this.pressure;
+  }
+  set pressureHPa(v: number) {
+    this.pressure = v;
+    this.io().setFloat64(8, v, true);
+  }
+
+  start(read: boolean): void {
+    this.dev.connect(this.address, read);
+  }
+
+  writeByte(value: number): boolean {
+    return this.dev.writeByte(value);
+  }
+
+  readByte(): number {
+    const value = this.dev.readByte();
+    const reads = this.io().getUint32(20, true);
+    if (reads !== this.asleepReads) {
+      this.asleepReads = reads;
+      if (!this.asleepReadSaid) {
+        this.asleepReadSaid = true;
+        this.onAsleepRead?.();
+      }
+    }
+    return value;
+  }
+
+  stop(): void {
+    this.dev.stop();
+  }
+
+  /** A new run reads a chip that still has not measured: its monitor is told as well. */
+  boardReset(): void {
+    this.asleepReadSaid = false;
+  }
+
+  /** The registers as a read would find them now, for a host that answers from a copy. */
+  dumpRegisters(): Uint8Array {
+    const ptr = (this.chip.exports.chip_dump_registers as () => number)();
+    return new Uint8Array(this.chip.memory!.buffer, ptr, 256).slice();
+  }
+
+  dispose(): void {
+    this.chip.dispose();
   }
 }

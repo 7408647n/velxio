@@ -1840,39 +1840,63 @@ class DS3231Slave(_RtcSlave):
 
 
 
+def _compiled_slave(sensor_type: str, record: dict, **kwargs):
+    """The part's compiled model (wasm_i2c_models.SLAVES, the same bytes the
+    tab runs, frontend/src/simulation/buses/models/) when the record carries
+    it (`wasmB64`), which the tab does unless its `i2cwasm` flag is off
+    (project i2c-model-fidelity-2026-09, P5). None otherwise, and also when
+    the model cannot be run, so neither the flag nor a broken build can cost
+    a user the part: the caller builds the Python twin."""
+    if not isinstance(record.get('wasmB64'), str):
+        return None
+    try:
+        try:
+            from app.services import wasm_i2c_models as mod
+        except ImportError:
+            import importlib.util as _ilu, pathlib as _pl, sys as _sys
+            mod = _sys.modules.get('wasm_i2c_models')
+            if mod is None:
+                spec = _ilu.spec_from_file_location(
+                    'wasm_i2c_models', _pl.Path(__file__).parent / 'wasm_i2c_models.py')
+                mod = _ilu.module_from_spec(spec)  # type: ignore[arg-type]
+                _sys.modules['wasm_i2c_models'] = mod
+                spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        cls = mod.SLAVES.get(sensor_type)
+        if cls is not None:
+            return cls.from_b64(record['wasmB64'], record, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - any failure keeps the twin
+        # stderr: a worker's stdout is its channel to the tab.
+        import sys as _sys
+        print(f'{sensor_type}: the compiled model could not be run ({exc}); '
+              'the worker keeps its own copy', file=_sys.stderr)
+    return None
+
+
 def rtc_slave(sensor_type: str, record: dict, build_times=None):
     """The worker's copy of a clock chip, from the part's record.
 
     The part's compiled model (wasm_i2c_models.WasmDS1307Slave or
-    WasmDS3231Slave, the same bytes the tab runs, buses/models/ds1307.c and
-    ds3231.c) when the record carries it (`wasmB64`), which the tab does
-    unless its `i2cwasm` flag is off (project i2c-model-fidelity-2026-09, P5).
-    DS1307Slave or DS3231Slave otherwise, and also when the model cannot be
-    run, so neither the flag nor a broken build can cost a user the part.
+    WasmDS3231Slave, buses/models/ds1307.c and ds3231.c) when the record
+    carries it; DS1307Slave or DS3231Slave otherwise (_compiled_slave).
     """
-    if isinstance(record.get('wasmB64'), str):
-        try:
-            try:
-                from app.services import wasm_i2c_models as mod
-            except ImportError:
-                import importlib.util as _ilu, pathlib as _pl, sys as _sys
-                mod = _sys.modules.get('wasm_i2c_models')
-                if mod is None:
-                    spec = _ilu.spec_from_file_location(
-                        'wasm_i2c_models', _pl.Path(__file__).parent / 'wasm_i2c_models.py')
-                    mod = _ilu.module_from_spec(spec)  # type: ignore[arg-type]
-                    _sys.modules['wasm_i2c_models'] = mod
-                    spec.loader.exec_module(mod)  # type: ignore[union-attr]
-            cls = mod.SLAVES.get(sensor_type)
-            if cls is not None:
-                return cls.from_b64(record['wasmB64'], record, build_times=build_times)
-        except Exception as exc:  # noqa: BLE001 - any failure keeps the twin
-            # stderr: a worker's stdout is its channel to the tab.
-            import sys as _sys
-            print(f'{sensor_type}: the compiled model could not be run ({exc}); '
-                  'the worker keeps its own copy', file=_sys.stderr)
+    compiled = _compiled_slave(sensor_type, record, build_times=build_times)
+    if compiled is not None:
+        return compiled
     cls = DS3231Slave if sensor_type == 'ds3231' else DS1307Slave
     return cls(record, build_times=build_times)
+
+
+def bmp280_slave(record: dict):
+    """The worker's copy of a BMP280, from the part's record, already at the
+    panel's values: the compiled model (wasm_i2c_models.WasmBMP280Slave,
+    buses/models/bmp280.c) when the record carries it, BMP280Slave otherwise
+    (_compiled_slave). At `addr`, 0x76 or 0x77."""
+    compiled = _compiled_slave('bmp280', record)
+    if compiled is not None:
+        return compiled
+    slave = BMP280Slave(int(record.get('addr', 0x76)))
+    slave.update(**record)
+    return slave
 
 # ── I2C Write Sink (relay for write-only devices: SSD1306, PCF8574) ──────────
 
