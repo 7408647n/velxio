@@ -1396,6 +1396,115 @@ describe('mpu6050 — a DMP image is uploaded', () => {
   });
 });
 
+describe('mpu6050 — offset calibration converges', () => {
+  // i2cdevlib MPU6050_Base::PID(), which CalibrateAccel() and
+  // CalibrateGyro() run (jrowberg/i2cdevlib master MPU6050.cpp:3290-3370;
+  // Electronic Cats 1.4.5 is the same loop), ported line by line: a PI loop
+  // that writes the offset registers until the outputs read zero, and
+  // gravity on Z. With inert offsets it printed '*' forever unless the panel
+  // sat exactly at rest.
+  const int16 = (v: number) => (v << 16) >> 16;
+  const round = (v: number) => Math.sign(v) * Math.round(Math.abs(v));
+
+  function pid(rig: I2cRig, readAddress: number, kP: number, kI: number, loops: number): string {
+    const readWord = (reg: number) => {
+      const [h, l] = rig.readReg(0x68, reg, 2)!;
+      return int16((h << 8) | l);
+    };
+    const writeWord = (reg: number, v: number) => rig.write(0x68, [reg, (v >> 8) & 0xff, v & 0xff]);
+    const saveAddress = readAddress === 0x3b ? 0x06 : 0x13;
+    const shift = 2;
+    const bitZero: number[] = [];
+    const iTerm: number[] = [];
+    let out = '>';
+    // 16384 >> AFS_SEL in i2cdevlib; Electronic Cats 1.4.5 has 32768 there,
+    // which drives Z to the top of the scale on any part.
+    const gravity = 16384 >> ((rig.readReg(0x68, 0x1c, 1)![0] >> 3) & 3);
+    for (let i = 0; i < 3; i++) {
+      const data = readWord(saveAddress + i * shift);
+      if (saveAddress !== 0x13) {
+        bitZero[i] = data & 1;
+        iTerm[i] = data * 8;
+      } else iTerm[i] = data * 4;
+    }
+    let guard = 0;
+    for (let L = 0; L < loops; L++) {
+      let eSample = 0;
+      for (let c = 0; c < 100; c++) {
+        if (++guard > 20_000) throw new Error(`no convergence: ${out}`);
+        let eSum = 0;
+        for (let i = 0; i < 3; i++) {
+          let reading = readWord(readAddress + i * 2);
+          if (readAddress === 0x3b && i === 2) reading -= gravity;
+          const error = -reading;
+          eSum += Math.abs(reading);
+          const pTerm = kP * error;
+          iTerm[i] += error * 0.001 * kI;
+          let data: number;
+          if (saveAddress !== 0x13) {
+            data = int16(round((pTerm + iTerm[i]) / 8));
+            data = int16((data & 0xfffe) | bitZero[i]);
+          } else data = int16(round((pTerm + iTerm[i]) / 4));
+          writeWord(saveAddress + i * shift, data);
+        }
+        if (c === 99 && eSum > 1000) {
+          c = 0;
+          out += '*';
+        }
+        if (eSum * (readAddress === 0x3b ? 0.05 : 1) < 5) eSample++;
+        if (eSum < 100 && c > 10 && eSample >= 10) break;
+      }
+      out += '.';
+      kP *= 0.75;
+      kI *= 0.75;
+      for (let i = 0; i < 3; i++) {
+        let data: number;
+        if (saveAddress !== 0x13) {
+          data = int16(round(iTerm[i] / 8));
+          data = int16((data & 0xfffe) | bitZero[i]);
+        } else data = int16(round(iTerm[i] / 4));
+        writeWord(saveAddress + i * shift, data);
+      }
+    }
+    return out;
+  }
+
+  it('CalibrateAccel(6) and CalibrateGyro(6) null a tilted, drifting chip', () => {
+    const rig = i2cRig({ imu: HW_I2C_PINS });
+    attachImu();
+    dispatchSensorUpdate('imu', {
+      accelX: 0.03,
+      accelY: -0.02,
+      accelZ: 1.01,
+      gyroX: 2,
+      gyroY: -1.5,
+      gyroZ: 0.7,
+    });
+    wakeImu(rig);
+    // x = (100 - map(6, 1, 5, 20, 0)) * .01 = 1.05
+    // A '*' is a round of 100 that ended still off by more than 1000 counts,
+    // as real parts print at the start; one that never settles prints them
+    // forever.
+    expect(pid(rig, 0x3b, 0.3 * 1.05, 20 * 1.05, 6)).toMatch(/^>\*{0,3}\.{6}$/);
+    expect(pid(rig, 0x43, 0.3 * 1.05, 90 * 1.05, 6)).toMatch(/^>\*{0,3}\.{6}$/);
+    const words = (reg: number, n: number) => {
+      const b = rig.readReg(0x68, reg, n * 2)!;
+      return Array.from({ length: n }, (_, i) => int16((b[2 * i] << 8) | b[2 * i + 1]));
+    };
+    const [ax, ay, az] = words(0x3b, 3);
+    const [gx, gy, gz] = words(0x43, 3);
+    // Within what the loop itself calls done: a summed error under 100
+    // counts of accelerometer (1/1024 g a step, bit 0 being the revision)
+    // and under 5 of gyro.
+    expect(Math.abs(ax) + Math.abs(ay) + Math.abs(az - 16384)).toBeLessThan(100);
+    expect(Math.abs(gx) + Math.abs(gy) + Math.abs(gz)).toBeLessThan(5);
+    // The revision bits of the trims are where the factory left them.
+    expect(rig.readReg(0x68, 0x06, 6)!.filter((_, i) => i % 2 === 1).map((b) => b & 1)).toEqual([
+      0, 1, 0,
+    ]);
+  });
+});
+
 describe('mpu6050 — read while asleep', () => {
   const NOTE = 'MPU6050 0x68 is in sleep mode: write 0x00 to PWR_MGMT_1 (0x6B) to wake it';
 

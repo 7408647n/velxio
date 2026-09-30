@@ -4,11 +4,13 @@
   "device": "mpu6050",
   "address": "68",
   "rules": {
-    "power_on": { "6B": "40", "75": "68" },
+    "power_on": { "06": "FA", "07": "38", "08": "04", "09": "B3", "0A": "05", "0B": "DC", "6B": "40", "75": "68" },
     "read_only": [["36", "36"], ["3A", "3A"], ["3B", "60"], ["72", "73"], ["75", "75"]],
     "self_clearing": { "68": "FF", "6A": "0F", "6B": "80" },
     "accel_lsb_per_g": [16384, 8192, 4096, 2048],
     "gyro_lsb_per_dps": [131, 65.5, 32.8, 16.4],
+    "gyro_offset_lsb_per_dps": 32.8,
+    "accel_offset_lsb_per_g": 2048,
     "temp_lsb_per_c": 340,
     "temp_offset_c": 36.53,
     "clear_on_read": { "3A": "FF" },
@@ -21,12 +23,12 @@
   "inputs": { "accelX": 0, "accelY": 0, "accelZ": 1, "gyroX": 0, "gyroY": 0, "gyroZ": 0, "temp": 24 },
   "vectors": [
     {
-      "name": "power-on: PWR_MGMT_1 reads 0x40, WHO_AM_I reads 0x68, every other register reads 0x00",
-      "spec": "RM section 3: reset value 0x00 for all registers but 107 (0x40) and 117 (0x68). MEM_R_W (0x6F) and FIFO_R_W (0x74) are read on their own: a read there takes the next byte of the DMP memory or the FIFO and leaves the pointer where it is (section 4.31; i2cdevlib readMemoryBlock)",
+      "name": "power-on: PWR_MGMT_1 reads 0x40, WHO_AM_I reads 0x68, the accelerometer trims hold their factory values, every other register reads 0x00",
+      "spec": "RM section 3: reset value 0x00 for all registers but 107 (0x40) and 117 (0x68); AN-OFFS section 7.2: the accelerometer offset registers hold factory trims, bit 0 of each low byte a revision bit (0x09 set: revision 2, which InvenSense eMPL mpu_init reads). MEM_R_W (0x6F) and FIFO_R_W (0x74) are read on their own: a read there takes the next byte of the DMP memory or the FIFO and leaves the pointer where it is (section 4.31; i2cdevlib readMemoryBlock)",
       "steps": [
         { "op": "read", "reg": "6B", "n": 1, "expect": "40" },
         { "op": "read", "reg": "75", "n": 1, "expect": "68" },
-        { "op": "read", "reg": "00", "n": 111, "expect": "00*107 40 00*3" },
+        { "op": "read", "reg": "00", "n": 111, "expect": "00*6 FA 38 04 B3 05 DC 00*95 40 00*3" },
         { "op": "read", "reg": "6F", "n": 1, "expect": "00" },
         { "op": "read", "reg": "70", "n": 4, "expect": "00*4" },
         { "op": "read", "reg": "74", "n": 1, "expect": "00" },
@@ -210,7 +212,7 @@
       "name": "the register dump a host mirrors carries the encoded sample and no trigger bit",
       "spec": "what the Raspberry Pi relay copies: the registers as a read would find them",
       "steps": [
-        { "op": "dump", "at": "00", "expect": "00*107 40 00*9 68 00*138" },
+        { "op": "dump", "at": "00", "expect": "00*6 FA 38 04 B3 05 DC 00*95 40 00*9 68 00*138" },
         { "op": "write", "data": "6B 01" },
         { "op": "write", "data": "1B 08 10" },
         { "op": "inputs", "values": { "accelY": -0.5, "gyroZ": 20 } },
@@ -602,6 +604,34 @@
         { "op": "read", "reg": "6F", "n": 4, "expect": "00*4" },
         { "op": "write", "data": "6D 10 06" },
         { "op": "read", "reg": "6F", "n": 1, "expect": "A5" }
+      ]
+    },
+    {
+      "name": "offsets: the gyro offsets add at 32.8 counts per deg/s, the accelerometer trims at 2048 per g counted from the factory trim, bit 0 left out; DEVICE_RESET restores the factory trims",
+      "spec": "AN-OFFS (MPU Hardware Offset Registers Application Note) sections 4, 6.2 and 7.2; the accelerometer weight is the +-16 g one i2cdevlib PID() and the calibrations that converge on real parts use, decision O3",
+      "steps": [
+        { "op": "inputs", "values": { "gyroX": 10 } },
+        { "op": "write", "data": "6B 00" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "00 00" },
+        { "op": "read", "reg": "43", "n": 2, "expect": "05 1E" },
+        { "op": "write", "data": "13 FF 5C" },
+        { "op": "read", "reg": "43", "n": 2, "expect": "02 8F" },
+        { "op": "write", "data": "1B 10" },
+        { "op": "read", "reg": "43", "n": 2, "expect": "00 A4" },
+        { "op": "write", "data": "17 00 20" },
+        { "op": "read", "reg": "47", "n": 2, "expect": "00 20" },
+        { "op": "write", "data": "06 FE 38" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "20 00" },
+        { "op": "write", "data": "06 FE 39" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "20 00" },
+        { "op": "read", "reg": "06", "n": 2, "expect": "FE 39" },
+        { "op": "write", "data": "1C 18" },
+        { "op": "read", "reg": "3B", "n": 2, "expect": "04 00" },
+        { "op": "write", "data": "0A 01 DC" },
+        { "op": "read", "reg": "3F", "n": 2, "expect": "04 00" },
+        { "op": "write", "data": "6B 80" },
+        { "op": "read", "reg": "06", "n": 6, "expect": "FA 38 04 B3 05 DC" },
+        { "op": "read", "reg": "13", "n": 6, "expect": "00*6" }
       ]
     }
   ]

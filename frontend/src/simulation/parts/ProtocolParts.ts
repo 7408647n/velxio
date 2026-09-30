@@ -510,8 +510,24 @@ PartSimulationRegistry.register('ds1307', {
  * those of the register map, RM-MPU-6000A-00 rev 4.2.
  */
 export const MPU6050_RULES = {
-  /** Every register powers on at 0x00 but these: asleep, and its id (section 3). */
-  power_on: { 0x6b: 0x40, 0x75: 0x68 },
+  /**
+   * Every register powers on at 0x00 but these: the factory trims, asleep,
+   * and its id (section 3; AN-OFFS 7.2).
+   */
+  power_on: {
+    // The accelerometer's factory trims (OTP): not zero on any part, and the
+    // low bit of each low byte is not a trim but the product revision, which
+    // InvenSense's eMPL mpu_init() reads (bit 0 of 0x07, 0x09, 0x0B; 2 is a
+    // part at full sensitivity, 0 fails with -6). AN-OFFS section 7.2.
+    0x06: 0xfa,
+    0x07: 0x38,
+    0x08: 0x04,
+    0x09: 0xb3,
+    0x0a: 0x05,
+    0x0b: 0xdc,
+    0x6b: 0x40,
+    0x75: 0x68,
+  },
   /**
    * Inclusive ranges a write leaves as they are: I2C_MST_STATUS, INT_STATUS,
    * the sample block with the external sensor data behind it, FIFO_COUNT
@@ -540,6 +556,19 @@ export const MPU6050_RULES = {
    */
   accel_lsb_per_g: [16384, 8192, 4096, 2048],
   gyro_lsb_per_dps: [131, 65.5, 32.8, 16.4],
+  /**
+   * What one count of the offset registers weighs. The gyro offsets
+   * XG/YG/ZG_OFFS_USR (0x13-0x18) are in the +-1000 deg/s format, 32.8 per
+   * deg/s (AN-OFFS 6.2). The accelerometer trims (0x06-0x0B) at 2048 per g,
+   * the +-16 g format, bit 0 left out: the application note says +-8 g, but
+   * the calibrations that converge on real parts write in +-16 g units
+   * (i2cdevlib PID(): reading at +-2 g / 8; Luis Rodenas' MPU6050_calibration
+   * the same), and at +-8 g their loop gain would be 2 and never settle.
+   * Decision O3, pending a bench measurement. An offset counts from the
+   * factory trim, so the chip at power-on reads the panel's values.
+   */
+  gyro_offset_lsb_per_dps: 32.8,
+  accel_offset_lsb_per_g: 2048,
   /** TEMP_OUT = (T - 36.53) * 340 (4.18). */
   temp_lsb_per_c: 340,
   temp_offset_c: 36.53,
@@ -599,6 +628,10 @@ const MPU6050_INPUT_KEYS = [
   'temp',
 ] as const;
 
+/** XA_OFFS_H: three signed words, X, Y, Z, of accelerometer trim. */
+const MPU_XA_OFFS = 0x06;
+/** XG_OFFS_USR_H: three signed words, X, Y, Z, of gyro offset. */
+const MPU_XG_OFFS_USR = 0x13;
 const MPU_SMPLRT_DIV = 0x19;
 const MPU_CONFIG = 0x1a;
 const MPU_GYRO_CONFIG = 0x1b;
@@ -650,6 +683,12 @@ const MPU_PWR_MGMT_1 = 0x6b;
 const MPU_DEVICE_RESET = 0x80;
 const MPU_SLEEP = 0x40;
 
+/** The accelerometer trims as words, by the register of their high byte. */
+const MPU_FACTORY_TRIM: Record<number, number> = {};
+for (const at of [MPU_XA_OFFS, MPU_XA_OFFS + 2, MPU_XA_OFFS + 4]) {
+  const p = MPU6050_RULES.power_on as Record<number, number>;
+  MPU_FACTORY_TRIM[at] = (((p[at] ?? 0) << 8) | (p[at + 1] ?? 0)) << 16 >> 16;
+}
 const MPU_READ_ONLY = new Uint8Array(256);
 for (const [first, last] of MPU6050_RULES.read_only) MPU_READ_ONLY.fill(1, first, last + 1);
 const MPU_SELF_CLEARING = new Uint8Array(256);
@@ -1162,14 +1201,20 @@ export class VirtualMPU6050 implements I2CDevice {
     const { inputs, regs } = this;
     const accel = MPU6050_RULES.accel_lsb_per_g[(regs[MPU_ACCEL_CONFIG] >> 3) & 3];
     const gyro = MPU6050_RULES.gyro_lsb_per_dps[(regs[MPU_GYRO_CONFIG] >> 3) & 3];
+    // Offsets act before the output registers, the FIFO and the DMP (AN-OFFS 4).
+    const word = (reg: number) => ((regs[reg] << 8) | regs[reg + 1]) << 16 >> 16;
+    const trim = (reg: number) =>
+      (((word(reg) & ~1) - (MPU_FACTORY_TRIM[reg] & ~1)) * accel) /
+      MPU6050_RULES.accel_offset_lsb_per_g;
+    const drift = (reg: number) => (word(reg) * gyro) / MPU6050_RULES.gyro_offset_lsb_per_dps;
     const block = [
-      inputs.accelX * accel,
-      inputs.accelY * accel,
-      inputs.accelZ * accel,
+      inputs.accelX * accel + trim(MPU_XA_OFFS),
+      inputs.accelY * accel + trim(MPU_XA_OFFS + 2),
+      inputs.accelZ * accel + trim(MPU_XA_OFFS + 4),
       (inputs.temp - MPU6050_RULES.temp_offset_c) * MPU6050_RULES.temp_lsb_per_c,
-      inputs.gyroX * gyro,
-      inputs.gyroY * gyro,
-      inputs.gyroZ * gyro,
+      inputs.gyroX * gyro + drift(MPU_XG_OFFS_USR),
+      inputs.gyroY * gyro + drift(MPU_XG_OFFS_USR + 2),
+      inputs.gyroZ * gyro + drift(MPU_XG_OFFS_USR + 4),
     ];
     const out = new Uint8Array(block.length * 2);
     block.forEach((value, i) => {
