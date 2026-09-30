@@ -178,8 +178,7 @@ def main() -> None:
             _i2c_slaves[addr] = sl
         elif stype == 'bmp280':
             addr = int(s.get('addr', 0x76)); sl = _BMP280Slave(addr)
-            if 'temperature' in s: sl.update(float(s['temperature']), sl._press_hpa)
-            if 'pressure' in s: sl.update(sl._temp_c, float(s['pressure']))
+            sl.update(**s)
             _i2c_slaves[addr] = sl
         elif stype in ('ds1307', 'ds3231'):
             addr = int(s.get('addr', 0x68))
@@ -378,8 +377,8 @@ def main() -> None:
                     slave = _i2c_slaves.get(addr)
                     try:
                         if stype == 'bmp280' and slave is not None:
-                            slave.update(float(rec.get('temperature', 25.0)),
-                                         float(rec.get('pressure', 1013.25)))
+                            # Only what this update names, as for the MPU-6050.
+                            slave.update(**cmd)
                         elif stype == 'mpu6050' and slave is not None and hasattr(slave, 'update'):
                             # Only what this update names: a value it leaves
                             # out stays where the record or an earlier update

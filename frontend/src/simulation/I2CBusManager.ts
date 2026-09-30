@@ -912,32 +912,119 @@ export class VirtualTempSensor implements I2CDevice {
 }
 
 /**
- * Virtual BMP280 barometric pressure / temperature sensor.
+ * What the BMP280 holds at power-on and what it does with a byte written to
+ * it, as one table. The model below works from it, the tests hold it against
+ * the copy in test/fixtures/i2c-vectors/bmp280.json, and the worker's copy
+ * (esp32_i2c_slaves.BMP280Slave) follows the same facts. Sections are those
+ * of the datasheet, BST-BMP280-DS001 rev 1.26.
+ */
+export const BMP280_RULES = {
+  /**
+   * Every register powers on at 0x00 but the id and the msb of the two data
+   * words, which hold 0x80000 until a measurement replaces it (4.2, table 18).
+   * The calibration block 0x88-0x9F is the part's own.
+   */
+  power_on: { 0xd0: 0x58, 0xf7: 0x80, 0xfa: 0x80 },
+  /**
+   * The registers a write changes: ctrl_meas and config. The calibration, the
+   * id, status and the data registers are read-only, and the rest of the map
+   * is reserved (4.2, the "Type" row of table 18).
+   */
+  writable: [0xf4, 0xf5],
+  /**
+   * The reset register (4.3.2) keeps nothing and reads 0x00. This one word
+   * runs the power-on reset, any other does nothing.
+   */
+  reset: { 0xe0: 0xb6 },
+  /**
+   * Bits the chip sets by itself in status (4.3.3). `measuring` is 1 while a
+   * conversion runs: the first read after one starts finds it, the next does
+   * not. im_update, bit 0, is up for the NVM copy that is over before a
+   * master can ask.
+   */
+  status: { 0xf3: 0x08 },
+  /** mode[1:0] of ctrl_meas (3.6, table 10): 01 and 10 are both forced mode. */
+  mode: { register: 0xf4, mask: 0x03, sleep: 0, normal: 3 },
+  /** press and temp, 20 bits each, msb first (4.3.6, 4.3.7). */
+  sample: [0xf7, 0xfc],
+} as const;
+
+const BMP_RESET = 0xe0;
+const BMP_RESET_WORD = BMP280_RULES.reset[BMP_RESET];
+const BMP_STATUS = 0xf3;
+const BMP_MEASURING = BMP280_RULES.status[BMP_STATUS];
+const BMP_CTRL_MEAS = BMP280_RULES.mode.register;
+const BMP_MODE = BMP280_RULES.mode.mask;
+const BMP_SLEEP = BMP280_RULES.mode.sleep;
+const BMP_NORMAL = BMP280_RULES.mode.normal;
+const [BMP_SAMPLE_FIRST, BMP_SAMPLE_LAST] = BMP280_RULES.sample;
+const BMP_WRITABLE = new Uint8Array(256);
+for (const reg of BMP280_RULES.writable) BMP_WRITABLE[reg] = 1;
+
+/**
+ * Virtual BMP280 barometric pressure / temperature sensor, modelled where a
+ * driver can tell the difference from the chip.
  *
  * Supports I2C addresses 0x76 (SDO=0) or 0x77 (SDO=1).
  *
  * Register map (subset):
  *   0x88–0x9F  Calibration data (trimming parameters)
  *   0xD0       chip_id  = 0x58  (BMP280 production; BME280 = 0x60)
- *   0xF3       status   = 0x00 (measurement complete, no NVM copy)
+ *   0xE0       reset: 0xB6 runs the power-on reset, reads 0x00
+ *   0xF3       status: measuring (bit 3)
  *   0xF4       ctrl_meas (mode, osrs_t, osrs_p) — writable
  *   0xF5       config    — writable
  *   0xF7–0xF9  press_msb / press_lsb / press_xlsb  (20-bit ADC)
  *   0xFA–0xFC  temp_msb  / temp_lsb  / temp_xlsb   (20-bit ADC)
  *
+ *  - It powers on in sleep mode and measures nothing there (3.6.1): until
+ *    the sketch selects a mode, the data registers hold their reset value
+ *    0x80000.
+ *  - Forced mode is one measurement, and the chip is back in sleep mode when
+ *    it is done (3.6.2). A conversion takes no time here, so the mode bits
+ *    read 00 at once and the measurement is what the panel said at the write.
+ *    esp-idf-lib and M5Unit-ENV wait for those bits, BMP280_DEV starts the
+ *    next conversion only from sleep mode.
+ *  - In normal mode the chip measures by itself (3.6.3): a read finds what
+ *    the panel says when it begins, and the whole burst is answered from that
+ *    one measurement (3.10), so a slider moving while it is read cannot mix
+ *    two of them.
+ *  - `measuring` reads 1 once after a mode write that starts a conversion.
+ *    SparkFun's and pocketBME280's examples wait for it to rise with no
+ *    timeout, Adafruit's takeForcedMeasurement() waits for it to fall.
+ *    Without a clock the cycles of normal mode that follow are not seen in
+ *    status.
+ *  - A write is pairs of register address and register data, and the address
+ *    does not count up (5.2.1, figure 7). A read counts up from the last
+ *    address written (5.2.2).
+ *  - What the panel sets is the world around the chip, not a register: it
+ *    survives a soft reset.
+ *
  * The calibration parameters are the BMP280 datasheet example values (Section 8.2).
  * They produce T ≈ 25°C, P ≈ 1006 hPa from the corresponding raw ADC values.
  *
- * Setting `temperature` (°C) and `pressure` (hPa) properties recomputes raw ADC
- * registers using a binary search over the Bosch compensation formulas so that
+ * Setting `temperature` (°C) and `pressure` (hPa) properties recomputes the
+ * raw ADC values using a binary search over the Bosch compensation formulas so that
  * Arduino sketches using the Adafruit_BMP280 / Bosch driver get realistic values.
  */
 export class VirtualBMP280 implements I2CDevice {
   public address: number;
+  /** The data registers were read before the chip ever measured, for the first time in this run. */
+  onAsleepRead: (() => void) | null = null;
 
   private readonly registers = new Uint8Array(256);
+  /** What a measurement taken now puts in the data registers. */
+  private readonly live = new Uint8Array(BMP_SAMPLE_LAST - BMP_SAMPLE_FIRST + 1);
   private regPtr = 0;
+  /** The next byte written is a register address. */
   private firstByte = true;
+  /** A conversion started and status has not been read since. */
+  private measuring = false;
+  /** The data registers hold a measurement and not their reset value. */
+  private measured = false;
+  /** No START was heard for the read that comes next: latch on its first byte. */
+  private latchDue = true;
+  private asleepReadSaid = false;
 
   // ── BMP280 datasheet Section 8.2 example calibration ───────────────────
   private readonly DIG_T1 = 27504;
@@ -953,12 +1040,14 @@ export class VirtualBMP280 implements I2CDevice {
   private readonly DIG_P8 = -14600;
   private readonly DIG_P9 = 6000;
 
-  private _temperatureC = 25.0;
+  // Where the sensor panel starts (sensorControlConfig, bmp280).
+  private _temperatureC = 24.0;
   private _pressureHPa = 1013.25;
 
   constructor(address = 0x76) {
     this.address = address;
     this.initCalibration();
+    this.powerOn();
     this.updateMeasurements();
   }
 
@@ -982,31 +1071,120 @@ export class VirtualBMP280 implements I2CDevice {
 
   // ── I2CDevice interface ─────────────────────────────────────────────────
 
+  start(read: boolean): void {
+    if (read) this.latch();
+  }
+
   writeByte(value: number): boolean {
+    // For a host that does not say where a read begins: after a write, the
+    // next byte read is the first of a new read.
+    this.latchDue = true;
     if (this.firstByte) {
-      this.regPtr = value;
+      this.regPtr = value & 0xff;
       this.firstByte = false;
-    } else {
-      // Writable registers (ctrl_meas, config) — store them
-      this.registers[this.regPtr] = value;
-      this.regPtr = (this.regPtr + 1) & 0xff;
+      return true;
     }
+    // The byte after a register's data is the next register's address. The
+    // pointer stays where the pair put it: esp-idf-lib's bmp280_is_measuring
+    // sends 0xF3 0xF4 and reads status and ctrl_meas back.
+    this.firstByte = true;
+    this.writeRegister(this.regPtr, value & 0xff);
     return true;
   }
 
   readByte(): number {
-    const val = this.registers[this.regPtr];
-    this.regPtr = (this.regPtr + 1) & 0xff;
-    return val;
+    if (this.latchDue) this.latch();
+    const reg = this.regPtr;
+    this.regPtr = (reg + 1) & 0xff;
+    if (reg === BMP_STATUS) {
+      const status = this.measuring ? BMP_MEASURING : 0;
+      this.measuring = false;
+      return status;
+    }
+    if (
+      reg >= BMP_SAMPLE_FIRST &&
+      reg <= BMP_SAMPLE_LAST &&
+      !this.measured &&
+      !this.asleepReadSaid
+    ) {
+      this.asleepReadSaid = true;
+      this.onAsleepRead?.();
+    }
+    return this.registers[reg];
   }
 
+  /** The pointer survives the STOP: Seeed_BMP280 writes it in one transaction and reads in the next. */
   stop(): void {
     this.firstByte = true;
+    this.latchDue = true;
   }
 
-  /** Snapshot the full 256-byte register file (calibration + ADC results). */
+  /** A new run reads a chip that still has not measured: its monitor is told as well. */
+  boardReset(): void {
+    this.asleepReadSaid = false;
+  }
+
+  /**
+   * The registers as a read would find them now: in normal mode the data
+   * registers encoded from the panel's values, and no `measuring`. A host
+   * that answers its guest from a copy (the Raspberry Pi relay) mirrors this.
+   */
   dumpRegisters(): Uint8Array {
-    return new Uint8Array(this.registers);
+    const out = this.registers.slice();
+    if (this.mode === BMP_NORMAL) out.set(this.live, BMP_SAMPLE_FIRST);
+    return out;
+  }
+
+  private get mode(): number {
+    return this.registers[BMP_CTRL_MEAS] & BMP_MODE;
+  }
+
+  /** The power-on reset, which the reset word runs too. The calibration is NVM and the panel is not the chip's. */
+  private powerOn(): void {
+    for (const reg of BMP280_RULES.writable) this.registers[reg] = 0;
+    this.registers.fill(0, BMP_SAMPLE_FIRST, BMP_SAMPLE_LAST + 1);
+    for (const [reg, value] of Object.entries(BMP280_RULES.power_on)) {
+      this.registers[Number(reg)] = value;
+    }
+    this.measuring = false;
+    this.measured = false;
+  }
+
+  private writeRegister(reg: number, value: number): void {
+    if (reg === BMP_RESET) {
+      if (value === BMP_RESET_WORD) this.powerOn();
+      return;
+    }
+    if (!BMP_WRITABLE[reg]) return;
+    if (reg !== BMP_CTRL_MEAS) {
+      this.registers[reg] = value;
+      return;
+    }
+    const mode = value & BMP_MODE;
+    if (mode === BMP_SLEEP) {
+      // The chip measured until now, so what it holds asleep is this instant.
+      if (this.mode === BMP_NORMAL) this.measure();
+      this.measuring = false;
+      this.registers[reg] = value;
+      return;
+    }
+    this.measuring = true;
+    if (mode === BMP_NORMAL) {
+      this.registers[reg] = value;
+      return;
+    }
+    this.measure();
+    this.registers[reg] = value & ~BMP_MODE;
+  }
+
+  private measure(): void {
+    this.registers.set(this.live, BMP_SAMPLE_FIRST);
+    this.measured = true;
+  }
+
+  private latch(): void {
+    if (this.mode === BMP_NORMAL) this.measure();
+    this.latchDue = false;
   }
 
   // ── Compensation formulas (Bosch 32-bit integer + double precision) ────
@@ -1089,11 +1267,6 @@ export class VirtualBMP280 implements I2CDevice {
     };
     const ws16 = (a: number, v: number) => wu16(a, v & 0xffff);
 
-    r[0xd0] = 0x58; // chip_id BMP280 (production silicon; BME280 uses 0x60)
-    r[0xf3] = 0x00; // status  (measurement done)
-    r[0xf4] = 0x00; // ctrl_meas default
-    r[0xf5] = 0x00; // config default
-
     wu16(0x88, this.DIG_T1);
     ws16(0x8a, this.DIG_T2);
     ws16(0x8c, this.DIG_T3);
@@ -1108,7 +1281,10 @@ export class VirtualBMP280 implements I2CDevice {
     ws16(0x9e, this.DIG_P9);
   }
 
-  /** Recompute raw ADC registers from current temperature / pressure. */
+  /**
+   * Recompute the raw ADC values from current temperature / pressure. They
+   * reach the data registers with a measurement, not here.
+   */
   private updateMeasurements(): void {
     const targetT = Math.round(this._temperatureC * 100);
     const targetP = this._pressureHPa * 100; // hPa → Pa
@@ -1116,15 +1292,7 @@ export class VirtualBMP280 implements I2CDevice {
     const adcT = this.findAdcT(targetT);
     const adcP = this.findAdcP(targetP, adcT);
 
-    const [pMsb, pLsb, pXlsb] = VirtualBMP280.encodeAdc20(adcP);
-    const [tMsb, tLsb, tXlsb] = VirtualBMP280.encodeAdc20(adcT);
-
-    this.registers[0xf7] = pMsb;
-    this.registers[0xf8] = pLsb;
-    this.registers[0xf9] = pXlsb;
-    this.registers[0xfa] = tMsb;
-    this.registers[0xfb] = tLsb;
-    this.registers[0xfc] = tXlsb;
+    this.live.set([...VirtualBMP280.encodeAdc20(adcP), ...VirtualBMP280.encodeAdc20(adcT)]);
   }
 }
 

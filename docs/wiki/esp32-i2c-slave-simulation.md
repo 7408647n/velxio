@@ -44,6 +44,13 @@
 >   `lostPower()` is false: a module somebody set, as CH is 0), the alarms set A1F and A2F, the
 >   temperature is two's complement and starts from the record, the pointer wraps at `0x12`.
 > - The seven time registers are latched at every START, so a burst cannot straddle a second.
+>
+> The `BMP280Slave` of section 8 changed the same way, as the twin of `VirtualBMP280`
+> (`test/fixtures/i2c-vectors/bmp280.json`). It powers on in sleep mode with `0x80000` in its data
+> registers and measures once the sketch writes a mode to `ctrl_meas` (`0xF4`); forced mode is one
+> measurement and reads back as sleep mode; `measuring` (status bit 3) reads 1 once after a
+> conversion starts; `0xB6` written to `0xE0` is a reset; and a write is pairs of register address
+> and data, with no auto-increment.
 
 ---
 

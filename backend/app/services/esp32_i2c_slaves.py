@@ -286,8 +286,90 @@ class MPU6050Slave:
 
 # ── BMP280 Barometric Pressure + Temperature Sensor ───────────────────────────
 
+# What the BMP280 holds at power-on and what it does with a byte written to
+# it, as one table. It is BMP280_RULES of the tab model
+# (frontend/src/simulation/I2CBusManager.ts) and the `rules` of
+# test/fixtures/i2c-vectors/bmp280.json, which the tests hold both copies
+# against. Sections are those of the datasheet, BST-BMP280-DS001 rev 1.26.
+BMP280_RULES = {
+    # Every register powers on at 0x00 but the id and the msb of the two data
+    # words, which hold 0x80000 until a measurement replaces it (4.2, table
+    # 18). The calibration block 0x88-0x9F is the part's own.
+    'power_on': {0xD0: 0x58, 0xF7: 0x80, 0xFA: 0x80},
+    # The registers a write changes: ctrl_meas and config. The calibration,
+    # the id, status and the data registers are read-only, and the rest of the
+    # map is reserved (4.2, the "Type" row of table 18).
+    'writable': (0xF4, 0xF5),
+    # The reset register (4.3.2) keeps nothing and reads 0x00. This one word
+    # runs the power-on reset, any other does nothing.
+    'reset': {0xE0: 0xB6},
+    # Bits the chip sets by itself in status (4.3.3). `measuring` is 1 while a
+    # conversion runs: the first read after one starts finds it, the next does
+    # not. im_update, bit 0, is up for the NVM copy that is over before a
+    # master can ask.
+    'status': {0xF3: 0x08},
+    # mode[1:0] of ctrl_meas (3.6, table 10): 01 and 10 are both forced mode.
+    'mode': {'register': 0xF4, 'mask': 0x03, 'sleep': 0, 'normal': 3},
+    # press and temp, 20 bits each, msb first (4.3.6, 4.3.7).
+    'sample': (0xF7, 0xFC),
+}
+
+# Pressure and temperature at the chip, under the names of the panel's sliders
+# (hPa, degrees Celsius), which are the names the sensor record and its
+# updates carry. Where the panel starts.
+BMP280_INPUTS = {'temperature': 24.0, 'pressure': 1013.25}
+
+_BMP_RESET        = 0xE0
+_BMP_RESET_WORD   = BMP280_RULES['reset'][_BMP_RESET]
+_BMP_STATUS       = 0xF3
+_BMP_MEASURING    = BMP280_RULES['status'][_BMP_STATUS]
+_BMP_CTRL_MEAS    = BMP280_RULES['mode']['register']
+_BMP_MODE         = BMP280_RULES['mode']['mask']
+_BMP_SLEEP        = BMP280_RULES['mode']['sleep']
+_BMP_NORMAL       = BMP280_RULES['mode']['normal']
+_BMP_SAMPLE_FIRST, _BMP_SAMPLE_LAST = BMP280_RULES['sample']
+
+
+def _bmp_number(value) -> 'float | None':
+    """A value of a sensor record as a finite number, or None for anything
+    else. A number typed into a property dialog may arrive as its text, which
+    the worker always took."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if _math.isfinite(number) else None
+
+
 class BMP280Slave:
-    """Full BMP280 register-map I2C slave (address 0x76 or 0x77).
+    """BMP280 (address 0x76 or 0x77), modelled where a driver can tell the
+    difference from the chip. The twin of VirtualBMP280 in the tab: both
+    replay test/fixtures/i2c-vectors/bmp280.json.
+
+      - It powers on in sleep mode and measures nothing there (3.6.1): until
+        the sketch selects a mode, the data registers hold their reset value
+        0x80000.
+      - Forced mode is one measurement, and the chip is back in sleep mode
+        when it is done (3.6.2). A conversion takes no time here, so the mode
+        bits read 00 at once and the measurement is what the panel said at
+        the write. esp-idf-lib and M5Unit-ENV wait for those bits, BMP280_DEV
+        starts the next conversion only from sleep mode.
+      - In normal mode the chip measures by itself (3.6.3): a read finds what
+        the panel says when it begins, and the whole burst is answered from
+        that one measurement (3.10), so a slider moving while it is read
+        cannot mix two of them.
+      - `measuring` reads 1 once after a mode write that starts a conversion.
+        SparkFun's and pocketBME280's examples wait for it to rise with no
+        timeout, Adafruit's takeForcedMeasurement() waits for it to fall.
+        Without a clock the cycles of normal mode that follow are not seen in
+        status.
+      - A write is pairs of register address and register data, and the
+        address does not count up (5.2.1, figure 7). A read counts up from
+        the last address written (5.2.2).
+      - What the panel sets is the world around the chip, not a register: it
+        survives a soft reset.
 
     Uses BMP280 datasheet Section 8.2 example calibration constants.
     Implements Bosch compensation formulas with binary-search inversion
@@ -304,10 +386,22 @@ class BMP280Slave:
         self.addr       = addr
         self.regs       = bytearray(256)
         self.reg_ptr    = 0
+        # The next byte written is a register address.
         self.first_byte = True
-        self._temp_c    = 25.0
-        self._press_hpa = 1013.25
+        self._temp_c    = BMP280_INPUTS['temperature']
+        self._press_hpa = BMP280_INPUTS['pressure']
+        # What a measurement taken now puts in the data registers. Replaced
+        # whole by update(), never changed in place: the panel moves on the
+        # worker's command thread while QEMU's thread reads.
+        self._live = bytes(_BMP_SAMPLE_LAST - _BMP_SAMPLE_FIRST + 1)
+        # A conversion started and status has not been read since.
+        self._measuring = False
+        # The data registers hold a measurement and not their reset value.
+        self._measured = False
+        # No START was heard for the read that comes next: latch on its first byte.
+        self._latch_due = True
         self._init_calibration()
+        self._power_on()
         self._update_measurements()
 
     # ── calibration register layout ───────────────────────────────────────────
@@ -318,8 +412,6 @@ class BMP280Slave:
         self._wu16(a, v & 0xFFFF)
 
     def _init_calibration(self) -> None:
-        self.regs[0xD0] = 0x58  # chip_id BMP280 (production silicon; BME280 uses 0x60)
-        self.regs[0xF3] = 0x00  # status  (done)
         self._wu16(0x88, self.DIG_T1); self._ws16(0x8A, self.DIG_T2); self._ws16(0x8C, self.DIG_T3)
         self._wu16(0x8E, self.DIG_P1); self._ws16(0x90, self.DIG_P2); self._ws16(0x92, self.DIG_P3)
         self._ws16(0x94, self.DIG_P4); self._ws16(0x96, self.DIG_P5); self._ws16(0x98, self.DIG_P6)
@@ -374,37 +466,138 @@ class BMP280Slave:
         return (v >> 12) & 0xFF, (v >> 4) & 0xFF, (v & 0xF) << 4
 
     def _update_measurements(self) -> None:
-        adc_t = self._find_adc_t(round(self._temp_c * 100))
+        """The raw ADC values of the panel's temperature and pressure. They
+        reach the data registers with a measurement, not here."""
+        # Half a hundredth of a degree rounds up, as Math.round does in the
+        # tab: round() sends 2412.5 to 2412 and the two copies would differ.
+        adc_t = self._find_adc_t(_math.floor(self._temp_c * 100 + 0.5))
         adc_p = self._find_adc_p(self._press_hpa * 100.0, adc_t)
-        pm, pl, px = self._encode20(adc_p)
-        tm, tl, tx = self._encode20(adc_t)
-        self.regs[0xF7] = pm; self.regs[0xF8] = pl; self.regs[0xF9] = px
-        self.regs[0xFA] = tm; self.regs[0xFB] = tl; self.regs[0xFC] = tx
+        self._live = bytes((*self._encode20(adc_p), *self._encode20(adc_t)))
 
-    def update(self, temperature_c: float, pressure_hpa: float) -> None:
-        self._temp_c    = temperature_c
-        self._press_hpa = pressure_hpa
+    def update(self, temperature_c=None, pressure_hpa=None, /, **inputs) -> None:
+        """The panel moved. Only the values it names change, and no register
+        does: they are measured in the mode the sketch selected.
+
+        Takes a sensor record or an update as they arrive (temperature in
+        degrees Celsius, pressure in hPa); whatever else the record carries,
+        and anything that is not a finite number, is left out. The two
+        positional values are how update() was called before it took the
+        record's names.
+        """
+        named = {'temperature': temperature_c, 'pressure': pressure_hpa}
+        for name, legacy in (('temperature', 'temperature_c'), ('pressure', 'pressure_hpa')):
+            for key in (legacy, name):
+                if key in inputs:
+                    named[name] = inputs[key]
+        temp_c = _bmp_number(named['temperature'])
+        press  = _bmp_number(named['pressure'])
+        if temp_c is not None:
+            self._temp_c = temp_c
+        if press is not None:
+            self._press_hpa = press
         self._update_measurements()
+
+    def inputs(self) -> dict:
+        return {'temperature': self._temp_c, 'pressure': self._press_hpa}
+
+    def dump_registers(self) -> bytearray:
+        """The registers as a read would find them now: in normal mode the
+        data registers encoded from the panel's values, and no `measuring`."""
+        out = bytearray(self.regs)
+        if self._mode() == _BMP_NORMAL:
+            out[_BMP_SAMPLE_FIRST:_BMP_SAMPLE_LAST + 1] = self._live
+        return out
 
     def handle_event(self, event: int) -> int:
         op   = event & 0xFF
         data = (event >> 8) & 0xFF
 
         if op in (I2C_START_RECV, I2C_START_SEND):
-            self.first_byte = True; return 0
+            # reg_ptr is NOT reset here: a write-then-read (repeated START)
+            # relies on reg_ptr having been set by the preceding WRITE phase.
+            self.first_byte = True
+            if op == I2C_START_RECV:
+                self._latch()
+            return 0
         elif op == I2C_WRITE:
+            self._latch_due = True
             if self.first_byte:
                 self.reg_ptr = data; self.first_byte = False
             else:
-                self.regs[self.reg_ptr] = data
-                self.reg_ptr = (self.reg_ptr + 1) & 0xFF
+                # The byte after a register's data is the next register's
+                # address. The pointer stays where the pair put it:
+                # esp-idf-lib's bmp280_is_measuring sends 0xF3 0xF4 and reads
+                # status and ctrl_meas back.
+                self.first_byte = True
+                self._write_register(self.reg_ptr, data)
             return 0
         elif op == I2C_READ:
-            val = self.regs[self.reg_ptr]
-            self.reg_ptr = (self.reg_ptr + 1) & 0xFF
-            return val
+            if self._latch_due:
+                self._latch()
+            reg = self.reg_ptr
+            self.reg_ptr = (reg + 1) & 0xFF
+            if reg == _BMP_STATUS:
+                status = _BMP_MEASURING if self._measuring else 0
+                self._measuring = False
+                return status
+            return self.regs[reg]
         else:
-            self.first_byte = True; return 0
+            # I2C_FINISH, I2C_NACK, unknown. The pointer survives:
+            # Seeed_BMP280 writes it in one transaction and reads in the
+            # next, and QEMU ends every write phase this way, the one before
+            # a repeated START included.
+            self.first_byte = True
+            self._latch_due = True
+            return 0
+
+    def _mode(self) -> int:
+        return self.regs[_BMP_CTRL_MEAS] & _BMP_MODE
+
+    def _power_on(self) -> None:
+        """The power-on reset, which the reset word runs too. The calibration
+        is NVM and the panel is not the chip's."""
+        for reg in BMP280_RULES['writable']:
+            self.regs[reg] = 0
+        for reg in range(_BMP_SAMPLE_FIRST, _BMP_SAMPLE_LAST + 1):
+            self.regs[reg] = 0
+        for reg, value in BMP280_RULES['power_on'].items():
+            self.regs[reg] = value
+        self._measuring = False
+        self._measured = False
+
+    def _write_register(self, reg: int, value: int) -> None:
+        if reg == _BMP_RESET:
+            if value == _BMP_RESET_WORD:
+                self._power_on()
+            return
+        if reg not in BMP280_RULES['writable']:
+            return
+        if reg != _BMP_CTRL_MEAS:
+            self.regs[reg] = value
+            return
+        mode = value & _BMP_MODE
+        if mode == _BMP_SLEEP:
+            # The chip measured until now, so what it holds asleep is this instant.
+            if self._mode() == _BMP_NORMAL:
+                self._measure()
+            self._measuring = False
+            self.regs[reg] = value
+            return
+        self._measuring = True
+        if mode == _BMP_NORMAL:
+            self.regs[reg] = value
+            return
+        self._measure()
+        self.regs[reg] = value & ~_BMP_MODE & 0xFF
+
+    def _measure(self) -> None:
+        self.regs[_BMP_SAMPLE_FIRST:_BMP_SAMPLE_LAST + 1] = self._live
+        self._measured = True
+
+    def _latch(self) -> None:
+        if self._mode() == _BMP_NORMAL:
+            self._measure()
+        self._latch_due = False
 
 
 # ── DS1307 / DS3231 Real-Time Clock ──────────────────────────────────────────

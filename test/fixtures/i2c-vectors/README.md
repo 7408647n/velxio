@@ -10,6 +10,7 @@ that pass the same file cannot drift apart again.
 | `mpu6050.json` | InvenSense MPU-6050 | `frontend/src/__tests__/protocol-parts.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
 | `ds1307.json` | DS1307 real-time clock | `frontend/src/__tests__/rtc-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
 | `ds3231.json` | DS3231 real-time clock | `frontend/src/__tests__/rtc-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
+| `bmp280.json` | Bosch BMP280 | `frontend/src/__tests__/bmp280-vectors.test.ts` (tab model), `test/backend/unit/test_i2c_slaves.py` (backend twin) |
 
 ## File
 
@@ -30,7 +31,8 @@ that pass the same file cannot drift apart again.
   table is tested against this copy, so the two agree on the facts and not only
   on the cases below.
 - `inputs`: the physical inputs every vector starts from, in the units of the
-  sensor panel (g, deg/s, deg C for the MPU-6050).
+  sensor panel (g, deg/s, deg C for the MPU-6050; deg C and hPa for the
+  BMP280).
 - `vectors`: each one starts from a chip that has just been powered on.
   `name` says what is proved, `spec` where the behaviour comes from (datasheet
   section or driver source). A vector with a `driver` field is the traffic of
@@ -101,9 +103,10 @@ it), and may not depend on a STOP to begin a new read.
 A runner needs, per vector, a new model at `address` with `inputs` applied
 (and with the clock and the build times, for a chip that keeps the time),
 and then a loop over `steps`. The TypeScript one is about forty lines
-(`replayVector` in `protocol-parts.test.ts`, and the one that moves a clock
-in `frontend/src/__tests__/helpers/i2cVectors.ts`), and so is the Python one
-(`replay_vector` in `test_i2c_slaves.py`). For a QEMU device model the
+(`replayVector` in `protocol-parts.test.ts`, the one that moves a clock in
+`frontend/src/__tests__/helpers/i2cVectors.ts`, and the one any model's test can
+import in `frontend/src/__tests__/helpers/busVectors.ts`), and so is the Python
+one (`replay_vector` in `test_i2c_slaves.py`). For a QEMU device model the
 events are `I2C_START_SEND` and `I2C_START_RECV` for `start`, `I2C_WRITE` for
 each byte of `send`, `I2C_READ` for each byte of `recv`, `I2C_FINISH` for
 `stop`.
@@ -116,3 +119,9 @@ round half away from zero, then saturate at the ends of the register
 size. JavaScript's `Math.round` and Python's `round` both do something else at
 exactly one half, and a gyro slider that moves in steps of 1 deg/s lands there
 at 65.5 LSB per deg/s, which is why a vector pins it.
+
+The BMP280 has no sensitivity: its raw values are the ones the compensation
+formulas of the datasheet turn back into the input, found by searching them.
+The search aims at the temperature in hundredths of a degree, and half a
+hundredth rounds up (24.125 deg C is 2413), which is what `Math.round` does
+and Python's `round` does not. A vector pins that too.

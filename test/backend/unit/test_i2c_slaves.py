@@ -31,6 +31,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'backend'))
 
 from app.services.esp32_i2c_slaves import (
+    BMP280_RULES,
     BMP280Slave,
     DS1307Slave,
     DS1307_RULES,
@@ -85,10 +86,38 @@ def bcd_valid(value: int) -> bool:
 # BMP280 Slave Tests
 # ══════════════════════════════════════════════════════════════════════════════
 
+# The bus vectors the tab model replays too (frontend/src/__tests__/
+# bmp280-vectors.test.ts). The format is in the README next to the file, and
+# the runner is replay_vector below, with the MPU-6050's.
+BMP_VECTORS = json.loads(
+    (Path(__file__).parent.parent.parent / 'fixtures' / 'i2c-vectors' / 'bmp280.json')
+    .read_text(encoding='utf-8'))
+BMP_ADDR = int(BMP_VECTORS['address'], 16)
+
+CTRL_MEAS = 0xF4
+NORMAL_X1 = 0x27   # temperature x1, pressure x1, normal mode
+FORCED_X1 = 0x25
+
+
+def adc20(data) -> int:
+    return (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
+
+
 class TestBMP280Slave(unittest.TestCase):
 
     def setUp(self):
         self.slave = BMP280Slave()
+
+    def write(self, reg: int, *values: int) -> None:
+        self.slave.handle_event(I2C_START_SEND)
+        self.slave.handle_event(i2c_write(reg))
+        for value in values:
+            self.slave.handle_event(i2c_write(value))
+        self.slave.handle_event(I2C_FINISH)
+
+    def normal_mode(self) -> None:
+        """What every driver does before it reads: the chip powers on asleep."""
+        self.write(CTRL_MEAS, NORMAL_X1)
 
     # ── I2C protocol ───────────────────────────────────────────────────────────
 
@@ -129,49 +158,94 @@ class TestBMP280Slave(unittest.TestCase):
 
     # ── Default measurement values ─────────────────────────────────────────────
 
-    def test_default_temp_25c(self):
-        """Default state: 25°C → compensated centidegrees ≈ 2500."""
-        adc_t_bytes = i2c_read_seq(self.slave, 0xFA, 3)
-        adc_t = ((adc_t_bytes[0] << 12) | (adc_t_bytes[1] << 4) | (adc_t_bytes[2] >> 4))
+    def test_default_temp_is_the_panels(self):
+        """Default state: 24 °C, where the sensor panel starts → compensated
+        centidegrees ≈ 2400."""
+        self.normal_mode()
+        adc_t = adc20(i2c_read_seq(self.slave, 0xFA, 3))
         compensated = self.slave._compensate_t(adc_t)
         # Allow ±1 centidegree tolerance (binary-search rounding)
-        self.assertAlmostEqual(compensated, 2500, delta=1)
+        self.assertAlmostEqual(compensated, 2400, delta=1)
 
     def test_default_pressure_1013hpa(self):
         """Default state: 1013.25 hPa → compensated Pa within 100 Pa tolerance."""
-        adc_t_bytes = i2c_read_seq(self.slave, 0xFA, 3)
-        adc_t = ((adc_t_bytes[0] << 12) | (adc_t_bytes[1] << 4) | (adc_t_bytes[2] >> 4))
-        adc_p_bytes = i2c_read_seq(self.slave, 0xF7, 3)
-        adc_p = ((adc_p_bytes[0] << 12) | (adc_p_bytes[1] << 4) | (adc_p_bytes[2] >> 4))
+        self.normal_mode()
+        adc_t = adc20(i2c_read_seq(self.slave, 0xFA, 3))
+        adc_p = adc20(i2c_read_seq(self.slave, 0xF7, 3))
         compensated_pa = self.slave._compensate_p(adc_p, adc_t)
         target_pa = 1013.25 * 100.0
         self.assertAlmostEqual(compensated_pa, target_pa, delta=100)  # ±1 hPa
 
+    def test_data_registers_hold_the_reset_value_until_a_mode_is_selected(self):
+        """The chip powers on in sleep mode and measures nothing there
+        (datasheet 3.6.1); table 18 gives the data registers 0x80 0x00 0x00."""
+        self.assertEqual(i2c_read_seq(self.slave, 0xF7, 6), [0x80, 0, 0, 0x80, 0, 0])
+        self.slave.update(30.0, 900.0)
+        self.assertEqual(i2c_read_seq(self.slave, 0xF7, 6), [0x80, 0, 0, 0x80, 0, 0])
+
     # ── update() changes ADC registers ────────────────────────────────────────
 
     def test_update_changes_temp_regs(self):
-        before = list(self.slave.regs[0xFA:0xFD])
+        self.normal_mode()
+        before = i2c_read_seq(self.slave, 0xFA, 3)
         self.slave.update(30.0, 1013.25)
-        after = list(self.slave.regs[0xFA:0xFD])
+        after = i2c_read_seq(self.slave, 0xFA, 3)
         self.assertNotEqual(before, after, 'Temp ADC regs must change after update(30.0,...)')
 
     def test_update_changes_pressure_regs(self):
-        before = list(self.slave.regs[0xF7:0xFA])
+        self.normal_mode()
+        before = i2c_read_seq(self.slave, 0xF7, 3)
         self.slave.update(25.0, 900.0)
-        after = list(self.slave.regs[0xF7:0xFA])
+        after = i2c_read_seq(self.slave, 0xF7, 3)
         self.assertNotEqual(before, after, 'Pressure ADC regs must change after update(...,900.0)')
 
     def test_update_temp_compensates_correctly(self):
+        self.normal_mode()
         self.slave.update(40.0, 1013.25)
-        adc_t_bytes = i2c_read_seq(self.slave, 0xFA, 3)
-        adc_t = ((adc_t_bytes[0] << 12) | (adc_t_bytes[1] << 4) | (adc_t_bytes[2] >> 4))
+        adc_t = adc20(i2c_read_seq(self.slave, 0xFA, 3))
         compensated = self.slave._compensate_t(adc_t)
         self.assertAlmostEqual(compensated, 4000, delta=1)
+
+    def test_update_takes_a_sensor_record(self):
+        """The worker hands over the record, or the update, as it arrived:
+        the panel's names, and whatever else the tab put in."""
+        self.slave.update(sensor_type='bmp280', pin=276, addr=0x76, owner='bmp1',
+                          temperature=31.5, pressure=990)
+        self.assertEqual(self.slave.inputs(), {'temperature': 31.5, 'pressure': 990.0})
+
+    def test_update_changes_what_it_names_and_nothing_else(self):
+        self.slave.update(temperature=31.5, pressure=990)
+        self.slave.update(cmd='sensor_update', pin=276, pressure=1000.25)
+        self.assertEqual(self.slave.inputs(), {'temperature': 31.5, 'pressure': 1000.25})
+        self.slave.update(temperature=-5)
+        self.assertEqual(self.slave.inputs(), {'temperature': -5.0, 'pressure': 1000.25})
+
+    def test_update_by_the_names_it_had(self):
+        self.slave.update(temperature_c=12.0, pressure_hpa=950.0)
+        self.assertEqual(self.slave.inputs(), {'temperature': 12.0, 'pressure': 950.0})
+        self.slave.update(13.0, 951.0)
+        self.assertEqual(self.slave.inputs(), {'temperature': 13.0, 'pressure': 951.0})
+
+    def test_update_leaves_out_what_is_not_a_number(self):
+        self.slave.update(temperature=31.5, pressure=990)
+        self.slave.update(temperature=None, pressure=float('nan'))
+        self.slave.update(temperature='warm', pressure=float('inf'))
+        self.slave.update(temperature=True)
+        self.assertEqual(self.slave.inputs(), {'temperature': 31.5, 'pressure': 990.0})
+
+    def test_update_takes_a_number_typed_as_text(self):
+        """A property dialog stores what was typed."""
+        self.slave.update(temperature='24.5', pressure='1001')
+        self.assertEqual(self.slave.inputs(), {'temperature': 24.5, 'pressure': 1001.0})
+
+    def test_starts_from_the_values_the_panel_starts_from(self):
+        self.assertEqual(self.slave.inputs(), BMP_VECTORS['inputs'])
 
     # ── Sequential register reads ──────────────────────────────────────────────
 
     def test_sequential_read_advances_pointer(self):
         """Reading 3 bytes from 0xF7 must yield distinct pressure MSB/LSB/XLSB."""
+        self.normal_mode()
         bytes_ = i2c_read_seq(self.slave, 0xF7, 3)
         self.assertEqual(len(bytes_), 3)
         # At least two of the three bytes must differ (non-trivial measurement)
@@ -201,6 +275,86 @@ class TestBMP280Slave(unittest.TestCase):
         self.slave.handle_event(I2C_START_RECV)
         val = self.slave.handle_event(I2C_READ)
         self.assertEqual(val, 0x58, 'chip_id should still be 0x58 after FINISH + new transaction')
+
+    # ── What a driver can tell from the chip ──────────────────────────────────
+
+    def test_measuring_is_seen_once_after_a_forced_write(self):
+        """SparkFun's and pocketBME280's examples wait for the bit to rise,
+        Adafruit's takeForcedMeasurement() for it to fall; neither has a
+        timeout."""
+        self.write(CTRL_MEAS, FORCED_X1)
+        self.assertEqual([i2c_read_seq(self.slave, 0xF3, 1)[0] for _ in range(3)], [0x08, 0, 0])
+
+    def test_forced_mode_is_back_in_sleep_mode(self):
+        self.write(CTRL_MEAS, FORCED_X1)
+        self.assertEqual(i2c_read_seq(self.slave, CTRL_MEAS, 1), [FORCED_X1 & ~0x03])
+
+    def test_soft_reset_restores_the_power_on_registers_and_reads_zero(self):
+        self.write(0xF5, 0x90)
+        self.normal_mode()
+        self.slave.update(30.0, 900.0)
+        self.write(0xE0, 0xB6)
+        self.assertEqual(i2c_read_seq(self.slave, 0xE0, 1), [0x00])
+        self.assertEqual(i2c_read_seq(self.slave, 0xF3, 3), [0x00, 0x00, 0x00])
+        self.assertEqual(i2c_read_seq(self.slave, 0xF7, 6), [0x80, 0, 0, 0x80, 0, 0])
+        self.assertEqual(self.slave.inputs(), {'temperature': 30.0, 'pressure': 900.0})
+
+    def test_a_write_is_pairs_of_address_and_data(self):
+        self.write(0xF5, 0xA0, CTRL_MEAS, NORMAL_X1)
+        self.assertEqual(i2c_read_seq(self.slave, CTRL_MEAS, 2), [NORMAL_X1, 0xA0])
+
+    def test_the_calibration_cannot_be_written(self):
+        before = bytes(self.slave.regs[0x88:0xA0])
+        self.write(0x88, 0xAA)
+        self.assertEqual(bytes(self.slave.regs[0x88:0xA0]), before)
+
+    def test_dump_is_what_a_read_would_find(self):
+        self.assertEqual(list(self.slave.dump_registers()[0xF7:0xFD]), [0x80, 0, 0, 0x80, 0, 0])
+        self.normal_mode()
+        self.slave.update(30.0, 900.0)
+        dump = self.slave.dump_registers()
+        self.assertEqual(list(dump[0xF7:0xFD]), i2c_read_seq(self.slave, 0xF7, 6))
+        self.assertEqual(dump[0xF3], 0x00, 'no trigger bit in a copy')
+        self.assertEqual(len(dump), 256)
+
+    def test_rules_are_the_table_the_shared_vectors_carry(self):
+        """The twin and the tab model work from one table of facts, and the
+        vectors hold the copy both are compared with."""
+        def pairs(table: dict) -> dict:
+            return {f'{reg:02X}': f'{value:02X}' for reg, value in table.items()}
+        mode = BMP280_RULES['mode']
+        self.assertEqual({
+            'power_on': pairs(BMP280_RULES['power_on']),
+            'writable': [f'{reg:02X}' for reg in BMP280_RULES['writable']],
+            'reset': pairs(BMP280_RULES['reset']),
+            'status': pairs(BMP280_RULES['status']),
+            'mode': {key: f'{mode[key]:02X}' for key in ('register', 'mask', 'sleep', 'normal')},
+            'sample': [f'{reg:02X}' for reg in BMP280_RULES['sample']],
+        }, BMP_VECTORS['rules'])
+
+    def test_the_vectors_are_the_format_this_runner_reads(self):
+        self.assertEqual(BMP_VECTORS['format'], 1)
+        self.assertEqual(BMP_VECTORS['device'], 'bmp280')
+        self.assertGreaterEqual(len(BMP_VECTORS['vectors']), 22)
+
+
+def _bmp_vector_case(vector: dict, flavour: str):
+    def case(self):
+        slave = BMP280Slave(BMP_ADDR)
+        slave.update(**BMP_VECTORS['inputs'])
+        replay_vector(self, slave, vector, flavour)
+    case.__doc__ = f'{vector["name"]} ({flavour})'
+    return case
+
+
+# One test per shared vector and bus flavour, named after its place in the
+# file. The flavours are BUS_FLAVOURS below, spelled out because the table
+# comes after this class.
+for _flavour in ('stop-start', 'repeated-start'):
+    for _n, _vector in enumerate(BMP_VECTORS['vectors'], start=1):
+        setattr(TestBMP280Slave,
+                f'test_vector_{_n:02d}_{_flavour.replace("-", "_")}',
+                _bmp_vector_case(_vector, _flavour))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
