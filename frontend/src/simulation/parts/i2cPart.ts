@@ -47,7 +47,10 @@ export { hostClockRecord, withHostClock } from './hostClock';
  */
 export function i2cTargetOf(device: I2CDevice): I2cTarget & { dumpRegisters?: () => Uint8Array } {
   let open = false;
-  const target: I2cTarget & { dumpRegisters?: () => Uint8Array } = {
+  const target: I2cTarget & {
+    dumpRegisters?: () => Uint8Array;
+    volatileReads?: readonly number[];
+  } = {
     start: (_address, read) => {
       if (open && !read) device.stop?.();
       open = true;
@@ -78,6 +81,8 @@ export function i2cTargetOf(device: I2CDevice): I2cTarget & { dumpRegisters?: ()
   // answers a register file from a copy instead of a round trip per byte.
   if (typeof device.dumpRegisters === 'function') {
     target.dumpRegisters = () => device.dumpRegisters!();
+    // And the registers of it the copy cannot answer for.
+    if (device.volatileReads?.length) target.volatileReads = device.volatileReads;
   }
   return target;
 }

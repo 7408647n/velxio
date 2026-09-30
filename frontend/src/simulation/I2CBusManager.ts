@@ -68,6 +68,14 @@ export interface I2CDevice {
    * (write-only sinks, time-based responders) can omit this.
    */
   dumpRegisters?(): Uint8Array;
+  /**
+   * Optional, with dumpRegisters: the registers a copy cannot answer for,
+   * because a read changes them (a status the read clears, a FIFO or memory
+   * port that hands out the next byte) or time does (a count that grows
+   * while nobody looks). A host answering from a copy asks the model for
+   * every read that touches one of them.
+   */
+  readonly volatileReads?: readonly number[];
 }
 
 /**

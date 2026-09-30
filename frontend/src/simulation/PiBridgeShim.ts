@@ -672,6 +672,10 @@ export class PiBridgeShim {
         // Two chips at one address: if either can NAK, the tab has to answer.
         const first = i2c.find((d) => d.bus === t.bus && d.addr === t.addr);
         if (first && t.ask_writes) first.ask_writes = true;
+        // And a read that either one changes is the tab's to answer.
+        if (first && t.volatile_reads) {
+          first.volatile_reads = [...new Set([...(first.volatile_reads ?? []), ...t.volatile_reads])];
+        }
         continue;
       }
       seen.add(key);
@@ -702,7 +706,13 @@ export class PiBridgeShim {
         // Only a chip that can NAK costs its writes a round trip; the rest
         // are ACKed by the relay, which is what keeps a display's frame fast.
         const ask = m.target.mayNak === true ? { ask_writes: true as const } : {};
-        for (const addr of m.addresses) out.push({ bus: port.unit, addr, regs, ...ask });
+        // The registers of a mirrored chip that a read changes: the relay
+        // asks this tab for those reads (a status the read clears, a FIFO).
+        const volatile =
+          regs !== null && m.target.volatileReads?.length
+            ? { volatile_reads: [...m.target.volatileReads] }
+            : {};
+        for (const addr of m.addresses) out.push({ bus: port.unit, addr, regs, ...ask, ...volatile });
       }
     }
     out.sort((a, b) => a.bus - b.bus || a.addr - b.addr);

@@ -67,6 +67,11 @@ export interface PiBusTopology {
    *
    * `seq`: the number of the last write the backend sent to this device that
    * `regs` includes. Absent = none was numbered yet.
+   *
+   * `volatile_reads`: with `regs`, the registers a read changes or time does
+   * (I2cTarget.volatileReads). The backend asks this tab for every read that
+   * touches one instead of answering from its copy. Absent = none; a backend
+   * from before the field answers them from its copy, as it always did.
    */
   i2c: Array<{
     bus: number;
@@ -74,6 +79,7 @@ export interface PiBusTopology {
     regs: string | null;
     ask_writes?: true;
     seq?: number;
+    volatile_reads?: number[];
   }>;
   /**
    * `responders` are the SPI devices with a portable model (the bus map an

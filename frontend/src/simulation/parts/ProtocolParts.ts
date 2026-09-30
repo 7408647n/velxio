@@ -904,6 +904,18 @@ export class VirtualMPU6050 implements I2CDevice {
    * host that drives the pin reads intPad() and intWakeNs() again.
    */
   onIntChange: (() => void) | null = null;
+  /**
+   * What a copy of dumpRegisters() cannot answer: INT_STATUS, which a read
+   * clears and every sample sets; MEM_R_W, which moves the memory address;
+   * FIFO_COUNT, which grows with time; FIFO_R_W, which pops a byte per read.
+   */
+  readonly volatileReads: readonly number[] = [
+    MPU_INT_STATUS,
+    MPU_MEM_R_W,
+    MPU_FIFO_COUNT_H,
+    MPU_FIFO_COUNT_L,
+    MPU_FIFO_R_W,
+  ];
 
   private readonly regs = new Uint8Array(256);
   private readonly inputs: Mpu6050Inputs = {

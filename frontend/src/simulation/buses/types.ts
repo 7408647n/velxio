@@ -371,6 +371,12 @@ export interface I2cTarget {
    * here.
    */
   readonly mayNak?: boolean;
+  /**
+   * The registers a copy of the chip's register file cannot answer for
+   * (I2CDevice.volatileReads): a host that answers reads from a copy (the
+   * Raspberry Pi relay) asks this tab for every read that touches one.
+   */
+  readonly volatileReads?: readonly number[];
 }
 
 /**
