@@ -122,6 +122,9 @@ export interface BoardInstance {
   boardKind: BoardKind;
   x: number;
   y: number;
+  /** Clockwise rotation in degrees (0 / 90 / 180 / 270) about the centre of
+   *  the board's footprint; (x, y) stays the unrotated top-left. */
+  rotation?: number;
   running: boolean;
   // QEMU-Linux (Raspberry Pi 3/4/5/Zero/1/2) only. `running` flips true the
   // instant the user clicks Start (the WebSocket opens in ~1s), but the guest

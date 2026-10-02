@@ -30,6 +30,7 @@ import {
 import { annotateSerialChunk } from '../utils/serialDiagnostics';
 import { blockedByBoardGate, reportBoardRunRefused } from '../lib/proBoardGate';
 import { getSerialTxInterceptor } from '../lib/proHardwareSerial';
+import { boardBox, boardSize, normalizeRotation } from '../utils/boardGeometry';
 import { calculatePinPosition } from '../utils/pinPositionCalculator';
 import { useOscilloscopeStore } from './useOscilloscopeStore';
 import { RaspberryPi3Bridge } from '../simulation/RaspberryPi3Bridge';
@@ -1532,6 +1533,38 @@ export interface CanvasCommand {
 const HISTORY_MAX = 50;
 
 // ── Store interface ───────────────────────────────────────────────────────
+/** What copyBoard keeps for pasteClipboard: the board's kind, settings and code,
+ *  never its runtime state (firmware, serial log) or its wires. */
+export interface BoardClipboard {
+  boardKind: string;
+  name?: string;
+  x: number;
+  y: number;
+  rotation: number;
+  languageMode: BoardInstance['languageMode'];
+  serialBaudRate: BoardInstance['serialBaudRate'];
+  boardOptions?: BoardInstance['boardOptions'];
+  spiffsFiles?: BoardInstance['spiffsFiles'];
+  sdFiles?: BoardInstance['sdFiles'];
+  libraries?: string[];
+  files: Array<{ name: string; content: string }>;
+  folders: string[];
+}
+
+/** A copied component: its part, properties and where it was (the paste
+ *  lands offset from there). Custom chips carry their sources in
+ *  properties, so copying properties copies the chip. */
+export interface ComponentClipboard {
+  metadataId: string;
+  x: number;
+  y: number;
+  properties: Record<string, unknown>;
+}
+
+export type CanvasClipboard =
+  | { kind: 'board'; board: BoardClipboard }
+  | { kind: 'component'; component: ComponentClipboard };
+
 interface SimulatorState {
   // ── Multi-board state ───────────────────────────────────────────────────
   boards: BoardInstance[];
@@ -1557,6 +1590,17 @@ interface SimulatorState {
     activeBoardId: string | null;
   }) => void;
   updateBoard: (boardId: string, updates: Partial<BoardInstance>) => void;
+  /** Turn a board 90 degrees clockwise and re-stamp its wire endpoints. */
+  rotateBoard: (boardId: string) => void;
+  /** The canvas clipboard: the last board or component copied (one slot,
+   *  last copy wins). Null = nothing copied yet. */
+  canvasClipboard: CanvasClipboard | null;
+  copyBoard: (boardId: string) => void;
+  copyComponent: (componentId: string) => void;
+  /** Place what canvasClipboard holds: a board to the right of `nearBoardId`
+   *  (or of the copied board), a component next to where it was copied.
+   *  Recorded for undo when it is a component. Returns what was created. */
+  pasteClipboard: (nearBoardId?: string) => { kind: 'board' | 'component'; id: string } | null;
   setBoardPosition: (pos: { x: number; y: number }, boardId?: string) => void;
   setActiveBoardId: (boardId: string) => void;
   /**
@@ -2521,6 +2565,169 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
       }));
     },
 
+    rotateBoard: (boardId: string) => {
+      const board = get().boards.find((b) => b.id === boardId);
+      if (!board) return;
+      const rotation = (normalizeRotation(board.rotation) + 90) % 360;
+      set((s) => ({
+        boards: s.boards.map((b) => (b.id === boardId ? { ...b, rotation } : b)),
+      }));
+      get().recalculateAllWirePositions();
+    },
+
+    canvasClipboard: null,
+
+    copyBoard: (boardId: string) => {
+      const board = get().boards.find((b) => b.id === boardId);
+      if (!board) return;
+      const editor = useEditorStore.getState();
+      const files = editor.getGroupFiles(board.activeFileGroupId);
+      // Deep copies: the clipboard must not alias objects the source board
+      // keeps editing after the copy.
+      const clone = <T,>(v: T): T => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
+      set({
+        canvasClipboard: {
+          kind: 'board',
+          board: {
+            boardKind: board.boardKind,
+            name: board.name,
+            x: board.x,
+            y: board.y,
+            rotation: normalizeRotation(board.rotation),
+            languageMode: board.languageMode,
+            serialBaudRate: board.serialBaudRate,
+            boardOptions: clone(board.boardOptions),
+            spiffsFiles: clone(board.spiffsFiles),
+            sdFiles: clone(board.sdFiles),
+            libraries: board.libraries ? [...board.libraries] : undefined,
+            files: files.map((f) => ({ name: f.name, content: f.content })),
+            folders: [...(editor.folderGroups[board.activeFileGroupId] ?? [])],
+          },
+        },
+      });
+    },
+
+    copyComponent: (componentId: string) => {
+      const c = get().components.find((x) => x.id === componentId);
+      if (!c) return;
+      set({
+        canvasClipboard: {
+          kind: 'component',
+          component: {
+            metadataId: c.metadataId,
+            x: c.x,
+            y: c.y,
+            properties: JSON.parse(JSON.stringify(c.properties ?? {})),
+          },
+        },
+      });
+    },
+
+    pasteClipboard: (nearBoardId?: string) => {
+      const clipboard = get().canvasClipboard;
+      if (!clipboard) return null;
+      if (clipboard.kind === 'component') {
+        const src = clipboard.component;
+        // Down-right of the original, stepping again while another part
+        // already sits there, so repeated pastes fan out.
+        const STEP = 30;
+        let x = src.x + STEP;
+        let y = src.y + STEP;
+        const taken = (px: number, py: number) =>
+          get().components.some((c) => Math.abs(c.x - px) < 4 && Math.abs(c.y - py) < 4);
+        for (let i = 0; i < 50 && taken(x, y); i++) {
+          x += STEP;
+          y += STEP;
+        }
+        // Same id scheme as createComponentFromMetadata (underscores keep the
+        // id safe inside SPICE names).
+        const prefix = src.metadataId.replace(/-/g, '_');
+        const id = `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+        get().recordAddComponent({
+          id,
+          metadataId: src.metadataId,
+          x,
+          y,
+          properties: JSON.parse(JSON.stringify(src.properties)),
+        } as Parameters<SimulatorState['recordAddComponent']>[0]);
+        return { kind: 'component', id };
+      }
+      const clip = clipboard.board;
+      const near = nearBoardId ? get().boards.find((b) => b.id === nearBoardId) : undefined;
+      // To the right of the anchor board with a gap, stepping further right
+      // while that spot overlaps another board, so repeated pastes line up
+      // instead of stacking on one point.
+      const GAP = 40;
+      const anchor = boardBox(
+        near ?? { boardKind: clip.boardKind, x: clip.x, y: clip.y, rotation: clip.rotation },
+      );
+      const pasted = { boardKind: clip.boardKind, x: 0, y: 0, rotation: clip.rotation };
+      const place = (left: number) => {
+        // left = rotated box's left edge; (x, y) = unrotated top-left.
+        const box = boardBox({ ...pasted, x: 0, y: 0 });
+        pasted.x = left - box.left;
+        pasted.y = anchor.top - box.top;
+      };
+      // Occupied areas: every board, plus every component's laid-out box (a
+      // part has no static size; its wrapper's offset box is what it covers).
+      const occupied = [
+        ...get().boards.map((b) => boardBox(b)),
+        ...get().components.flatMap((c) => {
+          const el = document.getElementById(c.id);
+          const wrap = (el?.closest('.dynamic-component-wrapper') as HTMLElement | null) ?? el;
+          if (!wrap) return [];
+          return [{ left: c.x, top: c.y, w: wrap.offsetWidth, h: wrap.offsetHeight }];
+        }),
+      ];
+      const overlaps = () => {
+        const p = boardBox(pasted);
+        return occupied.some(
+          (o) =>
+            p.left < o.left + o.w &&
+            o.left < p.left + p.w &&
+            p.top < o.top + o.h &&
+            o.top < p.top + p.h,
+        );
+      };
+      let left = anchor.left + anchor.w + GAP;
+      place(left);
+      for (let i = 0; i < 40 && overlaps(); i++) {
+        left += GAP;
+        place(left);
+      }
+      const x = Math.round(pasted.x);
+      const y = Math.round(pasted.y);
+      const id = get().addBoard(clip.boardKind as BoardKind, x, y);
+      const patch: Partial<BoardInstance> = {
+        rotation: clip.rotation || undefined,
+        languageMode: clip.languageMode,
+        serialBaudRate: clip.serialBaudRate,
+        boardOptions: clip.boardOptions,
+        spiffsFiles: clip.spiffsFiles,
+        sdFiles: clip.sdFiles,
+        libraries: clip.libraries,
+      };
+      if (clip.name && clip.name.trim()) patch.name = `${clip.name} (copy)`;
+      set((s) => ({
+        boards: s.boards.map((b) => (b.id === id ? { ...b, ...patch } : b)),
+      }));
+      // The new board's code: addBoard seeded its group with the kind's
+      // default sketch; replace it with the copied files and folders.
+      const gid = get().boards.find((b) => b.id === id)?.activeFileGroupId ?? `group-${id}`;
+      const editor = useEditorStore.getState();
+      if (clip.files.length > 0) {
+        editor.deleteFileGroup(gid);
+        editor.createFileGroup(gid, clip.files);
+      }
+      if (clip.folders.length > 0) {
+        useEditorStore.setState((s) => ({
+          folderGroups: { ...s.folderGroups, [gid]: [...clip.folders] },
+        }));
+      }
+      get().setActiveBoardId(id);
+      return { kind: 'board', id };
+    },
+
     loadProjectState: (payload) => {
       const {
         stopSimulation,
@@ -2544,6 +2751,7 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
         const patch: Partial<BoardInstance> = {};
         if (b.languageMode && b.languageMode !== 'arduino') patch.languageMode = b.languageMode;
         if (b.name && b.name.trim()) patch.name = b.name;
+        if (b.rotation) patch.rotation = normalizeRotation(b.rotation);
         // P2.4 — restore per-board persisted fields that ride in boards_json.
         if (b.boardOptions) patch.boardOptions = b.boardOptions;
         if (b.spiffsFiles) patch.spiffsFiles = b.spiffsFiles;
@@ -4258,8 +4466,14 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
         // rendered directly without that wrapper, so no offset.
         const compX = component ? component.x + 6 : board ? board.x : state.boardPosition.x;
         const compY = component ? component.y + 6 : board ? board.y : state.boardPosition.y;
-        // Boards never rotate; components carry their angle in properties.rotation.
-        const rotation = component ? Number(component.properties?.rotation) || 0 : 0;
+        // Components carry their angle in properties.rotation; boards in
+        // board.rotation, turning about their footprint (no wrapper).
+        const rotation = component
+          ? Number(component.properties?.rotation) || 0
+          : board
+            ? normalizeRotation(board.rotation)
+            : 0;
+        const pivot = !component && board ? boardSize(board.boardKind) : undefined;
 
         const updatedWires = state.wires.map((wire) => {
           const updated = { ...wire };
@@ -4270,11 +4484,19 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
               compX,
               compY,
               rotation,
+              pivot,
             );
             if (pos) updated.start = { ...wire.start, x: pos.x, y: pos.y };
           }
           if (wire.end.componentId === componentId) {
-            const pos = calculatePinPosition(componentId, wire.end.pinName, compX, compY, rotation);
+            const pos = calculatePinPosition(
+              componentId,
+              wire.end.pinName,
+              compX,
+              compY,
+              rotation,
+              pivot,
+            );
             if (pos) updated.end = { ...wire.end, x: pos.x, y: pos.y };
           }
           return updated;
@@ -4328,13 +4550,18 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
           : startBoard
             ? startBoard.y
             : state.boardPosition.y;
-        const startRotation = startComp ? Number(startComp.properties?.rotation) || 0 : 0;
+        const startRotation = startComp
+          ? Number(startComp.properties?.rotation) || 0
+          : startBoard
+            ? normalizeRotation(startBoard.rotation)
+            : 0;
         const startPos = calculatePinPosition(
           wire.start.componentId,
           wire.start.pinName,
           startX,
           startY,
           startRotation,
+          !startComp && startBoard ? boardSize(startBoard.boardKind) : undefined,
         );
         updated.start = startPos
           ? { ...wire.start, x: startPos.x, y: startPos.y }
@@ -4345,13 +4572,18 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => {
         const endBoard = state.boards.find((b) => b.id === wire.end.componentId);
         const endX = endComp ? endComp.x + 6 : endBoard ? endBoard.x : state.boardPosition.x;
         const endY = endComp ? endComp.y + 6 : endBoard ? endBoard.y : state.boardPosition.y;
-        const endRotation = endComp ? Number(endComp.properties?.rotation) || 0 : 0;
+        const endRotation = endComp
+          ? Number(endComp.properties?.rotation) || 0
+          : endBoard
+            ? normalizeRotation(endBoard.rotation)
+            : 0;
         const endPos = calculatePinPosition(
           wire.end.componentId,
           wire.end.pinName,
           endX,
           endY,
           endRotation,
+          !endComp && endBoard ? boardSize(endBoard.boardKind) : undefined,
         );
         updated.end = endPos
           ? { ...wire.end, x: endPos.x, y: endPos.y }
