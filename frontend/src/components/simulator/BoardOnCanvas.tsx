@@ -2,7 +2,7 @@ import React from 'react';
 import { useSimulatorStore } from '../../store/useSimulatorStore';
 import { isBoardSeated } from '../../utils/socketSnap';
 import { getProBoard } from '../../lib/proBoardRegistry';
-import type { BoardInstance } from '../../types/board';
+import type { BoardInstance, BoardLedVisuals } from '../../types/board';
 import { ArduinoUno } from '../velxio-components/ArduinoUno';
 import { ArduinoNano } from '../velxio-components/ArduinoNano';
 import { ArduinoMega } from '../velxio-components/ArduinoMega';
@@ -39,7 +39,9 @@ import { boardBox, boardSize, normalizeRotation } from '../../utils/boardGeometr
 interface BoardOnCanvasProps {
   board: BoardInstance;
   running: boolean;
-  led13?: boolean;
+  /** The on-board LEDs' visual state, keyed by LED id (BOARD_ONBOARD_LEDS),
+   * polarity already applied: `led: true` is a lit user LED. */
+  onboardLeds?: BoardLedVisuals;
   isActive?: boolean;
   /** When false, the pin overlay is hidden — keeps the canvas uncluttered when
    * the user isn't hovering, isn't selecting, and isn't actively wiring. */
@@ -58,7 +60,7 @@ interface BoardOnCanvasProps {
 export const BoardOnCanvas = ({
   board,
   running,
-  led13 = false,
+  onboardLeds,
   isActive = false,
   showPins = true,
   wiring = false,
@@ -70,6 +72,8 @@ export const BoardOnCanvas = ({
   zoom = 1,
 }: BoardOnCanvasProps) => {
   const { id, boardKind, x, y } = board;
+  // The AVR elements take one boolean for their single LED.
+  const led13 = onboardLeds?.led === true;
   const size = boardSize(boardKind);
   const rotation = normalizeRotation(board.rotation);
   // Canvas-space box of the rotated board (status dot anchors to it).
@@ -159,7 +163,7 @@ export const BoardOnCanvas = ({
       case 'esp32-c3':
       case 'xiao-esp32-c3':
       case 'aitewinrobot-esp32c3-supermini':
-        return <Esp32 id={id} x={x} y={y} boardKind={boardKind} />;
+        return <Esp32 id={id} x={x} y={y} boardKind={boardKind} onboardLeds={onboardLeds} />;
       case 'stm32-bluepill':
         return <Stm32BluePill id={id} x={x} y={y} />;
       case 'stm32-blackpill':
