@@ -973,6 +973,37 @@ function applyPinPwm(pm: PinManager, pin: number, dutyPct: number, freqHz?: numb
 }
 
 /**
+ * Listeners for the decoded WS2812 frames of one board, keyed by board id:
+ * the LED soldered ON the board (the S3 DevKitC-1's RGB on GPIO48, the C3
+ * DevKitM-1's on GPIO8) is lit from here by the canvas. Deliberately not
+ * Esp32BridgeShim.subscribeWs2812: that is a part's claim on a pin, one sink
+ * per pin and the last caller wins, so an on-board LED registered through it
+ * would either take the frames from a strip the user wired to the same GPIO
+ * or lose its own to that strip. Both deserve the frame: on the DevKitC-1
+ * GPIO48 feeds the RGB LED's DIN and the header pin alike.
+ */
+const boardWs2812Observers = new Map<
+  string,
+  Set<(pin: number, pixels: Ws2812Pixel[]) => void>
+>();
+
+export function observeBoardWs2812(
+  boardId: string,
+  fn: (pin: number, pixels: Ws2812Pixel[]) => void,
+): () => void {
+  let set = boardWs2812Observers.get(boardId);
+  if (!set) {
+    set = new Set();
+    boardWs2812Observers.set(boardId, set);
+  }
+  set.add(fn);
+  return () => {
+    set.delete(fn);
+    if (set.size === 0) boardWs2812Observers.delete(boardId);
+  };
+}
+
+/**
  * A decoded WS2812 frame from the engine's RMT peripheral.
  *
  * Two destinations, because there are two kinds of NeoPixel on the canvas:
@@ -989,6 +1020,7 @@ function makeWs2812Handler(boardId: string) {
     if (pin != null) {
       const shim = simulatorMap.get(boardId);
       if (shim instanceof Esp32BridgeShim) shim.publishWs2812(pin, pixels);
+      boardWs2812Observers.get(boardId)?.forEach((fn) => fn(pin, pixels));
     }
     const eventTarget = document.getElementById(`ws2812-${boardId}-${channel}`);
     if (eventTarget) {

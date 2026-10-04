@@ -3,7 +3,11 @@ import {
   getEsp32Bridge,
   getBoardBridge,
   getBoardSimulator,
+  getBoardPinManager,
+  observeBoardWs2812,
 } from '../../store/useSimulatorStore';
+import { attachOnboardLeds, sameLedVisual } from '../../simulation/onboardLeds';
+import type { BoardLedVisuals } from '../../types/board';
 import { getBoardBuiltins, getProBoard } from '../../lib/proBoardRegistry';
 import { useElectricalStore } from '../../store/useElectricalStore';
 import { openDeviceGateway } from '../../lib/openDeviceGateway';
@@ -435,7 +439,7 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
 
   // Board built-in LED states (pin 13 for AVR, GPIO25 for RP2040, etc.)
   // Tracks directly from pinManager — independent of any led-builtin component.
-  const [boardLedStates, setBoardLedStates] = useState<Record<string, boolean>>({});
+  const [boardLedStates, setBoardLedStates] = useState<Record<string, BoardLedVisuals>>({});
 
   // Board context menu (right-click)
   const [boardContextMenu, setBoardContextMenu] = useState<{
@@ -1465,40 +1469,60 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
     };
   }, [components, wires, boards, pinManager, updateComponentState, registry]);
 
-  // Board built-in LED: subscribe directly to pinManager for the LED pin of each board.
-  // This works even when no external led-builtin component exists (e.g. basic Blink example).
+  // Board built-in LEDs: each board's declared LEDs (BOARD_ONBOARD_LEDS, pin
+  // and polarity per kind) follow that board's own pads and WS2812 frames.
+  // This works even when no external led-builtin component exists (e.g. basic
+  // Blink example). It used to watch pin 13 for every kind it had no case for,
+  // which is why no ESP32 ever lit (issue #374), and it watched it on the
+  // flat store PinManager, which is the ACTIVE board's: a second board's LED
+  // mirrored the first board's pin.
   useEffect(() => {
     if (!pinManager) return;
     const unsubs: (() => void)[] = [];
 
     boards.forEach((board) => {
-      // Determine which GPIO pin drives the board's built-in LED
-      let ledPin: number;
-      switch (board.boardKind) {
-        case 'raspberry-pi-pico':
-        case 'pi-pico-w':
-        case 'nano-rp2040':
-          ledPin = 25; // GPIO25
-          break;
-        case 'attiny85':
-          ledPin = 1; // PB1 (Digispark convention)
-          break;
-        default:
-          ledPin = 13; // Pin 13 for Arduino Uno/Nano/Mega
-      }
-
+      const pm = getBoardPinManager(board.id) ?? pinManager;
       unsubs.push(
-        pinManager.onPinChange(ledPin, (_pin, state) => {
-          setBoardLedStates((prev) => {
-            if (prev[board.id] === state) return prev;
-            return { ...prev, [board.id]: state };
-          });
-        }),
+        attachOnboardLeds(
+          board.boardKind,
+          {
+            onPinChange: (pin, cb) => pm.onPinChange(pin, cb),
+            getPinState: (pin) => pm.getPinState(pin),
+            getOutputPins: () => pm.getOutputPins(),
+            observeWs2812: (pin, sink) =>
+              observeBoardWs2812(board.id, (framePin, pixels) => {
+                if (framePin === pin) sink(pixels);
+              }),
+          },
+          (ledId, visual) => {
+            setBoardLedStates((prev) => {
+              if (sameLedVisual(prev[board.id]?.[ledId], visual)) return prev;
+              return { ...prev, [board.id]: { ...prev[board.id], [ledId]: visual } };
+            });
+          },
+        ),
       );
     });
 
     return () => unsubs.forEach((u) => u());
   }, [boards, pinManager]);
+
+  // Stop is a power cut, and an LED with no power is dark whatever its pad
+  // was left at. The hard reset stopBoard runs reports every pad that was
+  // HIGH as LOW, which an active-LOW LED would read as "lit", and a pad left
+  // LOW reports nothing at all; the render below also hides a stopped
+  // board's LEDs, so neither shows for the frame between the two.
+  useEffect(() => {
+    setBoardLedStates((prev) => {
+      let next: Record<string, BoardLedVisuals> | null = null;
+      for (const board of boards) {
+        if (board.running || !prev[board.id]) continue;
+        next ??= { ...prev };
+        delete next[board.id];
+      }
+      return next ?? prev;
+    });
+  }, [boards]);
 
   // ESP32 input components: forward button presses and potentiometer values to QEMU
   useEffect(() => {
@@ -3403,7 +3427,7 @@ export const SimulatorCanvas = ({ headerSlot }: SimulatorCanvasProps = {}) => {
                   isActive={isActive}
                   showPins={showPins}
                   wiring={wireInProgress}
-                  led13={Boolean(boardLedStates[board.id])}
+                  onboardLeds={board.running ? boardLedStates[board.id] : undefined}
                   onMouseEnter={() => setHoveredBoardId(board.id)}
                   onMouseLeave={() =>
                     setHoveredBoardId((curr) => (curr === board.id ? null : curr))
